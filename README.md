@@ -1,36 +1,166 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://github.com/vercel/next.js/tree/canary/packages/create-next-app).
+# APlus Learn
 
-## Getting Started
+A Canada-focused tutoring marketplace. Families search for tutors by the exact
+provincial course on their child's timetable — MHF4U, not "math" — compare
+verified tutors, message them free, and book lessons online or in person.
 
-First, run the development server:
+Built as a single Next.js application: frontend, API, business logic and
+database access in one repository, with no separate backend.
+
+---
+
+## Quick start
+
+Requires **Node 20+** and a **MongoDB** instance (local is fine).
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm install
+cp .env.example .env.local     # then set AUTH_SECRET — see below
+npm run seed                   # realistic Ontario marketplace data
+npm run dev                    # http://localhost:3000
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Generate a session signing key:
 
-You can start editing the page by modifying `app/page.js`. The page auto-updates as you edit the file.
+```bash
+openssl rand -base64 48
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+### Seeded accounts
 
-## Learn More
+All use the password `AplusLearn2024!`
 
-To learn more about Next.js, take a look at the following resources:
+| Role | Email |
+|---|---|
+| Administrator | `admin@apluslearn.ca` |
+| Parent | `jennifer.chen@example.com` |
+| Tutor | `priya.sharma@example.com` |
+| Student (self-serve) | `nadia.petrov@example.com` |
+| Tutor awaiting approval | `james.oconnor@example.com` |
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+The seed creates 12 approved tutors, 38 real Ontario courses, 54 bookings, 18
+written reviews, live conversations, an open tutor request and one application
+sitting in the admin review queue.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+---
 
-## Deploy on Vercel
+## Scripts
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+| Command | What it does |
+|---|---|
+| `npm run dev` | Development server |
+| `npm run build` | Production build |
+| `npm run start` | Serve the production build |
+| `npm run lint` | ESLint, including the React Compiler rules |
+| `npm run seed` | Wipe and reseed the database |
+| `npm run seed:keep` | Add missing seed data without wiping |
+| `npm run qa` | End-to-end API test suite against a running dev server |
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+`npm run qa` exercises the full parent, tutor and admin journeys over real
+HTTP — including the authorization checks that must *fail*. Run `npm run dev`
+in one terminal and `npm run qa` in another.
+
+---
+
+## Architecture
+
+```
+Request
+  ↓
+Route handler          src/app/api/**/route.js      thin; delegates everything
+  ↓
+routeHandler pipeline  src/lib/api/handler.js       auth → role → permission → validation
+  ↓
+Service                src/services/*.service.js    all business logic lives here
+  ↓
+Model                  src/models/*.js              Mongoose schemas and indexes
+  ↓
+MongoDB
+```
+
+```
+src/
+├── app/
+│   ├── (public)/      marketplace, marketing, SEO landing pages
+│   ├── (auth)/        login, register, verification, password reset
+│   ├── (dashboard)/   parent & student area
+│   ├── tutor/         tutor workspace
+│   ├── admin/         admin console
+│   └── api/           100 route handlers
+├── components/
+│   ├── ui/            18 design-system primitives
+│   └── …              feature components by domain
+├── lib/
+│   ├── api/           request pipeline, typed errors, response envelope
+│   ├── auth/          sessions, password hashing, guards
+│   ├── booking/       pricing, cancellation policy, slot generation
+│   ├── matching/      tutor ↔ request scoring
+│   ├── search/        query construction
+│   ├── security/      rate limiting, input sanitising
+│   └── db/            cached MongoDB connection
+├── services/          19 domain services + external provider abstractions
+├── models/            14 model files
+└── constants/         roles, permissions, domain enums, platform defaults
+```
+
+### Principles the code holds to
+
+**Business rules live in one place.** Pricing is only ever computed by
+`lib/booking/pricing.js`; every cancellation — student, tutor, admin, dispute —
+resolves through `lib/booking/policy.js`. There is no second implementation to
+drift.
+
+**The client supplies intent, never state.** A booking request carries who,
+what and when. Prices, commission and status are derived server-side from
+stored data. The QA suite asserts that an injected `price` or `status` is
+ignored.
+
+**Authorization is structural.** `isSearchable` is derived and gates every
+public tutor query, so an unapproved profile cannot appear in search regardless
+of what else is true. Ownership is always checked against the loaded database
+record, never against a request field.
+
+**Privacy is the default.** Public pages show a first name and last initial.
+A learner's surname is masked from tutors unless a parent opts in. An
+in-person address is released only to the two parties, only once the lesson is
+confirmed. Verification documents are stored outside anything publicly
+reachable and served only through an audited admin route.
+
+---
+
+## External services
+
+Every integration sits behind an interface with a working development
+implementation, so the application is fully functional with no third-party
+credentials:
+
+| Service | Development fallback | Production |
+|---|---|---|
+| Payments | `MockPaymentProvider` — models every state transition | Stripe Connect |
+| Email | `ConsoleEmailProvider` — prints links to the server log | Any transactional provider |
+| OAuth | Local identity (non-production only) | Google / Apple |
+| Meetings | Deterministic room links | Zoom / Meet / Teams |
+| Geocoding | Bundled Canadian city & FSA table | Maps provider |
+| Document storage | Private local directory | Object storage |
+
+Connecting a real provider means implementing the interface and returning it
+from the corresponding `get*Provider()`. No UI or service code changes.
+
+**Test cards** (development payment provider): `4242 4242 4242 4242` succeeds;
+any number ending `0002` exercises the declined-card path.
+
+---
+
+## Documentation
+
+- [`docs/Project.md`](docs/Project.md) — the original requirement document
+- [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) — coverage matrix mapping every
+  requirement to its implementation, with status and known limitations
+
+---
+
+## Tech
+
+Next.js 16 (App Router, Turbopack) · React 19.2 with the React Compiler ·
+JavaScript only · Tailwind CSS v4 · MongoDB with Mongoose 9 · Zod 4 ·
+jose · bcrypt · motion
