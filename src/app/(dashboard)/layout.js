@@ -1,6 +1,7 @@
 import { enforceRole } from "@/lib/auth/guards";
 import { navForRole, LEARNER_ROLES } from "@/constants";
 import { DashboardShell } from "@/components/layout/DashboardShell";
+import { getAppConfig } from "@/services/settings.service";
 import { unreadNotificationCount } from "@/services/notification.service";
 import { unreadMessageCount } from "@/services/message.service";
 import { connectToDatabase } from "@/lib/db/connect";
@@ -16,14 +17,16 @@ export default async function DashboardLayout({ children }) {
   const user = await enforceRole(LEARNER_ROLES, "/dashboard");
   await connectToDatabase();
 
-  const [unreadNotifications, unreadMessages] = await Promise.all([
+  const [unreadNotifications, unreadMessages, config] = await Promise.all([
     unreadNotificationCount(user.id),
     unreadMessageCount(user.id),
+    getAppConfig(),
   ]);
 
   return (
     <DashboardShell
-      items={navForRole(user.role)}
+      branding={config.branding}
+      items={navForRole(user.role, config.features)}
       user={{
         id: user.id,
         firstName: user.firstName,

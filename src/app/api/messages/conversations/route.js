@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { routeHandler, ok, paginationMeta } from "@/lib/api";
 import { listConversations } from "@/services/message.service";
-import { PERMISSIONS } from "@/constants";
+import { PERMISSIONS, FEATURES } from "@/constants";
 
 export const GET = routeHandler(
   async ({ user, query }) => {
@@ -12,6 +12,7 @@ export const GET = routeHandler(
     return ok({ conversations: items }, { meta: paginationMeta({ page, pageSize, total }) });
   },
   {
+    feature: FEATURES.MESSAGING,
     permission: PERMISSIONS.MESSAGE_VIEW,
     querySchema: z.object({
       page: z.coerce.number().int().min(1).max(100).default(1),

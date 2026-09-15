@@ -13,7 +13,7 @@ import { TutorCard } from "@/components/tutor/TutorCard";
 import { PageHero } from "@/components/marketing/PageHero";
 import { Section, Faq } from "@/components/home/Sections";
 import { SERVICE_CITIES } from "@/lib/geo";
-import { SITE } from "@/constants";
+import { getAppConfig } from "@/services/settings.service";
 
 /**
  * Curriculum landing page (§29).
@@ -110,6 +110,8 @@ export default async function CourseLandingPage({ params }) {
     marketplaceStats(),
   ]);
 
+  const { branding } = await getAppConfig();
+
   const label = courseDoc.code ? `${courseDoc.code}` : courseDoc.name;
   const searchHref = courseDoc.code
     ? `/find-a-tutor?courseCode=${courseDoc.code}&province=${provinceDoc.code}`
@@ -123,7 +125,7 @@ export default async function CourseLandingPage({ params }) {
     {
       q: `How much does a ${label} tutor cost?`,
       a: rates.length
-        ? `${label} tutors on ${SITE.name} charge between ${formatMoney(minRate, { compact: true })} and ${formatMoney(maxRate, { compact: true })} an hour. Certified teachers and specialists sit at the higher end. The rate on a profile is exactly what you pay — there are no booking fees.`
+        ? `${label} tutors on ${branding.appName} charge between ${formatMoney(minRate, { compact: true })} and ${formatMoney(maxRate, { compact: true })} an hour. Certified teachers and specialists sit at the higher end. The rate on a profile is exactly what you pay — there are no booking fees.`
         : `Rates vary by tutor and qualification. Most Ontario tutors charge between $45 and $85 an hour, and the rate on a profile is exactly what you pay.`,
     },
     {
@@ -326,7 +328,7 @@ export default async function CourseLandingPage({ params }) {
             "@type": "Course",
             name: courseDoc.code ? `${courseDoc.code} — ${courseDoc.name}` : courseDoc.name,
             description: courseDoc.description,
-            provider: { "@type": "Organization", name: SITE.name },
+            provider: { "@type": "Organization", name: branding.appName },
             educationalLevel: `Grade ${courseDoc.gradeLevel}`,
             ...(courseDoc.code && { courseCode: courseDoc.code }),
           }),

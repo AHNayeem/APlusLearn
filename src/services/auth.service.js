@@ -1,11 +1,17 @@
 import "server-only";
 import { User, AuthToken, AUTH_TOKEN_PURPOSE, StudentProfile, TutorApplication } from "@/models";
-import { ROLES, USER_STATUS, AUTH_PROVIDERS, AUDIT_ACTIONS } from "@/constants";
+import {
+  ROLES,
+  USER_STATUS,
+  AUTH_PROVIDERS,
+  AUDIT_ACTIONS,
+  EMAIL_CATEGORIES,
+} from "@/constants";
 import { hashPassword, verifyPassword } from "@/lib/auth/password";
 import { createToken, hashToken } from "@/lib/auth/tokens";
 import { AppError, ConflictError, NotFoundError, AuthenticationError } from "@/lib/api/errors";
 import { toPlain } from "@/lib/utils/serialize";
-import { sendEmail, emailTemplates } from "./external/email-provider";
+import { sendEmail, brandedEmailTemplates } from "./external/email-provider";
 import { getOAuthProvider } from "./external/oauth-provider";
 import { recordAudit } from "./audit.service";
 
@@ -93,10 +99,15 @@ export async function sendVerificationEmail(user) {
 
   // Best-effort: a transient provider outage must not fail registration, and
   // "resend verification" is always available. The token is already stored.
-  await sendEmail({
-    to: user.email,
-    ...emailTemplates.verifyEmail({ firstName: user.firstName, token: raw }),
-  });
+  await sendEmail(
+    {
+      to: user.email,
+      ...(await brandedEmailTemplates()).verifyEmail({ firstName: user.firstName, token: raw }),
+    },
+    // Security mail has no platform switch and never will: an operator who
+    // could turn this off could lock every new member out of their account.
+    { category: EMAIL_CATEGORIES.SECURITY },
+  );
 
   return { sent: true };
 }
@@ -337,10 +348,13 @@ export async function requestPasswordReset(email) {
   // Deliberately not surfaced: a delivery error here would only ever happen
   // for an address that exists, which would turn this endpoint into an
   // account-enumeration oracle. It is logged instead.
-  await sendEmail({
-    to: user.email,
-    ...emailTemplates.resetPassword({ firstName: user.firstName, token: raw }),
-  });
+  await sendEmail(
+    {
+      to: user.email,
+      ...(await brandedEmailTemplates()).resetPassword({ firstName: user.firstName, token: raw }),
+    },
+    { category: EMAIL_CATEGORIES.SECURITY },
+  );
 
   return { sent: true };
 }
@@ -403,13 +417,18 @@ export async function changePassword(userId, { currentPassword, password }) {
  * job is to let a victim notice a takeover.
  */
 async function notifyPasswordChanged(user) {
-  await sendEmail({
-    to: user.email,
-    ...emailTemplates.passwordChanged({
-      firstName: user.firstName,
-      whenLabel: new Date().toLocaleString("en-CA", { timeZone: user.timeZone || "America/Toronto" }),
-    }),
-  });
+  await sendEmail(
+    {
+      to: user.email,
+      ...(await brandedEmailTemplates()).passwordChanged({
+        firstName: user.firstName,
+        whenLabel: new Date().toLocaleString("en-CA", {
+          timeZone: user.timeZone || "America/Toronto",
+        }),
+      }),
+    },
+    { category: EMAIL_CATEGORIES.SECURITY },
+  );
 }
 
 /** Invalidate every session for a user (logout everywhere, admin action). */

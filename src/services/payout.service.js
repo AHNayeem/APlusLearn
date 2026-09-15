@@ -15,7 +15,7 @@ import { toPlain } from "@/lib/utils/serialize";
 import { publicReference } from "@/lib/auth/tokens";
 import { formatMoney } from "@/lib/utils/format";
 import { getPaymentProvider } from "./external/payment-provider";
-import { emailTemplates } from "./external/email-provider";
+import { brandedEmailTemplates } from "./external/email-provider";
 import { getSettings } from "./settings.service";
 import { notify } from "./notification.service";
 import { recordAudit } from "./audit.service";
@@ -126,7 +126,7 @@ export async function applyAccountState(account, result) {
       body: "Your earnings will now be paid out automatically after each lesson's hold period.",
       href: "/tutor/payouts",
       channels: [NOTIFICATION_CHANNELS.IN_APP, NOTIFICATION_CHANNELS.EMAIL],
-      email: emailTemplates.payoutsEnabled({ firstName: tutor?.firstName ?? "there" }),
+      email: (await brandedEmailTemplates()).payoutsEnabled({ firstName: tutor?.firstName ?? "there" }),
     });
   } else if (!result.payoutsEnabled && wasEnabled) {
     // Payouts were switched off — the tutor needs to know why, and that their
@@ -141,7 +141,7 @@ export async function applyAccountState(account, result) {
           : "Our payments partner needs more information before your next payout.",
       href: "/tutor/payouts",
       channels: [NOTIFICATION_CHANNELS.IN_APP, NOTIFICATION_CHANNELS.EMAIL],
-      email: emailTemplates.payoutOnboardingRequired({
+      email: (await brandedEmailTemplates()).payoutOnboardingRequired({
         firstName: tutor?.firstName ?? "there",
         requirements: result.requirementsDue ?? [],
       }),
@@ -301,7 +301,7 @@ export async function updatePayoutStatus(payoutId, { status, note, scheduledFor 
       ? [NOTIFICATION_CHANNELS.IN_APP, NOTIFICATION_CHANNELS.EMAIL]
       : [NOTIFICATION_CHANNELS.IN_APP],
     email: paid
-      ? emailTemplates.payoutSent({
+      ? (await brandedEmailTemplates()).payoutSent({
           firstName: tutor?.firstName ?? "there",
           amountLabel: formatMoney(payout.amountCents),
           lessonCountLabel: `${payout.lessonCount} completed lesson${payout.lessonCount === 1 ? "" : "s"}`,

@@ -8,6 +8,8 @@
  *   npm run qa           # in another
  */
 
+import zlib from "node:zlib";
+
 const BASE = process.env.QA_BASE_URL || "http://localhost:3000";
 const PASSWORD = "AplusLearn2024!";
 
@@ -34,16 +36,18 @@ function section(title) {
 function createClient() {
   const cookies = new Map();
 
-  return async function request(path, { method = "GET", body, raw = false } = {}) {
-    const headers = { "Content-Type": "application/json" };
+  return async function request(path, { method = "GET", body, form, raw = false } = {}) {
+    // `fetch` sets its own multipart Content-Type with the boundary, so a
+    // FormData upload must not have one imposed on it.
+    const headers = form ? {} : { "Content-Type": "application/json" };
     if (cookies.size) {
       headers.Cookie = [...cookies].map(([k, v]) => `${k}=${v}`).join("; ");
     }
 
     const response = await fetch(`${BASE}${path}`, {
-      method,
+      method: form ? "POST" : method,
       headers,
-      body: body ? JSON.stringify(body) : undefined,
+      body: form ?? (body ? JSON.stringify(body) : undefined),
       redirect: "manual",
     });
 
@@ -86,6 +90,70 @@ async function login(client, email) {
   return res.payload.data.user;
 }
 
+/**
+ * A real PNG, built by hand.
+ *
+ * The branding upload validates the *bytes*, so a test that posts a Blob of
+ * text labelled `image/png` proves nothing about the happy path. This emits a
+ * structurally valid single-colour PNG with a correct IHDR and CRCs, so the
+ * server's own header walk reads the dimensions back out.
+ *
+ * `padToBytes` appends a trailing comment chunk, which is how the oversize
+ * case gets a file that is genuinely too large rather than merely claimed.
+ */
+function pngBytes(width, height, padToBytes = 0) {
+  const crcTable = [];
+  for (let n = 0; n < 256; n += 1) {
+    let c = n;
+    for (let k = 0; k < 8; k += 1) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    crcTable[n] = c >>> 0;
+  }
+  const crc32 = (buf) => {
+    let c = 0xffffffff;
+    for (const byte of buf) c = crcTable[(c ^ byte) & 0xff] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  };
+
+  const chunk = (type, data) => {
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(data.length);
+    const typed = Buffer.concat([Buffer.from(type, "ascii"), data]);
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(crc32(typed));
+    return Buffer.concat([length, typed, crc]);
+  };
+
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;   // bit depth
+  ihdr[9] = 2;   // truecolour
+  // Compression, filter and interlace all stay 0.
+
+  // One filter byte plus three channels per pixel, per row.
+  const raw = Buffer.alloc(height * (1 + width * 3), 0);
+  const idat = zlibDeflate(raw);
+
+  const parts = [
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk("IHDR", ihdr),
+    chunk("IDAT", idat),
+  ];
+
+  const base = Buffer.concat([...parts, chunk("IEND", Buffer.alloc(0))]);
+  if (padToBytes <= base.length) return base;
+
+  const padding = chunk("tEXt", Buffer.concat([
+    Buffer.from("Comment\0", "ascii"),
+    Buffer.alloc(padToBytes - base.length, 0x41),
+  ]));
+  return Buffer.concat([...parts, padding, chunk("IEND", Buffer.alloc(0))]);
+}
+
+function zlibDeflate(buffer) {
+  return zlib.deflateSync(buffer);
+}
+
 async function main() {
   console.log(`\nAPlus Learn QA → ${BASE}\n${"─".repeat(56)}`);
 
@@ -93,6 +161,9 @@ async function main() {
   const parent = createClient();
   const tutor = createClient();
   const admin = createClient();
+
+  /** Multipart POST carrying the admin session. */
+  const adminUpload = (path, form) => admin(path, { form });
 
   // --- Public access -------------------------------------------------------
   section("Public marketplace (no account)");
@@ -496,6 +567,333 @@ async function main() {
 
   const adminDisputes = await admin("/api/admin/disputes");
   check("admin lists disputes", adminDisputes.ok);
+
+
+  // --- Platform settings ---------------------------------------------------
+  //
+  // Settings decide branding, metadata, marketplace rules and which features
+  // exist, so this section checks all four things that must hold: only an
+  // administrator can write them, invalid values are refused server-side, a
+  // saved value actually reaches the public pages, and a disabled feature is
+  // refused by its API rather than merely hidden in the UI (§26, §35, §36).
+  section("Platform settings");
+
+  const settingsBefore = (await admin("/api/admin/settings")).payload.data.settings;
+  const tutorSlug = search.payload.data.tutors[0].slug;
+  const tutorProfileIdForFavourite = tutorId;
+
+  // Authorization — the page is admin-only, and so is every write.
+  const anonSettingsRead = await anon("/api/admin/settings");
+  check("anonymous cannot read settings", anonSettingsRead.status === 401);
+
+  const anonSettingsWrite = await anon("/api/admin/settings", {
+    method: "PATCH",
+    body: { branding: { appName: "Hijacked" } },
+  });
+  check("anonymous cannot write settings", anonSettingsWrite.status === 401);
+
+  const parentSettingsWrite = await parent("/api/admin/settings", {
+    method: "PATCH",
+    body: { branding: { appName: "Hijacked" } },
+  });
+  check("a parent cannot write settings", parentSettingsWrite.status === 403);
+
+  const tutorSettingsWrite = await tutor("/api/admin/settings", {
+    method: "PATCH",
+    body: { commissionPercent: 0 },
+  });
+  check("a tutor cannot write settings", tutorSettingsWrite.status === 403);
+
+  const parentBrandingUpload = await parent("/api/admin/settings/branding?asset=logo", {
+    method: "POST",
+  });
+  check("a parent cannot upload branding", parentBrandingUpload.status === 403);
+
+  // Validation — every bound is enforced on the server, whatever the form did.
+  const badColour = await admin("/api/admin/settings", {
+    method: "PATCH",
+    body: { theme: { primaryColor: "not-a-colour" } },
+  });
+  check("invalid colour rejected", badColour.status === 422);
+
+  // The primary brand always carries white text, so a pale primary is refused
+  // even though the same colour is perfectly usable as an accent tint.
+  const unreadablePrimary = await admin("/api/admin/settings", {
+    method: "PATCH",
+    body: { theme: { primaryColor: "#ffffe0" } },
+  });
+  check(
+    "a primary colour that cannot carry white text is rejected",
+    unreadablePrimary.status === 422,
+    `got ${unreadablePrimary.status}`,
+  );
+
+  const paleAccent = await admin("/api/admin/settings", {
+    method: "PATCH",
+    body: { theme: { accentColor: "#fe7b12" } },
+  });
+  check("the shipped accent passes its own rule", paleAccent.ok);
+
+  const invisibleAccent = await admin("/api/admin/settings", {
+    method: "PATCH",
+    body: { theme: { accentColor: "#7c7c7c" } },
+  });
+  check(
+    "an accent no text colour reads on is rejected",
+    invisibleAccent.status === 422,
+    `got ${invisibleAccent.status}`,
+  );
+
+  const darkCanvas = await admin("/api/admin/settings", {
+    method: "PATCH",
+    body: { theme: { canvasColor: "#111111" } },
+  });
+  check(
+    "a page background too dark for body text is rejected",
+    darkCanvas.status === 422,
+    `got ${darkCanvas.status}`,
+  );
+
+  const badEmail = await admin("/api/admin/settings", {
+    method: "PATCH",
+    body: { contact: { supportEmail: "not-an-email" } },
+  });
+  check("invalid support email rejected", badEmail.status === 422);
+
+  const badUrl = await admin("/api/admin/settings", {
+    method: "PATCH",
+    body: { social: { facebook: "javascript:alert(1)" } },
+  });
+  check("invalid social URL rejected", badUrl.status === 422);
+
+  const badCommission = await admin("/api/admin/settings", {
+    method: "PATCH",
+    body: { commissionPercent: 90 },
+  });
+  check("out-of-range commission rejected", badCommission.status === 422);
+
+  const badRateRange = await admin("/api/admin/settings", {
+    method: "PATCH",
+    body: { minHourlyRate: 200, maxHourlyRate: 50 },
+  });
+  check("a minimum rate above the maximum is rejected", badRateRange.status === 422);
+
+  const longName = await admin("/api/admin/settings", {
+    method: "PATCH",
+    body: { branding: { appName: "x".repeat(200) } },
+  });
+  check("over-long application name rejected", longName.status === 422);
+
+  // A rejected write changes nothing.
+  const afterRejections = (await admin("/api/admin/settings")).payload.data.settings;
+  check(
+    "rejected settings writes leave the document untouched",
+    afterRejections.branding.appName === settingsBefore.branding.appName &&
+      afterRejections.commissionPercent === settingsBefore.commissionPercent,
+  );
+
+  // Uploaded asset records cannot be forged through the JSON route — only the
+  // upload endpoint, which checks the bytes, can point at a stored file.
+  await admin("/api/admin/settings", {
+    method: "PATCH",
+    body: { branding: { logo: { storageKey: "../../etc/passwd", contentType: "image/png" } } },
+  });
+  const afterForgery = (await admin("/api/admin/settings")).payload.data.settings;
+  check(
+    "a branding asset cannot be injected through the settings route",
+    !afterForgery.branding.logo,
+  );
+
+  // Branding uploads are validated from the file's own bytes, not its name.
+  const notAnImage = new FormData();
+  notAnImage.append(
+    "file",
+    new Blob(["<?php system($_GET['c']); ?>"], { type: "image/png" }),
+    "logo.png",
+  );
+  const disguised = await adminUpload("/api/admin/settings/branding?asset=logo", notAnImage);
+  check(
+    "a non-image disguised as a PNG is refused",
+    disguised.status === 422,
+    `got ${disguised.status}`,
+  );
+
+  const svgUpload = new FormData();
+  svgUpload.append(
+    "file",
+    new Blob(['<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'], {
+      type: "image/svg+xml",
+    }),
+    "logo.svg",
+  );
+  const svgRefused = await adminUpload("/api/admin/settings/branding?asset=logo", svgUpload);
+  check("an SVG logo is refused", svgRefused.status === 422);
+
+  const oversized = new FormData();
+  oversized.append("file", new Blob([pngBytes(64, 64, 700 * 1024)], { type: "image/png" }), "big.png");
+  const tooBig = await adminUpload("/api/admin/settings/branding?asset=logo", oversized);
+  check("an oversized logo is refused", tooBig.status === 422, `got ${tooBig.status}`);
+
+  const tinyFavicon = new FormData();
+  tinyFavicon.append("file", new Blob([pngBytes(8, 8)], { type: "image/png" }), "tiny.png");
+  const tooSmall = await adminUpload("/api/admin/settings/branding?asset=favicon", tinyFavicon);
+  check("an undersized favicon is refused", tooSmall.status === 422, `got ${tooSmall.status}`);
+
+  const nonSquare = new FormData();
+  nonSquare.append("file", new Blob([pngBytes(64, 32)], { type: "image/png" }), "wide.png");
+  const notSquare = await adminUpload("/api/admin/settings/branding?asset=favicon", nonSquare);
+  check("a non-square favicon is refused", notSquare.status === 422, `got ${notSquare.status}`);
+
+  const goodLogo = new FormData();
+  goodLogo.append("file", new Blob([pngBytes(240, 64)], { type: "image/png" }), "logo.png");
+  const logoUpload = await adminUpload("/api/admin/settings/branding?asset=logo", goodLogo);
+  check("a valid logo uploads", logoUpload.ok, JSON.stringify(logoUpload.payload?.error ?? {}));
+  check(
+    "the stored logo records its real dimensions",
+    logoUpload.payload?.data?.settings?.branding?.logo?.width === 240 &&
+      logoUpload.payload?.data?.settings?.branding?.logo?.height === 64,
+  );
+
+  // The asset is publicly readable — it is in the header of every page — but
+  // only through the setting's name, never a storage key.
+  const servedLogo = await anon("/api/branding/logo", { raw: true });
+  check("the logo is served publicly", servedLogo.status === 200);
+  check(
+    "the logo is served as an image and not sniffed",
+    servedLogo.headers.get("content-type") === "image/png" &&
+      servedLogo.headers.get("x-content-type-options") === "nosniff",
+  );
+
+  const bogusAsset = await anon("/api/branding/../../package.json", { raw: true });
+  check("an unknown branding asset is refused", bogusAsset.status === 404 || bogusAsset.status === 422);
+
+  const removeLogo = await admin("/api/admin/settings/branding?asset=logo", { method: "DELETE" });
+  check("a logo can be removed", removeLogo.ok && !removeLogo.payload.data.settings.branding.logo);
+
+  const goneLogo = await anon("/api/branding/logo", { raw: true });
+  check("a removed logo stops being served", goneLogo.status === 404);
+
+  // Branding reaches the public pages, and page-specific SEO still wins.
+  const renamed = await admin("/api/admin/settings", {
+    method: "PATCH",
+    body: { branding: { appName: "QA Tutoring Co" }, seo: { titleSuffix: "QA Suffix" } },
+  });
+  check("branding saves", renamed.ok);
+
+  const homeHtml = await (await fetch(`${BASE}/`)).text();
+  check("the configured application name reaches the public site", homeHtml.includes("QA Tutoring Co"));
+
+  const tutorPageHtml = await (await fetch(`${BASE}/tutors/${tutorSlug}`)).text();
+  check(
+    "a tutor page keeps its own title and only takes the configured suffix",
+    tutorPageHtml.includes("QA Suffix") && !tutorPageHtml.includes("<title>QA Tutoring Co</title>"),
+  );
+
+  // Theme colours become real CSS variables on the page.
+  await admin("/api/admin/settings", { method: "PATCH", body: { theme: { primaryColor: "#7c2d12" } } });
+  const themedHtml = await (await fetch(`${BASE}/`)).text();
+  check("a configured colour is emitted as design tokens", themedHtml.includes("--color-brand-600:#7c2d12"));
+  // `data-href` is React's marker for a hoisted style. Asserting it — rather
+  // than just that the CSS is present somewhere — pins the mechanism: a root
+  // layout that authors its own <head> would also serve this CSS, and would
+  // then have React reconcile the whole head away (Tailwind's stylesheet
+  // included) on hydration.
+  check(
+    "the theme override is hoisted by React, not written into a hand-made head",
+    /data-href="aplus-theme"/.test(themedHtml) && !/<head><style/.test(themedHtml),
+  );
+  check(
+    "the application stylesheet is linked",
+    /<link rel="stylesheet" href="\/_next\/static\//.test(themedHtml),
+  );
+
+  // Indexing is a deployment-level switch an operator can flip.
+  await admin("/api/admin/settings", { method: "PATCH", body: { seo: { allowIndexing: false } } });
+  const noIndexHtml = await (await fetch(`${BASE}/`)).text();
+  check("indexing can be switched off", /noindex/i.test(noIndexHtml));
+  await admin("/api/admin/settings", { method: "PATCH", body: { seo: { allowIndexing: true } } });
+
+  // Feature flags — the API must enforce them, not just the navigation.
+  const favouritesOn = await parent("/api/favourites");
+  check("favourites work while enabled", favouritesOn.ok);
+
+  await admin("/api/admin/settings", { method: "PATCH", body: { features: { favourites: false } } });
+  const favouritesOff = await parent("/api/favourites");
+  check(
+    "a disabled feature is refused through the API, not just hidden",
+    favouritesOff.status === 403,
+    `got ${favouritesOff.status}`,
+  );
+  const favouriteWriteOff = await parent("/api/favourites", {
+    method: "POST",
+    body: { tutorProfileId: tutorProfileIdForFavourite },
+  });
+  check("a disabled feature refuses writes too", favouriteWriteOff.status === 403);
+
+  await admin("/api/admin/settings", { method: "PATCH", body: { features: { favourites: true } } });
+  const favouritesBack = await parent("/api/favourites");
+  check("re-enabling a feature restores it", favouritesBack.ok);
+
+  await admin("/api/admin/settings", { method: "PATCH", body: { features: { messaging: false } } });
+  const messagesOff = await parent("/api/messages/conversations");
+  check("messaging can be switched off platform-wide", messagesOff.status === 403);
+  await admin("/api/admin/settings", { method: "PATCH", body: { features: { messaging: true } } });
+
+  await admin("/api/admin/settings", { method: "PATCH", body: { features: { reviews: false } } });
+  const reviewsOff = await parent("/api/reviews");
+  check("reviews can be switched off platform-wide", reviewsOff.status === 403);
+  await admin("/api/admin/settings", { method: "PATCH", body: { features: { reviews: true } } });
+
+  // A lesson mode is enforced in the booking service, not on the route, so it
+  // holds for every path that creates a booking. The assertion is on the code,
+  // not just the status: a 422 for some other reason would prove nothing.
+  await admin("/api/admin/settings", { method: "PATCH", body: { features: { onlineLessons: false } } });
+  const onlineBookingOff = await parent("/api/bookings", {
+    method: "POST",
+    body: {
+      tutorProfileId: tutorId,
+      studentProfileId: studentId,
+      courseId,
+      mode: "ONLINE",
+      startAt: slotStart,
+      durationMinutes: 60,
+      meetingProvider: "ZOOM",
+    },
+  });
+  check(
+    "a disabled lesson mode is refused when a booking is created",
+    onlineBookingOff.payload?.error?.code === "LESSON_MODE_UNAVAILABLE",
+    `got ${onlineBookingOff.status} ${onlineBookingOff.payload?.error?.code}`,
+  );
+  await admin("/api/admin/settings", { method: "PATCH", body: { features: { onlineLessons: true } } });
+
+  // Settings changes are auditable, with the old value beside the new one.
+  const auditedChange = await admin("/api/admin/settings", {
+    method: "PATCH",
+    body: { branding: { tagline: "Audited tagline" } },
+  });
+  check("an audited change succeeds", auditedChange.ok);
+
+  // Restore everything this section changed, so a QA run is repeatable.
+  const restored = await admin("/api/admin/settings", {
+    method: "PATCH",
+    body: {
+      branding: {
+        appName: settingsBefore.branding.appName,
+        tagline: settingsBefore.branding.tagline,
+      },
+      seo: { titleSuffix: settingsBefore.seo.titleSuffix ?? "" },
+      theme: { primaryColor: settingsBefore.theme.primaryColor },
+    },
+  });
+  check("settings restore cleanly", restored.ok);
+
+  const finalSettings = (await admin("/api/admin/settings")).payload.data.settings;
+  check(
+    "settings persist exactly as written",
+    finalSettings.branding.appName === settingsBefore.branding.appName &&
+      finalSettings.theme.primaryColor === settingsBefore.theme.primaryColor,
+  );
 
   // --- External integrations ----------------------------------------------
   section("External integrations");

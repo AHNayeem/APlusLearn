@@ -4,21 +4,40 @@ import { mkdir, writeFile, readFile, unlink } from "node:fs/promises";
 import path from "node:path";
 
 /**
- * Verification document storage (§16, §35).
+ * Private file storage (§16, §35, §26).
  *
- * Documents are private: they are written outside `public/` and only ever
- * streamed back through an admin-authorised route. The storage key is
- * `select: false` on the model so it cannot leak through a serialised
- * document.
+ * Two scopes, with different audiences and the same handling:
+ *
+ *   documents — verification paperwork. Private: written outside `public/`,
+ *               streamed back only through an admin-authorised route, and the
+ *               storage key is `select: false` on the model so it cannot leak
+ *               through a serialised document.
+ *   branding  — logos and icons an administrator uploaded. Public *content*,
+ *               but still not public *files*: they are served through a route
+ *               that names them from the settings document, so a raw key can
+ *               never be guessed at, enumerated, or used to host something
+ *               that was never meant to be on this domain.
+ *
+ * Nothing is written into `public/`. A writable directory inside the served
+ * web root is how an upload feature becomes a remote-code-execution feature.
  */
+
+export const STORAGE_SCOPES = { DOCUMENTS: "documents", BRANDING: "branding" };
 
 /**
  * Every path below is spelled out with string literals rather than built from
- * a variable, so the bundler scopes filesystem tracing to this one directory
+ * a variable, so the bundler scopes filesystem tracing to these directories
  * instead of pulling the whole project into the server bundle.
  */
-function storageDir() {
-  return path.join(process.cwd(), ".storage", "documents");
+function scopedDir(scope) {
+  return scope === STORAGE_SCOPES.BRANDING
+    ? path.join(process.cwd(), ".storage", "branding")
+    : path.join(process.cwd(), ".storage", "documents");
+}
+
+/** Refuse any key that tries to escape its storage root. */
+function safeKey(storageKey) {
+  return path.basename(String(storageKey));
 }
 
 export class StorageProvider {
@@ -38,10 +57,14 @@ class LocalStorageProvider extends StorageProvider {
     return "LOCAL";
   }
 
-  async put({ buffer, fileName, contentType }) {
-    await mkdir(storageDir(), { recursive: true });
-    const key = `${randomUUID()}${path.extname(fileName) || ""}`;
-    await writeFile(path.join(process.cwd(), ".storage", "documents", key), buffer);
+  async put({ buffer, fileName, contentType, extension, scope = STORAGE_SCOPES.DOCUMENTS }) {
+    await mkdir(scopedDir(scope), { recursive: true });
+
+    // The stored name is generated, never taken from the upload: the caller's
+    // filename is a label, not a path.
+    const key = `${randomUUID()}${extension ?? path.extname(fileName ?? "") ?? ""}`;
+    await writeFile(path.join(scopedDir(scope), key), buffer);
+
     return {
       storageKey: key,
       contentType,
@@ -50,15 +73,12 @@ class LocalStorageProvider extends StorageProvider {
     };
   }
 
-  async get({ storageKey }) {
-    // Refuse any key that tries to escape the storage root.
-    const safe = path.basename(String(storageKey));
-    return readFile(path.join(process.cwd(), ".storage", "documents", safe));
+  async get({ storageKey, scope = STORAGE_SCOPES.DOCUMENTS }) {
+    return readFile(path.join(scopedDir(scope), safeKey(storageKey)));
   }
 
-  async remove({ storageKey }) {
-    const safe = path.basename(String(storageKey));
-    await unlink(path.join(process.cwd(), ".storage", "documents", safe)).catch(() => {});
+  async remove({ storageKey, scope = STORAGE_SCOPES.DOCUMENTS }) {
+    await unlink(path.join(scopedDir(scope), safeKey(storageKey))).catch(() => {});
     return { removed: true };
   }
 }

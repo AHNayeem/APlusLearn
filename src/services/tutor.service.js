@@ -19,6 +19,7 @@ import {
   NOTIFICATION_TYPES,
   NOTIFICATION_CHANNELS,
   PAGE_SIZES,
+  EMAIL_CATEGORIES,
 } from "@/constants";
 import { NotFoundError, BusinessRuleError, ConflictError } from "@/lib/api/errors";
 import { toPlain, compact } from "@/lib/utils/serialize";
@@ -27,7 +28,7 @@ import { publicName } from "@/lib/utils/format";
 import { rateForCourse } from "@/lib/booking/pricing";
 import { geocode } from "./external/geocoding-provider";
 import { ONBOARDING_STEPS } from "@/models/TutorApplication";
-import { getEmailProvider, emailTemplates } from "./external/email-provider";
+import { sendEmail, brandedEmailTemplates } from "./external/email-provider";
 import { notify } from "./notification.service";
 import { recordAudit } from "./audit.service";
 import { refreshCourseTutorCounts } from "./curriculum.service";
@@ -289,10 +290,16 @@ export async function submitApplication(userId) {
 
   await createVerificationRecords(profile, application.data?.DOCUMENTS?.requestedBadges ?? []);
 
-  await getEmailProvider().send({
-    to: user.email,
-    ...emailTemplates.applicationSubmitted({ firstName: user.firstName }),
-  });
+  // Through `sendEmail`, not the provider directly: that is where the platform
+  // notification switches are applied and where a provider outage is absorbed
+  // instead of failing a submitted application (§26, §28).
+  await sendEmail(
+    {
+      to: user.email,
+      ...(await brandedEmailTemplates()).applicationSubmitted({ firstName: user.firstName }),
+    },
+    { category: EMAIL_CATEGORIES.APPLICATION },
+  );
 
   await notify({
     userId,
@@ -612,16 +619,19 @@ export async function reviewApplication(applicationId, { decision, message, gran
 
   const approved = decision === TUTOR_STATUS.APPROVED;
   if (user) {
-    await getEmailProvider().send({
-      to: user.email,
-      ...(approved
-        ? emailTemplates.applicationApproved({ firstName: user.firstName })
-        : emailTemplates.applicationNeedsAttention({
-            firstName: user.firstName,
-            message: message ?? "Please review your application.",
-            approved: false,
-          })),
-    });
+    await sendEmail(
+      {
+        to: user.email,
+        ...(approved
+          ? (await brandedEmailTemplates()).applicationApproved({ firstName: user.firstName })
+          : (await brandedEmailTemplates()).applicationNeedsAttention({
+              firstName: user.firstName,
+              message: message ?? "Please review your application.",
+              approved: false,
+            })),
+      },
+      { category: EMAIL_CATEGORIES.APPLICATION },
+    );
   }
 
   await notify({

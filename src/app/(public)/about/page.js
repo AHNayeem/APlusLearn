@@ -6,7 +6,7 @@ import { PageHero } from "@/components/marketing/PageHero";
 import { Section } from "@/components/home/Sections";
 import { Prose } from "@/components/marketing/PageHero";
 import { formatNumber } from "@/lib/utils/format";
-import { SITE } from "@/constants";
+import { getAppConfig } from "@/services/settings.service";
 
 export const metadata = {
   title: "About us",
@@ -19,7 +19,7 @@ export const revalidate = 3600;
 
 export default async function AboutPage() {
   await connectToDatabase();
-  const stats = await marketplaceStats();
+  const [stats, { contact }] = await Promise.all([marketplaceStats(), getAppConfig()]);
 
   return (
     <>
@@ -142,16 +142,16 @@ export default async function AboutPage() {
                   </p>
                   <div className="mt-4 space-y-1 text-sm">
                     <a
-                      href={`mailto:${SITE.supportEmail}`}
+                      href={`mailto:${contact.supportEmail}`}
                       className="block font-semibold text-brand-700 hover:underline"
                     >
-                      {SITE.supportEmail}
+                      {contact.supportEmail}
                     </a>
                     <a
-                      href={`tel:${SITE.supportPhone}`}
+                      href={`tel:${contact.supportPhone}`}
                       className="block text-brand-700/80 hover:underline"
                     >
-                      {SITE.supportPhone}
+                      {contact.supportPhone}
                     </a>
                   </div>
                 </CardBody>

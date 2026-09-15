@@ -9,7 +9,7 @@ import { useSubmit } from "@/hooks/useAsync";
 import { Button, Field, Input, Checkbox, FormErrorSummary, Alert } from "@/components/ui";
 import { OAuthButtons } from "@/components/layout/OAuthButtons";
 
-export function LoginForm() {
+export function LoginForm({ oauthProviders }) {
   const router = useRouter();
   const params = useSearchParams();
   const next = params.get("next");
@@ -91,7 +91,7 @@ export function LoginForm() {
         </Button>
       </form>
 
-      <OAuthButtons next={next} />
+      <OAuthButtons next={next} providers={oauthProviders} />
     </div>
   );
 }

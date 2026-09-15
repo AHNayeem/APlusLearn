@@ -188,14 +188,18 @@ export function Radio({ label, description, className, id, ...props }) {
 }
 
 /** Accessible toggle built on a real checkbox so forms and keyboards work. */
-export function Switch({ label, description, className, id, checked, ...props }) {
+export function Switch({ label, description, className, id, checked, disabled, ...props }) {
   const generated = useId();
   const switchId = id ?? generated;
 
   return (
     <label
       htmlFor={switchId}
-      className={cn("flex cursor-pointer items-start justify-between gap-4", className)}
+      className={cn(
+        "flex items-start justify-between gap-4",
+        disabled ? "cursor-not-allowed opacity-60" : "cursor-pointer",
+        className,
+      )}
     >
       <span className="min-w-0 text-sm">
         <span className="font-medium text-ink-800">{label}</span>
@@ -207,6 +211,7 @@ export function Switch({ label, description, className, id, checked, ...props })
           type="checkbox"
           role="switch"
           checked={checked}
+          disabled={disabled}
           className="peer sr-only"
           {...props}
         />

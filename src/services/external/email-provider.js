@@ -1,7 +1,9 @@
 import "server-only";
 import { SITE } from "@/constants/config";
+import { EMAIL_CATEGORIES, EMAIL_CATEGORY_SETTING } from "@/constants";
 import { requireIntegration } from "@/lib/config/env";
-import { emailTemplates } from "./email-templates";
+import { getAppConfig } from "@/services/settings.service";
+import { emailTemplates, emailTemplatesFor } from "./email-templates";
 
 /**
  * Email abstraction (§38).
@@ -39,12 +41,12 @@ export class ConsoleEmailProvider extends EmailProvider {
       console.info(
         [
           "",
-          "──────────── ✉️  APlus Learn email ────────────",
+          "──────────────── ✉️  outgoing email ────────────────",
           `To:      ${to}`,
           `Subject: ${subject}`,
           "",
           text ?? stripTags(html ?? ""),
-          "───────────────────────────────────────────────",
+          "────────────────────────────────────────────────────",
           "",
         ].join("\n"),
       );
@@ -140,6 +142,47 @@ export function getEmailProvider() {
 }
 
 /**
+ * The template set bound to the platform's configured identity (§26).
+ *
+ * Services call this instead of importing `emailTemplates` directly, so a
+ * renamed application, a new support address or a changed accent colour shows
+ * up in the next email without a deployment. Settings are memoised, so this is
+ * a map lookup on all but the first call in a 30-second window.
+ */
+export async function brandedEmailTemplates() {
+  const { branding, contact, theme } = await getAppConfig();
+  return emailTemplatesFor({
+    appName: branding.appName,
+    tagline: branding.tagline,
+    supportEmail: contact.supportEmail || SITE.supportEmail,
+    accentColor: theme.primaryColor,
+  });
+}
+
+/**
+ * Whether a category of mail may be sent right now (§26).
+ *
+ * `SECURITY` is never consulted against settings and has no switch in the
+ * admin panel: verification, password reset and "your password changed" are
+ * how an account owner keeps control of their account, and an operator who
+ * could silently turn them off could silently lock people out (§36).
+ */
+export async function emailCategoryEnabled(category) {
+  if (!category || category === EMAIL_CATEGORIES.SECURITY) return true;
+
+  try {
+    const { notifications } = await getAppConfig();
+    if (notifications.emailEnabled === false) return false;
+
+    const key = EMAIL_CATEGORY_SETTING[category];
+    return !key || notifications[key] !== false;
+  } catch {
+    // Unreadable settings must not silence the platform.
+    return true;
+  }
+}
+
+/**
  * Send, and never let a delivery failure take down the action that triggered
  * it: a booking is still confirmed if the confirmation email bounces.
  *
@@ -147,8 +190,16 @@ export function getEmailProvider() {
  * that exists, so surfacing a delivery error there would turn the endpoint
  * into an account-enumeration oracle (§36). Pass `critical` only where the
  * caller genuinely cannot proceed without delivery.
+ *
+ * `category` routes the message through the platform notification switches.
+ * The check lives here, at the one place every email passes through, so no
+ * future call site can accidentally sidestep it.
  */
-export async function sendEmail(message, { critical = false } = {}) {
+export async function sendEmail(message, { critical = false, category } = {}) {
+  if (!(await emailCategoryEnabled(category))) {
+    return { delivered: false, provider: null, skipped: "CATEGORY_DISABLED" };
+  }
+
   try {
     return await getEmailProvider().send(message);
   } catch (error) {

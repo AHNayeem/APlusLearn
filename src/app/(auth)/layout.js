@@ -5,6 +5,7 @@ import { enforceGuest } from "@/lib/auth/guards";
 import { marketplaceStats } from "@/services/search.service";
 import { connectToDatabase } from "@/lib/db/connect";
 import { formatNumber } from "@/lib/utils/format";
+import { getAppConfig } from "@/services/settings.service";
 
 /**
  * Split auth layout: the form on the left, reassurance on the right.
@@ -13,13 +14,13 @@ import { formatNumber } from "@/lib/utils/format";
 export default async function AuthLayout({ children }) {
   await enforceGuest();
   await connectToDatabase();
-  const stats = await marketplaceStats();
+  const [stats, config] = await Promise.all([marketplaceStats(), getAppConfig()]);
 
   return (
     <div className="flex min-h-dvh flex-col lg:flex-row">
       <div className="flex flex-1 flex-col px-5 py-8 sm:px-8 lg:px-12">
         <header className="mb-10">
-          <Logo />
+          <Logo branding={config.branding} />
         </header>
         <main id="main" className="mx-auto flex w-full max-w-md flex-1 flex-col justify-center">
           {children}

@@ -40,5 +40,5 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-# local document storage
+# local file storage (verification documents + uploaded branding)
 /.storage/

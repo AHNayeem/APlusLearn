@@ -1,4 +1,5 @@
 import { ROLES } from "./roles.js";
+import { FEATURES } from "./config.js";
 
 /** Public marketing/marketplace navigation. */
 export const PUBLIC_NAV = [
@@ -113,13 +114,13 @@ export const FOOTER_LEGAL_LINKS = [
 export const PARENT_NAV = [
   { href: "/dashboard", label: "Overview", icon: "LayoutDashboard" },
   { href: "/bookings", label: "Lessons", icon: "CalendarDays" },
-  { href: "/messages", label: "Messages", icon: "MessageSquare", badge: "unreadMessages" },
+  { href: "/messages", label: "Messages", icon: "MessageSquare", badge: "unreadMessages", feature: FEATURES.MESSAGING },
   { href: "/tutors", label: "My tutors", icon: "Users" },
-  { href: "/favourites", label: "Saved tutors", icon: "Heart" },
-  { href: "/requests", label: "Tutor requests", icon: "Megaphone" },
+  { href: "/favourites", label: "Saved tutors", icon: "Heart", feature: FEATURES.FAVOURITES },
+  { href: "/requests", label: "Tutor requests", icon: "Megaphone", feature: FEATURES.TUTOR_REQUESTS },
   { href: "/children", label: "Children", icon: "Baby", roles: [ROLES.PARENT] },
   { href: "/payments", label: "Payments", icon: "CreditCard" },
-  { href: "/reviews", label: "My reviews", icon: "Star" },
+  { href: "/reviews", label: "My reviews", icon: "Star", feature: FEATURES.REVIEWS },
   { href: "/notifications", label: "Notifications", icon: "Bell", badge: "unreadNotifications" },
   { href: "/settings", label: "Settings", icon: "Settings" },
 ];
@@ -129,11 +130,11 @@ export const TUTOR_NAV = [
   { href: "/tutor/calendar", label: "Calendar", icon: "CalendarDays" },
   { href: "/tutor/bookings", label: "Lessons", icon: "BookOpen" },
   { href: "/tutor/students", label: "Students", icon: "Users" },
-  { href: "/tutor/messages", label: "Messages", icon: "MessageSquare", badge: "unreadMessages" },
-  { href: "/tutor/requests", label: "Tutor requests", icon: "Megaphone" },
+  { href: "/tutor/messages", label: "Messages", icon: "MessageSquare", badge: "unreadMessages", feature: FEATURES.MESSAGING },
+  { href: "/tutor/requests", label: "Tutor requests", icon: "Megaphone", feature: FEATURES.TUTOR_REQUESTS },
   { href: "/tutor/earnings", label: "Earnings", icon: "TrendingUp" },
   { href: "/tutor/payouts", label: "Payouts", icon: "Banknote" },
-  { href: "/tutor/reviews", label: "Reviews", icon: "Star" },
+  { href: "/tutor/reviews", label: "Reviews", icon: "Star", feature: FEATURES.REVIEWS },
   { href: "/tutor/profile", label: "Profile", icon: "UserCircle" },
   { href: "/tutor/verification", label: "Verification", icon: "BadgeCheck" },
   { href: "/tutor/notifications", label: "Notifications", icon: "Bell", badge: "unreadNotifications" },
@@ -156,10 +157,19 @@ export const ADMIN_NAV = [
   { href: "/admin/settings", label: "Settings", icon: "Settings" },
 ];
 
-export function navForRole(role) {
+/**
+ * The sidebar for a role, minus anything the operator has switched off (§26).
+ *
+ * Hiding the link is the courtesy; the API guard on each of those routes is
+ * the control. The admin sidebar is never filtered — an administrator has to
+ * be able to reach the switch that turned a feature off.
+ */
+export function navForRole(role, features) {
+  const enabled = (item) => !item.feature || features?.[item.feature] !== false;
+
   if (role === ROLES.ADMIN) return ADMIN_NAV;
-  if (role === ROLES.TUTOR) return TUTOR_NAV;
-  return PARENT_NAV.filter((item) => !item.roles || item.roles.includes(role));
+  if (role === ROLES.TUTOR) return TUTOR_NAV.filter(enabled);
+  return PARENT_NAV.filter((item) => (!item.roles || item.roles.includes(role)) && enabled(item));
 }
 
 export function homeForRole(role) {

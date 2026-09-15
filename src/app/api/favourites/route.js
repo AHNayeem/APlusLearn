@@ -4,7 +4,7 @@ import { favouriteSchema } from "@/lib/validation/engagement";
 import { objectId } from "@/lib/validation/common";
 import { listFavourites, addFavourite, removeFavourite } from "@/services/student.service";
 import { toPublicTutor } from "@/services/tutor.service";
-import { PERMISSIONS } from "@/constants";
+import { PERMISSIONS, FEATURES } from "@/constants";
 
 export const GET = routeHandler(
   async ({ user }) => {
@@ -18,17 +18,22 @@ export const GET = routeHandler(
       })),
     });
   },
-  { permission: PERMISSIONS.FAVOURITE_MANAGE },
+  { feature: FEATURES.FAVOURITES, permission: PERMISSIONS.FAVOURITE_MANAGE },
 );
 
 export const POST = routeHandler(
   async ({ user, body }) => created({ favourite: await addFavourite(body, user) }),
-  { permission: PERMISSIONS.FAVOURITE_MANAGE, bodySchema: favouriteSchema },
+  {
+    feature: FEATURES.FAVOURITES,
+    permission: PERMISSIONS.FAVOURITE_MANAGE,
+    bodySchema: favouriteSchema,
+  },
 );
 
 export const DELETE = routeHandler(
   async ({ user, query }) => ok(await removeFavourite(query.tutorProfileId, user)),
   {
+    feature: FEATURES.FAVOURITES,
     permission: PERMISSIONS.FAVOURITE_MANAGE,
     querySchema: z.object({ tutorProfileId: objectId }),
   },

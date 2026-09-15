@@ -12,7 +12,7 @@ Every numbered section of `docs/Project.md`, mapped to what implements it.
 
 Verified on a clean database: `npm run seed` → `npx eslint src scripts` (clean)
 → `npm run build` (passes) → `npm run test:integrations` (111/111) →
-`npm run qa` (88/88).
+`npm run qa` (133/133).
 
 ---
 
@@ -28,9 +28,9 @@ Verified on a clean database: `npm run seed` → `npx eslint src scripts` (clean
 
 | Requirement | Implementation | Status |
 |---|---|---|
-| One Next.js app, no separate backend | `src/app/api/**` — 100 route handlers | Implemented |
+| One Next.js app, no separate backend | `src/app/api/**` — 103 route handlers | Implemented |
 | UI → Service → Database layering | `src/components` → `src/services/*.service.js` → `src/models` | Implemented |
-| JavaScript only, no TypeScript | 355 `.js`/`.jsx` files, zero `.ts`/`.tsx` | Implemented |
+| JavaScript only, no TypeScript | 384 `.js`/`.jsx` files, zero `.ts`/`.tsx` | Implemented |
 | Tailwind CSS | Tailwind v4 via `@tailwindcss/postcss`, tokens in `globals.css` | Implemented |
 | MongoDB | Mongoose 9, `src/lib/db/connect.js` (cached connection) | Implemented |
 
@@ -49,7 +49,7 @@ Verified on a clean database: `npm run seed` → `npx eslint src scripts` (clean
 | Requirement | Implementation | Status |
 |---|---|---|
 | Centralised, reused connection | `connectToDatabase()` memoised on `globalThis` | Implemented |
-| Domain models | 14 model files covering all 25 entities in the spec | Implemented |
+| Domain models | 16 model files covering all 25 entities in the spec | Implemented |
 | Indexes on high-value fields | Compound indexes per model; 2dsphere for geo; text for course search | Implemented |
 | Considered normalisation | Denormalised `courseCodes`/`subjectSlugs` on `TutorProfile` for single-query search | Implemented |
 
@@ -177,7 +177,7 @@ Verified on a clean database: `npm run seed` → `npx eslint src scripts` (clean
 | Payout onboarding / earnings / status / receipts | `/tutor/payouts`, `/tutor/earnings`, `/payments/[id]`; hosted Connect onboarding, resumable, with provider-reported eligibility | Implemented |
 | Payout eligibility is the provider's decision | `refreshPayoutAccount()` records what Stripe reports; it cannot declare an account complete | Implemented |
 | A payout is never sent twice | `providerTransferId` short-circuits a repeated "mark as paid"; the transfer carries a stable idempotency key | Implemented |
-| Commission configurable by admin | `/admin/settings` → `Settings.commissionPercent` | Implemented |
+| Commission configurable by admin | `/admin/settings` → Marketplace tab → `Settings.commissionPercent` (§26b) | Implemented |
 | Calculations centralised server-side | Client never sends a price; QA asserts injected prices are ignored | Implemented |
 
 ## 21. Messaging
@@ -236,6 +236,64 @@ Verified on a clean database: `npm run seed` → `npx eslint src scripts` (clean
 | Abuse tracking, warnings, suspension | `assessCancellationAbuse()` + admin suspend | Implemented |
 | Rules centralised | All paths resolve through `src/lib/booking/policy.js` | Implemented |
 
+## 26b. Platform settings & application configuration
+
+One admin-editable document (`Settings`, key `PLATFORM`) holds everything an
+operator can change without a deployment. Read through `getSettings()` for
+business rules and `getAppConfig()` for presentation — the latter never throws,
+so a slow or absent database degrades to the shipped identity rather than
+taking a page down.
+
+| Requirement | Implementation | Status |
+|---|---|---|
+| Single admin settings console | `/admin/settings` — ten sections in `src/components/admin/settings/` | Implemented |
+| Application identity | `branding.appName / shortName / tagline / description`; reaches the header, emails, legal pages and metadata | Implemented |
+| Logo upload, replace, remove, preview | `POST`/`DELETE /api/admin/settings/branding?asset=…` → `branding.service.js` | Implemented |
+| Logo used consistently | `Logo.jsx` takes `branding`; public header, dashboard rail, auth pages, footer (dark variant) | Implemented |
+| Favicon, Apple touch icon, social image | `branding.favicon / appleTouchIcon / ogImage`, referenced by `generateMetadata` | Implemented |
+| Upload validation | Format from the file's own magic bytes, not its declared type; size, min/max dimensions, square where required; SVG refused outright (`lib/images/inspect.js`) | Implemented |
+| Uploads reuse the storage abstraction | `getStorageProvider()` gains a `branding` scope; nothing is written into `public/` | Implemented |
+| Branding assets served publicly | `/api/branding/[asset]` — addressed by setting name, never a storage key; `nosniff`, immutable when versioned | Implemented |
+| Brand colours configurable | `theme.*`; expanded into the existing `@theme` token names by `lib/theme/palette.js` (OKLab ramp) and emitted once in the root layout | Implemented |
+| Colour choices cannot break accessibility | Primary and footer must clear AA against white; accent and semantic colours must be legible against white *or* ink; page/card grounds must carry the dark body text. Enforced server-side, mirrored in the picker | Implemented |
+| Theme preview before saving | `AppearanceSettings` renders buttons, links, badges, tabs, cards and the footer band from the same `buildScale()` the server uses | Implemented |
+| Untouched theme changes nothing | `buildThemeCss()` emits only roles that differ from the shipped palette; a default install renders from `globals.css` exactly as designed | Implemented |
+| Light / dark | Light only, as shipped. The one dark surface (the footer band) is configurable. A full dark mode was **not** introduced — the design system has no dark token set | Not added, by design |
+| Global SEO metadata | `seo.*` → root `generateMetadata`; title, suffix, description, keywords, OG/Twitter, canonical base URL | Implemented |
+| Page-specific SEO still wins | Next merges each route's own `generateMetadata` over the root; QA asserts a tutor page keeps its own title and takes only the configured suffix | Implemented |
+| Indexing switch | `seo.allowIndexing` drives both the page `robots` metadata and `robots.txt` | Implemented |
+| Contact / platform information | `contact.*` — support and general email, phone, address, city, province, postal code, website, business and support hours | Implemented |
+| Contact details reused | Footer, `/support`, `/about`, `/safety`, legal pages, payment receipts | Implemented |
+| Social links | `social.*`; only configured profiles render — no dead icons | Implemented |
+| Footer configuration | `footer.*` — description, copyright (with `{year}` substitution), social/newsletter/app-badge visibility | Implemented |
+| Marketplace configuration | Commission, cancellation policy, no-show refunds, abuse thresholds, booking notice and horizon, rate guard rails, payout hold, search radius, review moderation | Implemented |
+| Feature flags | `features.*` — messaging, tutor requests, favourites, reviews, online/in-person lessons, Google/Apple sign-in | Implemented |
+| Flags enforced server-side | `feature` option on `routeHandler` (pipeline position: after permission, before validation); lesson modes enforced in `booking.service.js`; QA asserts a disabled feature returns 403 to a direct API call | Implemented |
+| Platform notification controls | `notifications.*` — master email switch plus booking / application / review / payout / announcement categories, applied in `sendEmail()` | Implemented |
+| Security email cannot be disabled | `EMAIL_CATEGORIES.SECURITY` has no setting and is never consulted against one | Implemented |
+| Legal pages carry the configured identity | `buildLegalPages({ appName, supportEmail })`; the policy text itself stays in version control | Implemented |
+| Emails carry the configured brand | `brandedEmailTemplates()` binds name, tagline, support address and accent colour | Implemented |
+| Every setting has a safe default | `DEFAULT_SETTINGS`; `getSettings()` deep-merges each group so a document written before a setting existed still answers for it | Implemented |
+| Server-side validation | `platformSettingsSchema` — colour contrast, email, http(s)-only URLs, postal code, commission range, length limits, min < max rate | Implemented |
+| Admin-only | `PERMISSIONS.ADMIN_SETTINGS_MANAGE` on every settings and branding endpoint; QA asserts anonymous → 401 and parent/tutor → 403 on both | Implemented |
+| No secrets in settings | Provider credentials stay in the environment (`lib/config/env.js`) and are reported, never edited; QA asserts the payload carries no credentials | Implemented |
+| Audit trail | `AUDIT_ACTIONS.SETTINGS_UPDATED` with a per-field old/new diff and the sections touched; uploads record dimensions and size, never bytes | Implemented |
+| Change propagation | 30-second memo invalidated on every write; `router.refresh()` after a save; branding URLs versioned by upload time; `robots.txt` and `sitemap.xml` revalidate hourly | Implemented |
+
+### Deliberately not configurable
+
+| Excluded | Why |
+|---|---|
+| Provider API keys, webhook secrets, `AUTH_SECRET`, `MONGODB_URI` | Deployment configuration, not application settings (§36) |
+| Tutor approval before appearing in search | `isSearchable` is derived; making it optional would let an unverified tutor surface (§16) |
+| Password reset / verification / security-alert email | An operator who could disable these could lock people out of their own accounts |
+| Rating scale | 1–5 is baked into the schema, indexes and every aggregate |
+| Review eligibility window | No such rule exists today; adding one to expose a setting would be a new business rule, not a configuration of an existing one |
+| Commission on existing bookings | Captured at creation; settings apply to new bookings only |
+| Roles and permissions | `src/constants/roles.js`, enforced server-side |
+| Terms / Privacy body text | Version-controlled; only the identity it names is substituted |
+| Legal page structure, private-route disallow list | Properties of the application, not preferences |
+
 ## 27. Online / in-person
 
 | Requirement | Implementation | Status |
@@ -255,9 +313,9 @@ Verified on a clean database: `npm run seed` → `npx eslint src scripts` (clean
 |---|---|---|
 | All 10 notification types | `NOTIFICATION_TYPES` | Implemented |
 | Unread count, centre, read/unread | `/notifications`, `unreadNotificationCount()` | Implemented |
-| Preferences | Per-channel toggles in Settings | Implemented |
+| Preferences | Per-channel toggles in Settings, beneath the platform-level switches in §26b | Implemented |
 | Email / SMS / push ready | `NOTIFICATION_CHANNELS` + `deliveredChannels`; email wired through Resend, SMS/push declared | Partial — SMS/push are Phase 2 |
-| Transactional templates | 13 templates in `email-templates.js`: auth, booking, cancellation, reschedule, refund, tutor lifecycle, payouts. Responsive HTML + a real plain-text twin, built from one description | Implemented |
+| Transactional templates | 13 templates in `email-templates.js`: auth, booking, cancellation, reschedule, refund, tutor lifecycle, payouts. Responsive HTML + a real plain-text twin, built from one description. Bound to the configured brand via `brandedEmailTemplates()` (§26b) | Implemented |
 | No email for in-app messages | Messaging notifies in-app only, per the product requirement | Implemented |
 | Delivery failure is contained | `sendEmail()` logs and returns; a bounced confirmation never undoes the booking it announces | Implemented |
 
@@ -272,15 +330,15 @@ Verified on a clean database: `npm run seed` → `npx eslint src scripts` (clean
 | `/ontario/grade-12/math/mhf4u` | `src/app/(public)/[province]/[grade]/[subject]/[course]/page.js` | Implemented |
 | `/tutors/mhf4u/scarborough` | `src/app/(public)/tutors/[slug]/[city]/page.js` | Implemented |
 | Shareable tutor URLs | `/tutors/[slug]`, stable slug per profile | Implemented |
-| Metadata, titles, descriptions, canonicals | `generateMetadata` on every public route | Implemented |
+| Metadata, titles, descriptions, canonicals | `generateMetadata` on every public route, over an admin-configurable global default (§26b) | Implemented |
 | Semantic markup | JSON-LD for Person, Course and FAQPage | Implemented |
-| Indexable public pages | `sitemap.js` (308 URLs) + `robots.js` excluding private areas | Implemented |
+| Indexable public pages | `sitemap.js` (308 URLs) + `robots.js` excluding private areas; both honour the configured canonical base URL and indexing switch | Implemented |
 
 ## 30. Design system
 
 | Requirement | Implementation | Status |
 |---|---|---|
-| Reusable Tailwind design system | `globals.css` `@theme` tokens: colour, type, radii, elevation, motion | Implemented |
+| Reusable Tailwind design system | `globals.css` `@theme` tokens: colour, type, radii, elevation, motion. Admin-configured colours re-point the same token names rather than adding new ones (§26b) | Implemented |
 | All 15 required primitives | 18 files in `src/components/ui` | Implemented |
 | Consistent styling across pages | Every page composes the same primitives | Implemented |
 

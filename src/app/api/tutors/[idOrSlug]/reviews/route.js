@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { routeHandler, ok, paginationMeta, NotFoundError } from "@/lib/api";
 import { getPublicTutorBySlug, getPublicTutorById, listTutorReviews } from "@/services/tutor.service";
+import { FEATURES } from "@/constants";
 
 export const GET = routeHandler(
   async ({ params, query }) => {
@@ -14,6 +15,7 @@ export const GET = routeHandler(
     return ok({ reviews: items }, { meta: paginationMeta({ page, pageSize, total }) });
   },
   {
+    feature: FEATURES.REVIEWS,
     paramsSchema: z.object({ idOrSlug: z.string().min(1).max(120) }),
     querySchema: z.object({
       page: z.coerce.number().int().min(1).max(200).default(1),

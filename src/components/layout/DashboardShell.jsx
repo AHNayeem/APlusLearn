@@ -5,10 +5,10 @@ import { DashboardNav } from "./DashboardNav";
 /**
  * Shared dashboard chrome for the parent, tutor and admin areas (§24).
  */
-export function DashboardShell({ items, user, badges, children }) {
+export function DashboardShell({ items, user, badges, branding, children }) {
   return (
     <div className="flex min-h-dvh bg-canvas">
-      <DashboardNav items={items} user={user} badges={badges} />
+      <DashboardNav items={items} user={user} badges={badges} branding={branding} />
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="sticky top-0 z-30 hidden h-[var(--header-height)] items-center justify-end gap-4 border-b border-ink-200 bg-white/90 px-8 backdrop-blur-lg lg:flex">
           <UserMenu user={user} />

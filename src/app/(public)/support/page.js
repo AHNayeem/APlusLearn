@@ -5,7 +5,7 @@ import {
 import { Button, Card, CardBody, Reveal, RevealGroup, RevealItem } from "@/components/ui";
 import { PageHero } from "@/components/marketing/PageHero";
 import { Section } from "@/components/home/Sections";
-import { SITE } from "@/constants";
+import { getAppConfig } from "@/services/settings.service";
 
 export const metadata = {
   title: "Support",
@@ -53,7 +53,9 @@ const TOPICS = [
   },
 ];
 
-export default function SupportPage() {
+export default async function SupportPage() {
+  const { contact } = await getAppConfig();
+
   return (
     <>
       <PageHero
@@ -62,7 +64,7 @@ export default function SupportPage() {
         description="Most answers are in the FAQ. If yours isn't, email us — a person reads every message and we reply within one business day."
       >
         <div className="flex flex-wrap gap-3">
-          <Button href={`mailto:${SITE.supportEmail}`} size="lg" iconLeft={<Mail className="size-4" />}>
+          <Button href={`mailto:${contact.supportEmail}`} size="lg" iconLeft={<Mail className="size-4" />}>
             Email support
           </Button>
           <Button href="/faq" variant="secondary" size="lg">
@@ -121,10 +123,10 @@ export default function SupportPage() {
                       <div className="min-w-0">
                         <p className="text-xs text-ink-400">Email</p>
                         <a
-                          href={`mailto:${SITE.supportEmail}`}
+                          href={`mailto:${contact.supportEmail}`}
                           className="break-words text-sm font-semibold text-brand-600 hover:underline"
                         >
-                          {SITE.supportEmail}
+                          {contact.supportEmail}
                         </a>
                         <p className="mt-0.5 text-xs text-ink-500">
                           Replies within one business day
@@ -136,14 +138,12 @@ export default function SupportPage() {
                       <div className="min-w-0">
                         <p className="text-xs text-ink-400">Phone</p>
                         <a
-                          href={`tel:${SITE.supportPhone}`}
+                          href={`tel:${contact.supportPhone}`}
                           className="text-sm font-semibold text-brand-600 hover:underline"
                         >
-                          {SITE.supportPhone}
+                          {contact.supportPhone}
                         </a>
-                        <p className="mt-0.5 text-xs text-ink-500">
-                          Weekdays, 9am–6pm Eastern
-                        </p>
+                        <p className="mt-0.5 text-xs text-ink-500">{contact.supportHours}</p>
                       </div>
                     </li>
                     <li className="flex gap-3">

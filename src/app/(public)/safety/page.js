@@ -4,7 +4,7 @@ import {
 import { Button, Card, CardBody, Reveal, RevealGroup, RevealItem } from "@/components/ui";
 import { PageHero } from "@/components/marketing/PageHero";
 import { Section, Faq } from "@/components/home/Sections";
-import { SITE } from "@/constants";
+import { getAppConfig } from "@/services/settings.service";
 
 export const metadata = {
   title: "Safety",
@@ -36,7 +36,9 @@ const SAFETY_FAQS = [
   },
 ];
 
-export default function SafetyPage() {
+export default async function SafetyPage() {
+  const { contact } = await getAppConfig();
+
   return (
     <>
       <PageHero
@@ -157,8 +159,8 @@ export default function SafetyPage() {
               </div>
               <div className="flex shrink-0 flex-wrap gap-2">
                 <Button href="/support">Contact support</Button>
-                <Button href={`mailto:${SITE.supportEmail}`} variant="secondary">
-                  {SITE.supportEmail}
+                <Button href={`mailto:${contact.supportEmail}`} variant="secondary">
+                  {contact.supportEmail}
                 </Button>
               </div>
             </CardBody>

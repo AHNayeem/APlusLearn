@@ -2,8 +2,7 @@ import { connectToDatabase } from "@/lib/db/connect";
 import { Course, TutorProfile, Province } from "@/models";
 import { LEGAL_SLUGS } from "@/constants";
 import { SERVICE_CITIES } from "@/lib/geo";
-
-const BASE = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
+import { siteBaseUrl } from "@/lib/config/base-url";
 
 /**
  * Sitemap (§29).
@@ -12,8 +11,15 @@ const BASE = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
  * course, and the course+city long-tail pages. Private dashboard routes are
  * excluded — they're behind auth and shouldn't be crawled.
  */
+/**
+ * Regenerated hourly: new tutors and courses appear without a redeploy, and a
+ * changed canonical base URL propagates the same way (§18).
+ */
+export const revalidate = 3600;
+
 export default async function sitemap() {
   const now = new Date();
+  const BASE = await siteBaseUrl();
 
   const staticPages = [
     { url: "", priority: 1, changeFrequency: "daily" },

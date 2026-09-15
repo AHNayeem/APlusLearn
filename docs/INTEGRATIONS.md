@@ -307,16 +307,35 @@ than a code one.
 
 ---
 
-## 6. Document storage
+## 6. File storage
 
-Verification documents are written outside `public/` to `./.storage/documents`
-and served only through the audited admin route. The storage key is
-`select: false` on the model so it cannot leak through a serialised document.
+Two scopes, both written outside `public/`. Nothing is ever written into the
+served web root — a writable directory inside it is how an upload feature
+becomes a remote-code-execution feature.
+
+| Scope | Path | Audience |
+|---|---|---|
+| `documents` | `./.storage/documents` | Private. Verification paperwork, served only through the audited admin route. The storage key is `select: false` on the model so it cannot leak through a serialised document. |
+| `branding` | `./.storage/branding` | Public *content*, private *files*. Logos and icons uploaded at Admin → Platform settings, served by `/api/branding/[asset]`. |
+
+Branding assets are addressed by **setting name**, never by storage key: the
+route resolves `logo`, `favicon`, `appleTouchIcon`, `logoDark` or `ogImage`
+against the settings document, so the only files it can ever return are the
+five an administrator chose. There is no key to guess and nothing to enumerate.
+Uploads are identified from their own magic bytes rather than the declared
+content type, bounded by size and dimensions per asset, and SVG is refused
+outright — it is a script-capable document, not a picture. Responses carry
+`X-Content-Type-Options: nosniff` and, when versioned, an immutable cache
+policy; replacing an asset changes the `?v=` every page emits, so a new file is
+a new URL.
 
 A production deployment should implement `StorageProvider` against an object
-store with private ACLs and short-lived signed URLs. The interface is in
+store — private ACLs with short-lived signed URLs for documents, ordinary
+public objects or a CDN for branding. The interface is in
 [`storage-provider.js`](../src/services/external/storage-provider.js); this is
-the one integration with no production implementation yet.
+the one integration with no production implementation yet. Note that the local
+filesystem does not survive a redeploy on an ephemeral host and is not shared
+between instances, so an uploaded logo will not persist there without one.
 
 ---
 
@@ -331,6 +350,12 @@ Server secrets (`MONGODB_URI`, `AUTH_SECRET`, `STRIPE_*`, `RESEND_API_KEY`,
 `GOOGLE_MAPS_API_KEY`, `ZOOM_*`) are read only inside `server-only` modules.
 `integrationStatus()` reports provider *names* and missing variable *names*;
 it never reports a value, and the QA suite asserts that.
+
+No secret is stored in, or reachable through, platform settings. The admin
+settings console *reports* integration status and cannot edit it; the settings
+document holds branding, metadata, contact details, marketplace rules and
+feature flags, and nothing else. The QA suite asserts the settings payload
+matches no credential pattern.
 
 ---
 

@@ -1,5 +1,7 @@
 import mongoose from "mongoose";
-import { DISPUTE_STATUS, DISPUTE_REASONS, AUDIT_ACTIONS, DEFAULT_SETTINGS } from "../constants/index.js";
+import {
+  DISPUTE_STATUS, DISPUTE_REASONS, AUDIT_ACTIONS, DEFAULT_SETTINGS,
+} from "../constants/index.js";
 const DisputeSchema = new mongoose.Schema(
   {
     reference: { type: String, required: true, unique: true, index: true },
@@ -72,8 +74,144 @@ AuditLogSchema.index({ entityType: 1, entityId: 1, createdAt: -1 });
 export const AuditLog = mongoose.models.AuditLog || mongoose.model("AuditLog", AuditLogSchema);
 
 /**
+ * A stored branding file. The bytes live in the storage provider; only the key
+ * and what is needed to serve and preview it are kept here.
+ */
+const BrandAssetSchema = new mongoose.Schema(
+  {
+    storageKey: { type: String, required: true, trim: true },
+    contentType: { type: String, required: true, trim: true },
+    fileName: { type: String, trim: true, maxlength: 200 },
+    sizeBytes: { type: Number, min: 0 },
+    width: { type: Number, min: 1 },
+    height: { type: Number, min: 1 },
+    uploadedAt: { type: Date, default: Date.now },
+    uploadedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+  },
+  { _id: false },
+);
+
+const defaults = DEFAULT_SETTINGS;
+
+/** Sub-document options shared by every settings group. */
+const group = { _id: false, minimize: false };
+
+const BrandingSchema = new mongoose.Schema(
+  {
+    appName: { type: String, trim: true, maxlength: 60, default: defaults.branding.appName },
+    shortName: { type: String, trim: true, maxlength: 30, default: defaults.branding.shortName },
+    tagline: { type: String, trim: true, maxlength: 120, default: defaults.branding.tagline },
+    description: { type: String, trim: true, maxlength: 300, default: defaults.branding.description },
+    logo: { type: BrandAssetSchema, default: null },
+    logoDark: { type: BrandAssetSchema, default: null },
+    favicon: { type: BrandAssetSchema, default: null },
+    appleTouchIcon: { type: BrandAssetSchema, default: null },
+    ogImage: { type: BrandAssetSchema, default: null },
+  },
+  group,
+);
+
+/** Colours are stored as the administrator typed them; the ramp is derived. */
+const hex = (fallback) => ({
+  type: String,
+  trim: true,
+  lowercase: true,
+  match: [/^#[0-9a-f]{6}$/, "Use a 6-digit hex colour, like #2348d6."],
+  default: fallback,
+});
+
+const ThemeSchema = new mongoose.Schema(
+  {
+    primaryColor: hex(defaults.theme.primaryColor),
+    accentColor: hex(defaults.theme.accentColor),
+    successColor: hex(defaults.theme.successColor),
+    warningColor: hex(defaults.theme.warningColor),
+    dangerColor: hex(defaults.theme.dangerColor),
+    canvasColor: hex(defaults.theme.canvasColor),
+    surfaceColor: hex(defaults.theme.surfaceColor),
+    footerColor: hex(defaults.theme.footerColor),
+  },
+  group,
+);
+
+const SeoSchema = new mongoose.Schema(
+  {
+    metaTitle: { type: String, trim: true, maxlength: 70, default: "" },
+    titleSuffix: { type: String, trim: true, maxlength: 40, default: "" },
+    metaDescription: { type: String, trim: true, maxlength: 200, default: "" },
+    keywords: { type: [String], default: () => [...defaults.seo.keywords] },
+    ogTitle: { type: String, trim: true, maxlength: 90, default: "" },
+    ogDescription: { type: String, trim: true, maxlength: 200, default: "" },
+    twitterHandle: { type: String, trim: true, maxlength: 20, default: "" },
+    canonicalBaseUrl: { type: String, trim: true, maxlength: 200, default: "" },
+    allowIndexing: { type: Boolean, default: defaults.seo.allowIndexing },
+  },
+  group,
+);
+
+const ContactSchema = new mongoose.Schema(
+  {
+    supportEmail: { type: String, trim: true, lowercase: true, maxlength: 254, default: defaults.contact.supportEmail },
+    contactEmail: { type: String, trim: true, lowercase: true, maxlength: 254, default: defaults.contact.contactEmail },
+    supportPhone: { type: String, trim: true, maxlength: 30, default: defaults.contact.supportPhone },
+    addressLine: { type: String, trim: true, maxlength: 160, default: "" },
+    city: { type: String, trim: true, maxlength: 80, default: defaults.contact.city },
+    province: { type: String, trim: true, uppercase: true, maxlength: 2, default: defaults.contact.province },
+    postalCode: { type: String, trim: true, uppercase: true, maxlength: 7, default: "" },
+    websiteUrl: { type: String, trim: true, maxlength: 200, default: "" },
+    businessHours: { type: String, trim: true, maxlength: 120, default: defaults.contact.businessHours },
+    supportHours: { type: String, trim: true, maxlength: 120, default: defaults.contact.supportHours },
+  },
+  group,
+);
+
+const socialUrl = (fallback) => ({ type: String, trim: true, maxlength: 200, default: fallback });
+
+const SocialSchema = new mongoose.Schema(
+  {
+    facebook: socialUrl(defaults.social.facebook),
+    x: socialUrl(defaults.social.x),
+    linkedin: socialUrl(defaults.social.linkedin),
+    instagram: socialUrl(defaults.social.instagram),
+    youtube: socialUrl(defaults.social.youtube),
+  },
+  group,
+);
+
+const FooterSchema = new mongoose.Schema(
+  {
+    description: { type: String, trim: true, maxlength: 400, default: "" },
+    copyrightText: { type: String, trim: true, maxlength: 200, default: "" },
+    showSocial: { type: Boolean, default: true },
+    showNewsletter: { type: Boolean, default: true },
+    showAppBadges: { type: Boolean, default: true },
+  },
+  group,
+);
+
+/** Every flag defaults to on: a fresh install is the whole product. */
+const FeaturesSchema = new mongoose.Schema(
+  Object.fromEntries(
+    Object.keys(defaults.features).map((key) => [key, { type: Boolean, default: true }]),
+  ),
+  group,
+);
+
+const NotificationSettingsSchema = new mongoose.Schema(
+  Object.fromEntries(
+    Object.keys(defaults.notifications).map((key) => [key, { type: Boolean, default: true }]),
+  ),
+  group,
+);
+
+/**
  * Singleton platform settings. Admin-editable values that business rules read
- * at runtime — commission, cancellation windows, booking guard rails (§20, §26).
+ * at runtime — commission, cancellation windows, booking guard rails (§20, §26)
+ * — plus the application's own identity, appearance and feature availability.
+ *
+ * No credential, key or secret is ever stored here. Provider configuration
+ * lives in the environment and is reported, never edited, by the admin panel
+ * (§36, `src/lib/config/env.js`).
  */
 const SettingsSchema = new mongoose.Schema(
   {
@@ -124,6 +262,15 @@ const SettingsSchema = new mongoose.Schema(
     payoutHoldDays: { type: Number, default: DEFAULT_SETTINGS.payoutHoldDays, min: 0 },
     defaultSearchRadiusKm: { type: Number, default: DEFAULT_SETTINGS.defaultSearchRadiusKm, min: 1 },
     autoModerateReviews: { type: Boolean, default: DEFAULT_SETTINGS.autoModerateReviews },
+
+    branding: { type: BrandingSchema, default: () => ({}) },
+    theme: { type: ThemeSchema, default: () => ({}) },
+    seo: { type: SeoSchema, default: () => ({}) },
+    contact: { type: ContactSchema, default: () => ({}) },
+    social: { type: SocialSchema, default: () => ({}) },
+    footer: { type: FooterSchema, default: () => ({}) },
+    features: { type: FeaturesSchema, default: () => ({}) },
+    notifications: { type: NotificationSettingsSchema, default: () => ({}) },
 
     updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
   },

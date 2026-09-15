@@ -17,7 +17,7 @@ import { UserMenu } from "./UserMenu";
  * One component drives the parent, tutor and admin sidebars — the items come
  * from `navForRole`, so adding a role means adding a nav array, not a layout.
  */
-export function DashboardNav({ items, user, badges = {} }) {
+export function DashboardNav({ items, user, badges = {}, branding }) {
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
 
@@ -85,7 +85,7 @@ export function DashboardNav({ items, user, badges = {} }) {
         >
           <Menu className="size-5" />
         </button>
-        <Logo mark />
+        <Logo mark branding={branding} />
         <UserMenu user={user} />
       </header>
 
@@ -109,7 +109,7 @@ export function DashboardNav({ items, user, badges = {} }) {
               className="relative flex h-full w-[17rem] max-w-[85vw] flex-col bg-white shadow-xl"
             >
               <div className="flex items-center justify-between border-b border-ink-200 p-4">
-                <Logo />
+                <Logo branding={branding} />
                 <button
                   type="button"
                   onClick={() => setOpen(false)}
@@ -128,7 +128,7 @@ export function DashboardNav({ items, user, badges = {} }) {
       {/* Desktop sidebar */}
       <aside className="sticky top-0 hidden h-dvh w-64 shrink-0 flex-col border-r border-ink-200 bg-white lg:flex">
         <div className="flex h-[var(--header-height)] items-center px-5">
-          <Logo />
+          <Logo branding={branding} />
         </div>
         <div className="flex-1 overflow-y-auto px-3 pb-4">{links}</div>
         <div className="border-t border-ink-200 p-3">

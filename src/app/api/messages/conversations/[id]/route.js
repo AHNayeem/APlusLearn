@@ -2,7 +2,7 @@ import { z } from "zod";
 import { routeHandler, ok } from "@/lib/api";
 import { objectId } from "@/lib/validation/common";
 import { getConversation, conversationBookings } from "@/services/message.service";
-import { PERMISSIONS } from "@/constants";
+import { PERMISSIONS, FEATURES } from "@/constants";
 
 export const GET = routeHandler(
   async ({ user, params, query }) => {
@@ -13,6 +13,7 @@ export const GET = routeHandler(
     return ok({ ...thread, bookings });
   },
   {
+    feature: FEATURES.MESSAGING,
     permission: PERMISSIONS.MESSAGE_VIEW,
     paramsSchema: z.object({ id: objectId }),
     querySchema: z.object({

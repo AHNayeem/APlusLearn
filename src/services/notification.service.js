@@ -1,8 +1,38 @@
 import "server-only";
 import { Notification, User } from "@/models";
-import { NOTIFICATION_CHANNELS, PAGE_SIZES } from "@/constants";
+import {
+  NOTIFICATION_CHANNELS, NOTIFICATION_TYPES, EMAIL_CATEGORIES, PAGE_SIZES,
+} from "@/constants";
 import { toPlain } from "@/lib/utils/serialize";
 import { sendEmail } from "./external/email-provider";
+
+/**
+ * Which platform switch each notification's email belongs to (§26).
+ *
+ * Derived from the notification type rather than passed by every call site, so
+ * a new notification cannot accidentally escape the operator's controls — and
+ * anything unmapped falls through to ANNOUNCEMENT rather than to "unswitchable".
+ */
+const EMAIL_CATEGORY_BY_TYPE = {
+  [NOTIFICATION_TYPES.BOOKING_CREATED]: EMAIL_CATEGORIES.BOOKING,
+  [NOTIFICATION_TYPES.BOOKING_CONFIRMED]: EMAIL_CATEGORIES.BOOKING,
+  [NOTIFICATION_TYPES.BOOKING_CHANGED]: EMAIL_CATEGORIES.BOOKING,
+  [NOTIFICATION_TYPES.BOOKING_CANCELLED]: EMAIL_CATEGORIES.BOOKING,
+  [NOTIFICATION_TYPES.BOOKING_REMINDER]: EMAIL_CATEGORIES.BOOKING,
+  [NOTIFICATION_TYPES.BOOKING_COMPLETED]: EMAIL_CATEGORIES.BOOKING,
+  [NOTIFICATION_TYPES.REFUND_ISSUED]: EMAIL_CATEGORIES.BOOKING,
+  [NOTIFICATION_TYPES.APPLICATION_SUBMITTED]: EMAIL_CATEGORIES.APPLICATION,
+  [NOTIFICATION_TYPES.APPLICATION_APPROVED]: EMAIL_CATEGORIES.APPLICATION,
+  [NOTIFICATION_TYPES.APPLICATION_REJECTED]: EMAIL_CATEGORIES.APPLICATION,
+  [NOTIFICATION_TYPES.APPLICATION_INFO_REQUESTED]: EMAIL_CATEGORIES.APPLICATION,
+  [NOTIFICATION_TYPES.VERIFICATION_UPDATED]: EMAIL_CATEGORIES.APPLICATION,
+  [NOTIFICATION_TYPES.REVIEW_RECEIVED]: EMAIL_CATEGORIES.REVIEW,
+  [NOTIFICATION_TYPES.PAYOUT_UPDATED]: EMAIL_CATEGORIES.PAYOUT,
+};
+
+function emailCategoryFor(type) {
+  return EMAIL_CATEGORY_BY_TYPE[type] ?? EMAIL_CATEGORIES.ANNOUNCEMENT;
+}
 
 /**
  * Notification delivery (§28).
@@ -38,20 +68,25 @@ export async function notify({
 
   if (channels.includes(NOTIFICATION_CHANNELS.EMAIL) && email) {
     // A bounced notification must never undo the thing it is announcing, so
-    // delivery is best-effort and the in-app record stands either way.
-    await dispatchEmail(notification._id, userId, email);
+    // delivery is best-effort and the in-app record stands either way. The
+    // same is true when an operator has this category switched off: the person
+    // still sees it in the app, they just don't get mail about it.
+    await dispatchEmail(notification._id, userId, email, emailCategoryFor(type));
   }
 
   return toPlain(notification);
 }
 
-/** Respects the user's per-channel preference before sending (§28). */
-async function dispatchEmail(notificationId, userId, email) {
+/**
+ * Respects both gates before sending (§28, §26): the person's own per-channel
+ * preference, and the operator's platform switch for this kind of mail.
+ */
+async function dispatchEmail(notificationId, userId, email, category) {
   const user = await User.findById(userId).select("email firstName notificationPreferences").lean();
   if (!user) return;
   if (user.notificationPreferences?.[NOTIFICATION_CHANNELS.EMAIL] === false) return;
 
-  const result = await sendEmail({ to: user.email, ...email });
+  const result = await sendEmail({ to: user.email, ...email }, { category });
   if (!result.delivered) return;
 
   await Notification.updateOne(

@@ -5,27 +5,38 @@ import {
   FOOTER_ONLINE_LINKS,
   FOOTER_SUBJECT_LINKS,
   FOOTER_USEFUL_LINKS,
-  SITE,
 } from "@/constants";
+import { getAppConfig } from "@/services/settings.service";
 import { Logo } from "./Logo";
 
 /**
- * Marketing footer (§29 discovery links, §42 legal links).
+ * Marketing footer (§29 discovery links, §42 legal links, §26 settings).
  *
  * Four bands on a deep plum ground: identity + contact, subject and online
- * discovery, useful links / app / newsletter, then the legal bar. Every link
- * is a real route — the subject and course links are plain search URLs so the
- * footer never touches the database on a page render.
+ * discovery, useful links / app / newsletter, then the legal bar. The subject
+ * and course links are plain search URLs, so the only database read here is the
+ * memoised settings document.
+ *
+ * Everything an operator can change — the blurb, the contact details, which
+ * social profiles exist, whether the newsletter and app bands appear at all —
+ * comes from platform settings. A social profile with no URL renders nothing
+ * rather than a dead icon (§19).
  */
-export function SiteFooter() {
+export async function SiteFooter({ config }) {
+  const { branding, contact, social: links, footer } = config ?? (await getAppConfig());
+
   const year = new Date().getFullYear();
-  const social = [
-    { label: "Facebook", href: SITE.social?.facebook, Mark: FacebookMark },
-    { label: "X", href: SITE.social?.x, Mark: XMark },
-    { label: "LinkedIn", href: SITE.social?.linkedin, Mark: LinkedInMark },
-    { label: "Instagram", href: SITE.social?.instagram, Mark: InstagramMark },
-    { label: "YouTube", href: SITE.social?.youtube, Mark: YouTubeMark },
-  ].filter((item) => item.href);
+  const social = footer.showSocial
+    ? [
+        { label: "Facebook", href: links?.facebook, Mark: FacebookMark },
+        { label: "X", href: links?.x, Mark: XMark },
+        { label: "LinkedIn", href: links?.linkedin, Mark: LinkedInMark },
+        { label: "Instagram", href: links?.instagram, Mark: InstagramMark },
+        { label: "YouTube", href: links?.youtube, Mark: YouTubeMark },
+      ].filter((item) => item.href)
+    : [];
+
+  const location = [contact.city, contact.province].filter(Boolean).join(", ");
 
   return (
     <footer className="mt-auto bg-footer text-white/70">
@@ -33,9 +44,9 @@ export function SiteFooter() {
         {/* --- Identity + contact ------------------------------------------ */}
         <div className="grid gap-10 lg:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)] lg:gap-16">
           <div className="max-w-xl">
-            <Logo tone="inverse" />
+            <Logo tone="inverse" branding={branding} />
             <p className="mt-5 text-sm leading-relaxed text-white/60">
-              {SITE.description}
+              {footer.description}
             </p>
 
             {social.length > 0 && (
@@ -46,7 +57,7 @@ export function SiteFooter() {
                       href={href}
                       target="_blank"
                       rel="noreferrer noopener"
-                      aria-label={`${SITE.name} on ${label}`}
+                      aria-label={`${branding.appName} on ${label}`}
                       className="flex size-11 items-center justify-center rounded-full border border-white/20 text-white/70 transition-colors hover:border-white hover:bg-white hover:text-footer"
                     >
                       <Mark />
@@ -60,22 +71,31 @@ export function SiteFooter() {
           <div>
             <h2 className="text-base font-bold text-white">Feel free to share your question</h2>
             <ul className="mt-6 space-y-4 text-sm">
-              <li className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                <Phone className="size-4 shrink-0 text-white/45" aria-hidden="true" />
-                <a href={`tel:${SITE.supportPhone}`} className="text-white hover:text-accent-300">
-                  {SITE.supportPhone}
-                </a>
-                <span className="text-white/45">( {SITE.supportHours} )</span>
-              </li>
-              <li className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                <Mail className="size-4 shrink-0 text-white/45" aria-hidden="true" />
-                <a
-                  href={`mailto:${SITE.supportEmail}`}
-                  className="text-white hover:text-accent-300"
-                >
-                  {SITE.supportEmail}
-                </a>
-              </li>
+              {contact.supportPhone && (
+                <li className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                  <Phone className="size-4 shrink-0 text-white/45" aria-hidden="true" />
+                  <a
+                    href={`tel:${contact.supportPhone}`}
+                    className="text-white hover:text-accent-300"
+                  >
+                    {contact.supportPhone}
+                  </a>
+                  {contact.supportHours && (
+                    <span className="text-white/45">( {contact.supportHours} )</span>
+                  )}
+                </li>
+              )}
+              {contact.supportEmail && (
+                <li className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                  <Mail className="size-4 shrink-0 text-white/45" aria-hidden="true" />
+                  <a
+                    href={`mailto:${contact.supportEmail}`}
+                    className="text-white hover:text-accent-300"
+                  >
+                    {contact.supportEmail}
+                  </a>
+                </li>
+              )}
               <li className="flex flex-wrap items-center gap-x-3 gap-y-1">
                 <MessageCircle className="size-4 shrink-0 text-white/45" aria-hidden="true" />
                 <Link href="/support" className="text-white hover:text-accent-300">
@@ -83,10 +103,15 @@ export function SiteFooter() {
                 </Link>
                 <span className="text-white/45">( replies within 4 hours )</span>
               </li>
-              <li className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                <MapPin className="size-4 shrink-0 text-white/45" aria-hidden="true" />
-                <span className="text-white">{SITE.city}, Canada</span>
-              </li>
+              {location && (
+                <li className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                  <MapPin className="size-4 shrink-0 text-white/45" aria-hidden="true" />
+                  <span className="text-white">
+                    {contact.addressLine ? `${contact.addressLine}, ` : ""}
+                    {location}, Canada
+                  </span>
+                </li>
+              )}
             </ul>
           </div>
         </div>
@@ -108,25 +133,32 @@ export function SiteFooter() {
         </div>
 
         {/* --- Useful links, app, newsletter --------------------------------- */}
-        <div className="mt-12 grid gap-10 border-t border-white/10 pt-12 md:grid-cols-2 lg:grid-cols-3 lg:gap-16">
+        <div
+          className={`mt-12 grid gap-10 border-t border-white/10 pt-12 md:grid-cols-2 lg:gap-16 ${
+            footer.showAppBadges && footer.showNewsletter ? "lg:grid-cols-3" : "lg:grid-cols-2"
+          }`}
+        >
           <FooterColumn
             title="Useful links"
             links={FOOTER_USEFUL_LINKS}
             className="columns-2"
           />
 
-          <div>
-            <h2 className="text-base font-bold text-white">Get the mobile app</h2>
-            <p className="mt-4 text-sm leading-relaxed text-white/60">
-              Lessons, messages and reminders on the go. The APlus Learn app lands on iOS and
-              Android soon — everything works in your mobile browser today.
-            </p>
-            <div className="mt-5 flex flex-wrap gap-3">
-              <StoreBadge mark={<PlayStoreMark />} top="Coming soon on" name="Google Play" />
-              <StoreBadge mark={<AppleMark />} top="Coming soon on" name="App Store" />
+          {footer.showAppBadges && (
+            <div>
+              <h2 className="text-base font-bold text-white">Get the mobile app</h2>
+              <p className="mt-4 text-sm leading-relaxed text-white/60">
+                Lessons, messages and reminders on the go. The {branding.appName} app lands on iOS
+                and Android soon — everything works in your mobile browser today.
+              </p>
+              <div className="mt-5 flex flex-wrap gap-3">
+                <StoreBadge mark={<PlayStoreMark />} top="Coming soon on" name="Google Play" />
+                <StoreBadge mark={<AppleMark />} top="Coming soon on" name="App Store" />
+              </div>
             </div>
-          </div>
+          )}
 
+          {footer.showNewsletter && (
           <div>
             <h2 className="text-base font-bold text-white">Sign up for our newsletter</h2>
             <p className="mt-4 text-sm leading-relaxed text-white/60">
@@ -157,14 +189,17 @@ export function SiteFooter() {
               </button>
             </form>
           </div>
+          )}
         </div>
       </div>
 
       {/* --- Legal bar ------------------------------------------------------ */}
       <div className="bg-footer-deep">
         <div className="container-page flex flex-col gap-4 py-6 sm:flex-row sm:items-center sm:justify-between">
+          {/* `{year}` in the configured string is substituted here so an
+              operator never has to edit the footer every January. */}
           <p className="text-sm text-white/55">
-            © {year} {SITE.name}. All rights reserved. Built in Canada 🇨🇦
+            {footer.copyrightText.replaceAll("{year}", String(year))}
           </p>
           <ul className="flex flex-wrap items-center gap-x-6 gap-y-2">
             {FOOTER_LEGAL_LINKS.map((link) => (

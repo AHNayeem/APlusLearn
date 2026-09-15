@@ -2,15 +2,20 @@ import Link from "next/link";
 import { Suspense } from "react";
 import { RegisterForm } from "@/components/auth/RegisterForm";
 import { Spinner } from "@/components/ui";
+import { getAppConfig } from "@/services/settings.service";
+import { enabledOAuthProviders } from "@/lib/auth/oauth-availability";
 
-export const metadata = {
-  title: "Create an account",
-  description:
-    "Create a free APlus Learn account to message tutors, book lessons and track your child's progress.",
-  robots: { index: true, follow: true },
-};
+export async function generateMetadata() {
+  const { branding } = await getAppConfig();
+  return {
+    title: "Create an account",
+    description: `Create a free ${branding.appName} account to message tutors, book lessons and track your child's progress.`,
+    robots: { index: true, follow: true },
+  };
+}
 
-export default function RegisterPage() {
+export default async function RegisterPage() {
+  const { features } = await getAppConfig();
   return (
     <>
       <h1 className="text-2xl font-extrabold tracking-tight text-ink-900 sm:text-3xl">
@@ -24,7 +29,7 @@ export default function RegisterPage() {
       </p>
 
       <Suspense fallback={<Spinner className="mt-8" />}>
-        <RegisterForm />
+        <RegisterForm oauthProviders={enabledOAuthProviders(features)} />
       </Suspense>
     </>
   );

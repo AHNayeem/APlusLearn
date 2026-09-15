@@ -6,6 +6,8 @@ import { enforceRateLimit, clientKey } from "@/lib/security/rate-limit";
 import { homeForRole } from "@/constants/navigation";
 import { AppError } from "@/lib/api/errors";
 import { availableOAuthProviders } from "@/services/external/oauth-provider";
+import { isFeatureEnabled } from "@/services/settings.service";
+import { AUTH_PROVIDERS, FEATURES } from "@/constants";
 
 /**
  * Social sign-in (§9, §36).
@@ -19,6 +21,17 @@ import { availableOAuthProviders } from "@/services/external/oauth-provider";
 export const POST = routeHandler(
   async ({ request, body }) => {
     enforceRateLimit(clientKey(request, "oauth"), { limit: 10, windowMs: 10 * 60_000 });
+
+    // The operator's switch is checked before anything is verified: a disabled
+    // provider is not a sign-in path, whatever token the client produces (§26).
+    const providerFeature =
+      body.provider === AUTH_PROVIDERS.APPLE ? FEATURES.APPLE_SIGN_IN : FEATURES.GOOGLE_SIGN_IN;
+    if (!(await isFeatureEnabled(providerFeature))) {
+      throw new AppError("That sign-in method is not available on this platform.", {
+        status: 403,
+        code: "FORBIDDEN",
+      });
+    }
 
     const configured = availableOAuthProviders().some(
       (p) => p.provider === body.provider && p.configured,

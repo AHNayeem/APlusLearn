@@ -3,13 +3,14 @@ import { connectToDatabase } from "@/lib/db/connect";
 import { getCurrentUser } from "@/lib/auth/current-user";
 import { roleHasPermission } from "@/lib/permissions";
 import { AuthenticationError, AuthorizationError, ValidationError, zodToDetails } from "./errors";
+import { requireFeature } from "./features";
 import { failFromError } from "./response";
 
 /**
  * The single request pipeline every API route runs through (§6):
  *
  *   Request -> Database -> Authentication -> Role -> Permission
- *           -> Validation -> Service -> Response
+ *           -> Feature -> Validation -> Service -> Response
  *
  * Declaring the requirements as options rather than writing them inline keeps
  * every endpoint's contract visible at a glance, and makes it impossible to
@@ -20,6 +21,8 @@ export function routeHandler(handler, options = {}) {
     auth = false,
     roles = null,
     permission = null,
+    /** Platform feature toggle this endpoint belongs to (§26). */
+    feature = null,
     bodySchema = null,
     querySchema = null,
     paramsSchema = null,
@@ -55,7 +58,12 @@ export function routeHandler(handler, options = {}) {
         throw new AuthorizationError("You do not have permission to do that.");
       }
 
-      // 4. Validation — route params, query string, then body
+      // 4. Feature availability — an operator switch, checked after identity
+      //    so a signed-out caller still gets 401 rather than a hint about
+      //    which modules this platform runs.
+      if (feature) await requireFeature(feature);
+
+      // 5. Validation — route params, query string, then body
       const rawParams = context?.params ? await context.params : {};
       const params = paramsSchema ? parseOrThrow(paramsSchema, rawParams) : rawParams;
 
@@ -67,7 +75,7 @@ export function routeHandler(handler, options = {}) {
         body = parseOrThrow(bodySchema, await readJson(request));
       }
 
-      // 5. Service (the handler delegates; business logic never lives here)
+      // 6. Service (the handler delegates; business logic never lives here)
       return await handler({ request, user, params, query, body, context });
     } catch (error) {
       return failFromError(error);

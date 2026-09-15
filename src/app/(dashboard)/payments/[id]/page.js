@@ -3,8 +3,9 @@ import Link from "next/link";
 import { ArrowLeft, Printer } from "lucide-react";
 import { connectToDatabase } from "@/lib/db/connect";
 import { enforceRole } from "@/lib/auth/guards";
-import { LEARNER_ROLES, SITE, PAYMENT_STATUS_LABELS, LESSON_MODE_LABELS } from "@/constants";
+import { LEARNER_ROLES, PAYMENT_STATUS_LABELS, LESSON_MODE_LABELS } from "@/constants";
 import { getReceipt } from "@/services/payment.service";
+import { getAppConfig } from "@/services/settings.service";
 import { Badge, Card, CardBody, CardHeader } from "@/components/ui";
 import { DashboardPage, PageHeader } from "@/components/layout/DashboardShell";
 import { formatMoney, formatDate, formatDateTime, formatDuration } from "@/lib/utils/format";
@@ -18,7 +19,10 @@ export default async function ReceiptPage({ params }) {
   const user = await enforceRole(LEARNER_ROLES, `/payments/${id}`);
   await connectToDatabase();
 
-  const receipt = await getReceipt(id, user).catch(() => null);
+  const [receipt, { branding, contact }] = await Promise.all([
+    getReceipt(id, user).catch(() => null),
+    getAppConfig(),
+  ]);
   if (!receipt) notFound();
 
   const { payment, bookings, receiptNumber, issuedAt } = receipt;
@@ -41,7 +45,7 @@ export default async function ReceiptPage({ params }) {
 
       <Card className="mx-auto max-w-2xl">
         <CardHeader
-          title={SITE.name}
+          title={branding.appName}
           description={`Receipt ${receiptNumber}`}
           action={<Badge tone="success">{PAYMENT_STATUS_LABELS[payment.status]}</Badge>}
         />
@@ -146,8 +150,8 @@ export default async function ReceiptPage({ params }) {
           )}
 
           <p className="border-t border-ink-100 pt-5 text-xs leading-relaxed text-ink-400">
-            {SITE.name} operates as a marketplace. Tutors are independent contractors. Questions
-            about this receipt? Contact {SITE.supportEmail}.
+            {branding.appName} operates as a marketplace. Tutors are independent contractors.
+            Questions about this receipt? Contact {contact.supportEmail}.
           </p>
         </CardBody>
       </Card>

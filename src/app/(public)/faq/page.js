@@ -4,7 +4,6 @@ import { Button, Card, CardBody, Reveal } from "@/components/ui";
 import { PageHero } from "@/components/marketing/PageHero";
 import { Section } from "@/components/home/Sections";
 import { HOME_FAQS } from "@/components/home/Sections";
-import { SITE } from "@/constants";
 
 export const metadata = {
   title: "Frequently asked questions",

@@ -31,7 +31,7 @@ const ACCOUNT_TYPES = [
   },
 ];
 
-export function RegisterForm() {
+export function RegisterForm({ oauthProviders }) {
   const router = useRouter();
   const params = useSearchParams();
   const next = params.get("next");
@@ -218,7 +218,7 @@ export function RegisterForm() {
         </Button>
       </form>
 
-      <OAuthButtons role={form.role} next={next} />
+      <OAuthButtons role={form.role} next={next} providers={oauthProviders} />
     </div>
   );
 }

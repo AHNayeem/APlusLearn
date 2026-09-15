@@ -1,6 +1,7 @@
 import { enforceRole } from "@/lib/auth/guards";
 import { navForRole, ROLES } from "@/constants";
 import { DashboardShell } from "@/components/layout/DashboardShell";
+import { getAppConfig } from "@/services/settings.service";
 import { adminQueueCounts } from "@/services/analytics.service";
 import { connectToDatabase } from "@/lib/db/connect";
 
@@ -12,11 +13,12 @@ export default async function AdminLayout({ children }) {
   const user = await enforceRole(ROLES.ADMIN, "/admin/dashboard");
   await connectToDatabase();
 
-  const counts = await adminQueueCounts();
+  const [counts, config] = await Promise.all([adminQueueCounts(), getAppConfig()]);
 
   return (
     <DashboardShell
-      items={navForRole(ROLES.ADMIN)}
+      branding={config.branding}
+      items={navForRole(ROLES.ADMIN, config.features)}
       user={{
         id: user.id,
         firstName: user.firstName,

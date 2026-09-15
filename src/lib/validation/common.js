@@ -55,7 +55,18 @@ export const courseCode = z
   .toUpperCase()
   .regex(/^[A-Z]{3}[A-Z0-9]{1,5}$/, "Enter a valid course code, e.g. MHF4U.");
 
-export const url = z.url("Enter a valid link.").max(500);
+/**
+ * A link that will end up in an `href`.
+ *
+ * Restricted to http(s) deliberately: `z.url()` alone accepts `javascript:`
+ * and `data:`, which are valid URLs and also a stored-XSS vector the moment
+ * one is rendered as a link. Nothing this application links to needs another
+ * scheme (§36).
+ */
+export const url = z
+  .url("Enter a valid link.")
+  .max(500)
+  .refine((v) => /^https?:\/\//i.test(v), "Links must start with http:// or https://");
 
 export const isoDate = z.iso.datetime({ offset: true }).or(
   z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use the format YYYY-MM-DD."),

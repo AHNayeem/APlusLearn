@@ -21,6 +21,7 @@ import {
   AUDIT_ACTIONS,
   PAGE_SIZES,
   ROLES,
+  FEATURES,
 } from "@/constants";
 import {
   NotFoundError,
@@ -44,7 +45,7 @@ import {
 import { isSlotBookable } from "@/lib/booking/slots";
 import { getSettings } from "./settings.service";
 import { getMeetingProvider } from "./external/meeting-provider";
-import { emailTemplates } from "./external/email-provider";
+import { brandedEmailTemplates } from "./external/email-provider";
 import { createPaymentForBooking, refundPayment } from "./payment.service";
 import { notify } from "./notification.service";
 import { recordAudit } from "./audit.service";
@@ -135,6 +136,20 @@ export async function createBooking(input, actor) {
 
   if (!tutor.lessonModes.includes(input.mode)) {
     throw new BusinessRuleError("This tutor does not offer that lesson type.");
+  }
+
+  // A lesson mode the operator has switched off platform-wide is refused here,
+  // in the service, so the rule holds for every caller — the booking form, a
+  // direct API call and the admin console alike (§26).
+  const modeFeature =
+    input.mode === LESSON_MODES.ONLINE ? FEATURES.ONLINE_LESSONS : FEATURES.IN_PERSON_LESSONS;
+  if (settings.features?.[modeFeature] === false) {
+    throw new BusinessRuleError(
+      input.mode === LESSON_MODES.ONLINE
+        ? "Online lessons are not available on this platform right now."
+        : "In-person lessons are not available on this platform right now.",
+      "LESSON_MODE_UNAVAILABLE",
+    );
   }
 
   const availability = await Availability.findOne({ tutorProfileId: tutor._id }).lean();
@@ -330,7 +345,7 @@ async function notifyBookingConfirmed(bookings) {
     entityType: "Booking",
     entityId: first._id,
     channels: [NOTIFICATION_CHANNELS.IN_APP, NOTIFICATION_CHANNELS.EMAIL],
-    email: emailTemplates.bookingConfirmed({
+    email: (await brandedEmailTemplates()).bookingConfirmed({
       firstName: purchaser?.firstName ?? "there",
       booking: bookingEmailPayload(first, tutorName),
     }),
@@ -351,7 +366,7 @@ async function notifyBookingConfirmed(bookings) {
     entityType: "Booking",
     entityId: first._id,
     channels: [NOTIFICATION_CHANNELS.IN_APP, NOTIFICATION_CHANNELS.EMAIL],
-    email: emailTemplates.bookingConfirmed({
+    email: (await brandedEmailTemplates()).bookingConfirmed({
       firstName: tutorUser?.firstName ?? "there",
       booking: bookingEmailPayload(first, studentName),
     }),
@@ -669,7 +684,7 @@ async function notifyCancellation(bookings, role, refundCents) {
       entityType: "Booking",
       entityId: first._id,
       channels: [NOTIFICATION_CHANNELS.IN_APP, NOTIFICATION_CHANNELS.EMAIL],
-      email: emailTemplates.bookingCancelled({
+      email: (await brandedEmailTemplates()).bookingCancelled({
         firstName: nameOf.get(String(recipient.userId)) ?? "there",
         booking: bookingEmailPayload(first, ""),
         refundLabel: refundLabel ?? (recipient.isPurchaser ? "None" : "—"),
@@ -887,7 +902,7 @@ export async function rescheduleBooking(id, { startAt, durationMinutes, reason }
     entityType: "Booking",
     entityId: booking._id,
     channels: [NOTIFICATION_CHANNELS.IN_APP, NOTIFICATION_CHANNELS.EMAIL],
-    email: emailTemplates.bookingRescheduled({
+    email: (await brandedEmailTemplates()).bookingRescheduled({
       firstName: recipient?.firstName ?? "there",
       booking: bookingEmailPayload(booking, ""),
       previousLabel,

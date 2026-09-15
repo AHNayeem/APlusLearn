@@ -4,7 +4,7 @@ import { objectId } from "@/lib/validation/common";
 import {
   blockConversation, archiveConversation, reportConversation,
 } from "@/services/message.service";
-import { PERMISSIONS } from "@/constants";
+import { PERMISSIONS, FEATURES } from "@/constants";
 
 /** Block, archive and report all act on the same thread (§21). */
 export const POST = routeHandler(
@@ -23,6 +23,7 @@ export const POST = routeHandler(
     }
   },
   {
+    feature: FEATURES.MESSAGING,
     permission: PERMISSIONS.MESSAGE_VIEW,
     paramsSchema: z.object({ id: objectId }),
     bodySchema: z

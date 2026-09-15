@@ -17,11 +17,15 @@ import { Button, useToast } from "@/components/ui";
  * With no provider configured the buttons fall back to a local identity so
  * the flow stays testable in development, and say so plainly in production
  * rather than failing silently (§38).
+ *
+ * `providers` is the operator's switch, resolved on the server and passed in.
+ * A method that is off is not rendered here and is refused by the sign-in
+ * endpoint as well, so hiding it is presentation, not protection (§26).
  */
 const GOOGLE_SDK = "https://accounts.google.com/gsi/client";
 const APPLE_SDK = "https://appleid.cdn-apple.com/appleauth/static/jsapi/appleid/1/en_US/appleid.auth.js";
 
-export function OAuthButtons({ role, next, className }) {
+export function OAuthButtons({ role, next, className, providers = ["GOOGLE", "APPLE"] }) {
   const router = useRouter();
   const toast = useToast();
   const [pending, setPending] = useState(null);
@@ -76,6 +80,12 @@ export function OAuthButtons({ role, next, className }) {
     }
   };
 
+  const showGoogle = providers.includes("GOOGLE");
+  const showApple = providers.includes("APPLE");
+
+  // Both switched off: no divider, no empty row — the form simply ends.
+  if (!showGoogle && !showApple) return null;
+
   return (
     <div className={className}>
       <div className="relative py-5">
@@ -87,25 +97,29 @@ export function OAuthButtons({ role, next, className }) {
         </div>
       </div>
 
-      <div className="grid gap-2 sm:grid-cols-2">
-        <Button
-          variant="secondary"
-          size="lg"
-          loading={pending === "GOOGLE"}
-          onClick={() => signIn("GOOGLE")}
-          iconLeft={<GoogleMark />}
-        >
-          Google
-        </Button>
-        <Button
-          variant="secondary"
-          size="lg"
-          loading={pending === "APPLE"}
-          onClick={() => signIn("APPLE")}
-          iconLeft={<AppleMark />}
-        >
-          Apple
-        </Button>
+      <div className={`grid gap-2 ${showGoogle && showApple ? "sm:grid-cols-2" : ""}`}>
+        {showGoogle && (
+          <Button
+            variant="secondary"
+            size="lg"
+            loading={pending === "GOOGLE"}
+            onClick={() => signIn("GOOGLE")}
+            iconLeft={<GoogleMark />}
+          >
+            Google
+          </Button>
+        )}
+        {showApple && (
+          <Button
+            variant="secondary"
+            size="lg"
+            loading={pending === "APPLE"}
+            onClick={() => signIn("APPLE")}
+            iconLeft={<AppleMark />}
+          >
+            Apple
+          </Button>
+        )}
       </div>
     </div>
   );

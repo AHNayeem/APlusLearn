@@ -15,7 +15,7 @@ import { UserMenu } from "./UserMenu";
  * Public site header. Becomes opaque on scroll so the hero can sit underneath
  * it, and collapses to a full-screen sheet on mobile (§33).
  */
-export function SiteHeader({ user }) {
+export function SiteHeader({ user, branding }) {
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
   const [scrolled, setScrolled] = useState(false);
@@ -58,7 +58,7 @@ export function SiteHeader({ user }) {
 
       <div className="container-page flex h-[var(--header-height)] items-center justify-between gap-4">
         <div className="flex items-center gap-8">
-          <Logo />
+          <Logo branding={branding} />
           <nav aria-label="Main" className="hidden items-center gap-1 lg:flex">
             {PUBLIC_NAV.map((item) => {
               const active = pathname === item.href || pathname.startsWith(`${item.href}/`);

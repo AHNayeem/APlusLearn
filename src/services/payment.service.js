@@ -14,7 +14,7 @@ import { NotFoundError, BusinessRuleError, AuthorizationError } from "@/lib/api/
 import { toPlain } from "@/lib/utils/serialize";
 import { formatMoney } from "@/lib/utils/format";
 import { getPaymentProvider } from "./external/payment-provider";
-import { emailTemplates } from "./external/email-provider";
+import { brandedEmailTemplates } from "./external/email-provider";
 import { notify } from "./notification.service";
 import { recordAudit } from "./audit.service";
 
@@ -265,7 +265,7 @@ export async function refundPayment(paymentId, { amountCents, reason, issuedBy }
     entityType: "Payment",
     entityId: payment._id,
     channels: [NOTIFICATION_CHANNELS.IN_APP, NOTIFICATION_CHANNELS.EMAIL],
-    email: emailTemplates.refundIssued({
+    email: (await brandedEmailTemplates()).refundIssued({
       firstName: purchaser?.firstName ?? "there",
       amountLabel: formatMoney(amountCents),
       reason,

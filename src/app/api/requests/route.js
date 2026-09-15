@@ -2,7 +2,7 @@ import { z } from "zod";
 import { routeHandler, ok, created, paginationMeta } from "@/lib/api";
 import { createTutorRequestSchema } from "@/lib/validation/engagement";
 import { listRequests, createTutorRequest } from "@/services/request.service";
-import { PERMISSIONS, REQUEST_STATUS } from "@/constants";
+import { PERMISSIONS, REQUEST_STATUS, FEATURES } from "@/constants";
 
 export const GET = routeHandler(
   async ({ user, query }) => {
@@ -10,6 +10,7 @@ export const GET = routeHandler(
     return ok({ requests: items }, { meta: paginationMeta({ page, pageSize, total }) });
   },
   {
+    feature: FEATURES.TUTOR_REQUESTS,
     permission: PERMISSIONS.REQUEST_VIEW,
     querySchema: z.object({
       status: z.enum(Object.values(REQUEST_STATUS)).optional(),
@@ -22,5 +23,9 @@ export const GET = routeHandler(
 /** Posting a request runs the matching service immediately (§22). */
 export const POST = routeHandler(
   async ({ user, body }) => created(await createTutorRequest(body, user)),
-  { permission: PERMISSIONS.REQUEST_CREATE, bodySchema: createTutorRequestSchema },
+  {
+    feature: FEATURES.TUTOR_REQUESTS,
+    permission: PERMISSIONS.REQUEST_CREATE,
+    bodySchema: createTutorRequestSchema,
+  },
 );

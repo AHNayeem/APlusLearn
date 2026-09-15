@@ -2,14 +2,20 @@ import Link from "next/link";
 import { Suspense } from "react";
 import { LoginForm } from "@/components/auth/LoginForm";
 import { Spinner } from "@/components/ui";
+import { getAppConfig } from "@/services/settings.service";
+import { enabledOAuthProviders } from "@/lib/auth/oauth-availability";
 
-export const metadata = {
-  title: "Sign in",
-  description: "Sign in to your APlus Learn account to manage lessons, messages and payments.",
-  robots: { index: false, follow: true },
-};
+export async function generateMetadata() {
+  const { branding } = await getAppConfig();
+  return {
+    title: "Sign in",
+    description: `Sign in to your ${branding.appName} account to manage lessons, messages and payments.`,
+    robots: { index: false, follow: true },
+  };
+}
 
-export default function LoginPage() {
+export default async function LoginPage() {
+  const { features } = await getAppConfig();
   return (
     <>
       <h1 className="text-2xl font-extrabold tracking-tight text-ink-900 sm:text-3xl">
@@ -23,7 +29,7 @@ export default function LoginPage() {
       </p>
 
       <Suspense fallback={<Spinner className="mt-8" />}>
-        <LoginForm />
+        <LoginForm oauthProviders={enabledOAuthProviders(features)} />
       </Suspense>
     </>
   );

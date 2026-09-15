@@ -92,7 +92,7 @@ src/
 │   ├── (dashboard)/   parent & student area
 │   ├── tutor/         tutor workspace
 │   ├── admin/         admin console
-│   └── api/           101 route handlers
+│   └── api/           103 route handlers
 ├── components/
 │   ├── ui/            18 design-system primitives
 │   └── …              feature components by domain
@@ -100,13 +100,15 @@ src/
 │   ├── api/           request pipeline, typed errors, response envelope
 │   ├── auth/          sessions, password hashing, guards
 │   ├── booking/       pricing, cancellation policy, slot generation
+│   ├── images/        uploaded-image inspection and validation
 │   ├── matching/      tutor ↔ request scoring
 │   ├── search/        query construction
+│   ├── theme/         configured colours → design-system tokens
 │   ├── config/        runtime configuration and provider selection
 │   ├── security/      rate limiting, input sanitising
 │   └── db/            cached MongoDB connection
-├── services/          20 domain services + external provider abstractions
-├── models/            15 model files
+├── services/          21 domain services + external provider abstractions
+├── models/            16 model files
 └── constants/         roles, permissions, domain enums, platform defaults
 ```
 
@@ -132,6 +134,63 @@ A learner's surname is masked from tutors unless a parent opts in. An
 in-person address is released only to the two parties, only once the lesson is
 confirmed. Verification documents are stored outside anything publicly
 reachable and served only through an audited admin route.
+
+**Configuration is not code, and secrets are not configuration.** Everything an
+operator might reasonably change — the application's name, logo, colours,
+metadata, contact details, marketplace rules and which features exist — lives
+in one admin-editable document. Everything that is a credential lives in the
+environment. The line between them is deliberate and one-directional: settings
+never hold a secret, and the admin panel reports integration status without
+ever being able to edit it.
+
+---
+
+## Platform settings
+
+**Admin → Platform settings** (requires the `ADMIN_SETTINGS_MANAGE` permission)
+configures the application without a deployment:
+
+| Section | What it controls |
+|---|---|
+| General | Application name, short name, tagline, description |
+| Branding | Logo, dark-background logo, favicon, Apple touch icon, social preview image |
+| Appearance | Primary, accent, semantic, surface and footer colours |
+| SEO | Site title, title suffix, meta description, keywords, Open Graph, canonical base URL, indexing switch |
+| Contact | Support and general email, phone, address, business and support hours |
+| Social | Facebook, Instagram, LinkedIn, YouTube, X |
+| Footer | Description, copyright line, social / newsletter / app-badge visibility |
+| Marketplace | Commission, cancellation and no-show policy, booking notice and horizon, rate guard rails, payout hold, search radius, review moderation |
+| Features | Messaging, tutor requests, saved tutors, reviews, online / in-person lessons, Google / Apple sign-in |
+| Notifications | Master email switch plus booking, application, review, payout and announcement categories |
+
+A few properties worth knowing:
+
+- **Colours become design tokens, not inline styles.** A chosen colour is
+  expanded into the same `@theme` scale names `globals.css` already declares,
+  so components keep using `bg-brand-600` and never learn a colour was
+  configured. An untouched palette emits no CSS at all.
+- **Accessibility is enforced, not suggested.** The primary and footer colours
+  must clear AA contrast against white text; accent and semantic colours must
+  be legible against white *or* ink; page and card grounds must carry the dark
+  body text. A colour that fails is refused server-side.
+- **Feature flags are real.** A disabled feature is refused by its API
+  endpoints — the flag is checked in the request pipeline, right after the
+  permission check — not merely hidden in the navigation.
+- **Page-specific SEO still wins.** Tutor, course and city pages generate their
+  own titles, descriptions and canonicals; the global settings are only the
+  default for what a page does not state for itself.
+- **Everything has a safe fallback.** With no logo, the drawn wordmark renders.
+  With no database, the shipped identity renders. A blank social link is not a
+  broken icon; it is no icon.
+- **Uploads are checked by their bytes.** Format comes from the file's magic
+  number rather than its declared type, with size and dimension bounds per
+  asset. SVG is refused — it is a script-capable document, not a picture.
+- **Every change is audited**, field by field, old value beside new.
+
+What is deliberately *not* configurable — provider credentials, tutor approval
+before appearing in search, security email, the rating scale, the legal text
+itself — and why, is listed in
+[`docs/REQUIREMENTS.md` §26b](docs/REQUIREMENTS.md).
 
 ---
 

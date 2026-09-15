@@ -1,61 +1,65 @@
 "use client";
 
-import { useState } from "react";
-import { useRouter } from "next/navigation";
-import { Save, AlertTriangle } from "lucide-react";
-import { api } from "@/lib/api/client";
-import { useSubmit } from "@/hooks/useAsync";
+import { AlertTriangle } from "lucide-react";
 import {
-  Alert, Button, Card, CardBody, CardHeader, Field, Input, Switch,
-  FormErrorSummary, useToast,
+  Alert, Card, CardBody, CardHeader, Field, Input, Switch,
 } from "@/components/ui";
 import { formatMoney } from "@/lib/utils/format";
+import { useSettingsSection, toNumber } from "./useSettingsSection";
+import { SectionForm } from "./SectionForm";
 
 /**
- * Platform settings (§20, §26).
+ * Marketplace rules (§20, §26).
  *
  * These values drive live business rules — commission, refunds, booking guard
- * rails — so each one explains its effect before it's changed.
+ * rails — so each one explains its effect before it's changed. They are the
+ * one part of platform settings that can move money, which is why they sit in
+ * their own tab behind their own save button.
  */
-export function PlatformSettings({ settings }) {
-  const router = useRouter();
-  const toast = useToast();
-  const [form, setForm] = useState(settings);
+const MARKETPLACE_KEYS = [
+  "commissionPercent",
+  "freeCancellationWindowHours",
+  "lateCancellationRefundPercent",
+  "studentNoShowRefundPercent",
+  "tutorNoShowRefundPercent",
+  "cancellationAbuseThreshold",
+  "cancellationAbuseWindowDays",
+  "minimumBookingNoticeHours",
+  "bookingHorizonDays",
+  "minHourlyRate",
+  "maxHourlyRate",
+  "payoutHoldDays",
+  "defaultSearchRadiusKm",
+  "autoModerateReviews",
+];
 
-  const set = (key) => (e) =>
-    setForm((f) => ({
-      ...f,
-      [key]: e.target.type === "checkbox" ? e.target.checked : Number(e.target.value),
-    }));
+/** Every field here but the moderation switch is a number. */
+const COERCE = Object.fromEntries(
+  MARKETPLACE_KEYS.filter((key) => key !== "autoModerateReviews").map((key) => [key, toNumber]),
+);
 
-  const { submit, pending, error, fieldErrors } = useSubmit(async () => {
-    const payload = Object.fromEntries(
-      Object.entries(form).filter(
-        ([key]) =>
-          ![
-            "id", "_id", "key", "createdAt", "updatedAt", "updatedBy", "__v",
-          ].includes(key),
-      ),
-    );
-    await api.patch("/api/admin/settings", payload);
-    toast.success("Settings saved", "New bookings use these values immediately.");
-    router.refresh();
-  });
+export function MarketplaceSettings({ settings }) {
+  // Only the marketplace keys are sent. The previous version round-tripped the
+  // whole settings document, which meant every save also rewrote fields this
+  // form does not own.
+  const s = useSettingsSection(
+    null,
+    Object.fromEntries(MARKETPLACE_KEYS.map((key) => [key, settings[key]])),
+    { coerce: COERCE },
+  );
 
   // Worked example so the commission change is concrete, not abstract.
   const exampleRate = 6000;
-  const exampleCommission = Math.floor((exampleRate * form.commissionPercent) / 100);
+  const exampleCommission = Math.floor((exampleRate * (Number(s.form.commissionPercent) || 0)) / 100);
 
   return (
-    <form
-      onSubmit={(e) => {
-        e.preventDefault();
-        submit();
-      }}
-      className="max-w-2xl space-y-6"
+    <SectionForm
+      onSubmit={s.submit}
+      pending={s.pending}
+      error={s.error}
+      fieldErrors={s.fieldErrors}
+      label="Save marketplace rules"
     >
-      <FormErrorSummary error={error} fieldErrors={fieldErrors} />
-
       <Alert tone="warning" title="These change live business rules" icon={<AlertTriangle className="size-3" />}>
         Bookings already made keep the commission and policy captured at the time they were
         created. Changes apply to new bookings only.
@@ -70,7 +74,7 @@ export function PlatformSettings({ settings }) {
           <Field
             label="Commission percentage"
             htmlFor="set-commission"
-            error={fieldErrors.commissionPercent}
+            error={s.errorFor("commissionPercent")}
           >
             <div className="relative max-w-32">
               <Input
@@ -79,9 +83,9 @@ export function PlatformSettings({ settings }) {
                 min={0}
                 max={50}
                 step="0.5"
-                value={form.commissionPercent}
-                onChange={set("commissionPercent")}
-                error={fieldErrors.commissionPercent}
+                value={s.form.commissionPercent}
+                onChange={s.set("commissionPercent")}
+                error={s.errorFor("commissionPercent")}
               />
               <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-sm text-ink-400">
                 %
@@ -123,7 +127,7 @@ export function PlatformSettings({ settings }) {
             label="Free cancellation window"
             htmlFor="set-window"
             hint="Hours before a lesson when a student can still cancel for a full refund."
-            error={fieldErrors.freeCancellationWindowHours}
+            error={s.errorFor("freeCancellationWindowHours")}
           >
             <div className="relative max-w-32">
               <Input
@@ -131,8 +135,8 @@ export function PlatformSettings({ settings }) {
                 type="number"
                 min={0}
                 max={168}
-                value={form.freeCancellationWindowHours}
-                onChange={set("freeCancellationWindowHours")}
+                value={s.form.freeCancellationWindowHours}
+                onChange={s.set("freeCancellationWindowHours")}
               />
               <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-ink-400">
                 hrs
@@ -144,7 +148,7 @@ export function PlatformSettings({ settings }) {
             label="Late cancellation refund"
             htmlFor="set-late-refund"
             hint="What a student gets back when they cancel inside the window."
-            error={fieldErrors.lateCancellationRefundPercent}
+            error={s.errorFor("lateCancellationRefundPercent")}
           >
             <div className="relative max-w-32">
               <Input
@@ -152,8 +156,8 @@ export function PlatformSettings({ settings }) {
                 type="number"
                 min={0}
                 max={100}
-                value={form.lateCancellationRefundPercent}
-                onChange={set("lateCancellationRefundPercent")}
+                value={s.form.lateCancellationRefundPercent}
+                onChange={s.set("lateCancellationRefundPercent")}
               />
               <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-sm text-ink-400">
                 %
@@ -165,7 +169,7 @@ export function PlatformSettings({ settings }) {
             <Field
               label="Student no-show refund"
               htmlFor="set-student-noshow"
-              error={fieldErrors.studentNoShowRefundPercent}
+              error={s.errorFor("studentNoShowRefundPercent")}
             >
               <div className="relative">
                 <Input
@@ -173,8 +177,8 @@ export function PlatformSettings({ settings }) {
                   type="number"
                   min={0}
                   max={100}
-                  value={form.studentNoShowRefundPercent}
-                  onChange={set("studentNoShowRefundPercent")}
+                  value={s.form.studentNoShowRefundPercent}
+                  onChange={s.set("studentNoShowRefundPercent")}
                 />
                 <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-sm text-ink-400">
                   %
@@ -184,7 +188,7 @@ export function PlatformSettings({ settings }) {
             <Field
               label="Tutor no-show refund"
               htmlFor="set-tutor-noshow"
-              error={fieldErrors.tutorNoShowRefundPercent}
+              error={s.errorFor("tutorNoShowRefundPercent")}
             >
               <div className="relative">
                 <Input
@@ -192,8 +196,8 @@ export function PlatformSettings({ settings }) {
                   type="number"
                   min={0}
                   max={100}
-                  value={form.tutorNoShowRefundPercent}
-                  onChange={set("tutorNoShowRefundPercent")}
+                  value={s.form.tutorNoShowRefundPercent}
+                  onChange={s.set("tutorNoShowRefundPercent")}
                 />
                 <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-sm text-ink-400">
                   %
@@ -213,8 +217,8 @@ export function PlatformSettings({ settings }) {
                 type="number"
                 min={1}
                 max={20}
-                value={form.cancellationAbuseThreshold}
-                onChange={set("cancellationAbuseThreshold")}
+                value={s.form.cancellationAbuseThreshold}
+                onChange={s.set("cancellationAbuseThreshold")}
               />
             </Field>
             <Field
@@ -227,8 +231,8 @@ export function PlatformSettings({ settings }) {
                 type="number"
                 min={1}
                 max={365}
-                value={form.cancellationAbuseWindowDays}
-                onChange={set("cancellationAbuseWindowDays")}
+                value={s.form.cancellationAbuseWindowDays}
+                onChange={s.set("cancellationAbuseWindowDays")}
               />
             </Field>
           </div>
@@ -249,8 +253,8 @@ export function PlatformSettings({ settings }) {
                 type="number"
                 min={0}
                 max={168}
-                value={form.minimumBookingNoticeHours}
-                onChange={set("minimumBookingNoticeHours")}
+                value={s.form.minimumBookingNoticeHours}
+                onChange={s.set("minimumBookingNoticeHours")}
               />
             </Field>
             <Field
@@ -263,8 +267,8 @@ export function PlatformSettings({ settings }) {
                 type="number"
                 min={1}
                 max={365}
-                value={form.bookingHorizonDays}
-                onChange={set("bookingHorizonDays")}
+                value={s.form.bookingHorizonDays}
+                onChange={s.set("bookingHorizonDays")}
               />
             </Field>
           </div>
@@ -275,8 +279,8 @@ export function PlatformSettings({ settings }) {
                 id="set-min-rate"
                 type="number"
                 min={0}
-                value={form.minHourlyRate}
-                onChange={set("minHourlyRate")}
+                value={s.form.minHourlyRate}
+                onChange={s.set("minHourlyRate")}
               />
             </Field>
             <Field label="Maximum hourly rate" htmlFor="set-max-rate" hint="In dollars.">
@@ -284,8 +288,8 @@ export function PlatformSettings({ settings }) {
                 id="set-max-rate"
                 type="number"
                 min={1}
-                value={form.maxHourlyRate}
-                onChange={set("maxHourlyRate")}
+                value={s.form.maxHourlyRate}
+                onChange={s.set("maxHourlyRate")}
               />
             </Field>
           </div>
@@ -300,8 +304,8 @@ export function PlatformSettings({ settings }) {
               type="number"
               min={1}
               max={500}
-              value={form.defaultSearchRadiusKm}
-              onChange={set("defaultSearchRadiusKm")}
+              value={s.form.defaultSearchRadiusKm}
+              onChange={s.set("defaultSearchRadiusKm")}
               className="max-w-32"
             />
           </Field>
@@ -321,8 +325,8 @@ export function PlatformSettings({ settings }) {
               type="number"
               min={0}
               max={60}
-              value={form.payoutHoldDays}
-              onChange={set("payoutHoldDays")}
+              value={s.form.payoutHoldDays}
+              onChange={s.set("payoutHoldDays")}
               className="max-w-32"
             />
           </Field>
@@ -331,16 +335,11 @@ export function PlatformSettings({ settings }) {
             <Switch
               label="Moderate reviews before publishing"
               description="When on, new reviews are held for approval instead of appearing immediately."
-              checked={form.autoModerateReviews}
-              onChange={set("autoModerateReviews")}
+              checked={s.form.autoModerateReviews}
+              onChange={s.set("autoModerateReviews")}
             />
           </div>
         </CardBody>
-      </Card>
-
-      <Button type="submit" loading={pending} iconLeft={<Save className="size-4" />}>
-        Save settings
-      </Button>
-    </form>
+      </Card>    </SectionForm>
   );
 }

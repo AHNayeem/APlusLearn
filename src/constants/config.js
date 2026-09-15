@@ -1,14 +1,21 @@
 /**
  * Platform defaults. Anything an administrator can change at runtime lives in
  * the Settings collection and falls back to these values (§20, §26).
+ *
+ * `SITE` is the compile-time identity: the values a request uses when the
+ * database has not been reached yet, or has nothing stored. Runtime code
+ * should read `getAppConfig()` from the settings service instead of importing
+ * `SITE` directly — this object is the floor beneath it, not the source.
  */
 
 export const SITE = {
   name: "APlus Learn",
+  shortName: "APlus",
   tagline: "Canada's trusted tutoring marketplace",
   description:
     "Find verified Canadian tutors for your child's exact course — online or in person. Compare, message and book lessons with transparent pricing.",
   supportEmail: "support@apluslearn.ca",
+  contactEmail: "hello@apluslearn.ca",
   supportPhone: "1-888-555-0142",
   supportHours: "Mon to Sun, 9am – 9pm ET",
   city: "Toronto, Ontario",
@@ -24,6 +31,133 @@ export const SITE = {
   currency: "CAD",
   country: "CA",
 };
+
+/**
+ * Feature toggles (§26).
+ *
+ * Every key here is enforced server-side — a disabled feature returns 403 from
+ * its endpoints, it does not merely disappear from the navigation. Only
+ * features whose absence leaves the marketplace coherent are listed: search,
+ * booking, payment and verification have no switch because a tutoring
+ * marketplace without them is not a degraded product, it is a broken one.
+ */
+export const FEATURES = {
+  MESSAGING: "messaging",
+  FAVOURITES: "favourites",
+  TUTOR_REQUESTS: "tutorRequests",
+  REVIEWS: "reviews",
+  ONLINE_LESSONS: "onlineLessons",
+  IN_PERSON_LESSONS: "inPersonLessons",
+  GOOGLE_SIGN_IN: "googleSignIn",
+  APPLE_SIGN_IN: "appleSignIn",
+};
+
+export const FEATURE_LABELS = {
+  [FEATURES.MESSAGING]: "Messaging",
+  [FEATURES.FAVOURITES]: "Saved tutors",
+  [FEATURES.TUTOR_REQUESTS]: "Tutor requests",
+  [FEATURES.REVIEWS]: "Reviews",
+  [FEATURES.ONLINE_LESSONS]: "Online lessons",
+  [FEATURES.IN_PERSON_LESSONS]: "In-person lessons",
+  [FEATURES.GOOGLE_SIGN_IN]: "Google sign-in",
+  [FEATURES.APPLE_SIGN_IN]: "Apple sign-in",
+};
+
+/**
+ * Email categories, used to route a message through the platform-level
+ * notification switches.
+ *
+ * `SECURITY` is not a category an administrator can reach. Password resets,
+ * email verification and "your password changed" alerts are how an account
+ * owner keeps control of their account; a settings toggle that silently
+ * stopped them would be a security incident waiting to happen (§36).
+ */
+export const EMAIL_CATEGORIES = {
+  SECURITY: "SECURITY",
+  BOOKING: "BOOKING",
+  APPLICATION: "APPLICATION",
+  REVIEW: "REVIEW",
+  PAYOUT: "PAYOUT",
+  ANNOUNCEMENT: "ANNOUNCEMENT",
+};
+
+/** Which platform switch gates each category. SECURITY is absent by design. */
+export const EMAIL_CATEGORY_SETTING = {
+  [EMAIL_CATEGORIES.BOOKING]: "bookingEmails",
+  [EMAIL_CATEGORIES.APPLICATION]: "applicationEmails",
+  [EMAIL_CATEGORIES.REVIEW]: "reviewEmails",
+  [EMAIL_CATEGORIES.PAYOUT]: "payoutEmails",
+  [EMAIL_CATEGORIES.ANNOUNCEMENT]: "announcementEmails",
+};
+
+/**
+ * Branding assets an administrator can upload, and the rules each is held to.
+ *
+ * Bounds are deliberately tight. These files are served to every visitor on
+ * every page, so a 6 MB "logo" is not a preference — it is a performance
+ * regression for the whole marketplace.
+ */
+export const BRANDING_ASSETS = {
+  logo: {
+    key: "logo",
+    label: "Logo",
+    hint: "Shown in the header, dashboard sidebar and emails. A transparent PNG works best.",
+    accepts: ["image/png", "image/webp", "image/jpeg"],
+    maxBytes: 512 * 1024,
+    minWidth: 48,
+    minHeight: 24,
+    maxWidth: 1600,
+    maxHeight: 800,
+  },
+  logoDark: {
+    key: "logoDark",
+    label: "Logo for dark backgrounds",
+    hint: "Used in the footer. Falls back to the wordmark when not set.",
+    accepts: ["image/png", "image/webp", "image/jpeg"],
+    maxBytes: 512 * 1024,
+    minWidth: 48,
+    minHeight: 24,
+    maxWidth: 1600,
+    maxHeight: 800,
+  },
+  favicon: {
+    key: "favicon",
+    label: "Favicon",
+    hint: "Square browser tab icon. 32×32 or larger.",
+    accepts: ["image/png", "image/x-icon", "image/webp"],
+    maxBytes: 128 * 1024,
+    minWidth: 16,
+    minHeight: 16,
+    maxWidth: 512,
+    maxHeight: 512,
+    square: true,
+  },
+  appleTouchIcon: {
+    key: "appleTouchIcon",
+    label: "Apple touch icon",
+    hint: "Square home-screen icon for iOS. 180×180 recommended.",
+    accepts: ["image/png", "image/webp"],
+    maxBytes: 256 * 1024,
+    minWidth: 120,
+    minHeight: 120,
+    maxWidth: 512,
+    maxHeight: 512,
+    square: true,
+  },
+  ogImage: {
+    key: "ogImage",
+    label: "Social preview image",
+    hint: "Shown when a page is shared. 1200×630 is the standard size.",
+    accepts: ["image/png", "image/jpeg", "image/webp"],
+    maxBytes: 1024 * 1024,
+    minWidth: 600,
+    minHeight: 315,
+    maxWidth: 2400,
+    maxHeight: 1260,
+  },
+};
+
+export const BRANDING_ASSET_KEYS = Object.keys(BRANDING_ASSETS);
 
 export const DEFAULT_SETTINGS = {
   /** Platform commission taken from each lesson, as a percentage. */
@@ -63,7 +197,110 @@ export const DEFAULT_SETTINGS = {
 
   /** Reviews longer than this are queued for moderation. */
   autoModerateReviews: false,
+
+  // --- Presentation ------------------------------------------------------
+  // Everything below is how the platform introduces itself. None of it can
+  // change a price, a refund or who may see what; those stay above.
+
+  branding: {
+    appName: SITE.name,
+    shortName: SITE.shortName,
+    tagline: SITE.tagline,
+    description: SITE.description,
+    /** Uploaded assets: null until an administrator provides one. */
+    logo: null,
+    logoDark: null,
+    favicon: null,
+    appleTouchIcon: null,
+    ogImage: null,
+  },
+
+  theme: {
+    /** brand-600 — solid buttons, links, focus rings. */
+    primaryColor: "#2348d6",
+    /** accent-500 — highlights, ratings, secondary calls to action. */
+    accentColor: "#fe7b12",
+    successColor: "#22c55e",
+    warningColor: "#f59e0b",
+    dangerColor: "#ef4444",
+    /** Page ground and card ground. */
+    canvasColor: "#f7f9fc",
+    surfaceColor: "#ffffff",
+    /** The deep footer band — the one dark surface the light theme carries. */
+    footerColor: "#2a1332",
+  },
+
+  seo: {
+    /** Blank means "use the application name and tagline". */
+    metaTitle: "",
+    titleSuffix: "",
+    metaDescription: "",
+    keywords: [
+      "tutoring", "Canadian tutors", "Ontario curriculum", "MHF4U tutor",
+      "online tutoring Canada", "in-person tutoring", "math tutor", "English tutor",
+    ],
+    ogTitle: "",
+    ogDescription: "",
+    twitterHandle: "",
+    /** Overrides NEXT_PUBLIC_APP_URL for canonicals when an operator sets it. */
+    canonicalBaseUrl: "",
+    /** Turned off on a staging deployment that must not be indexed. */
+    allowIndexing: true,
+  },
+
+  contact: {
+    supportEmail: SITE.supportEmail,
+    contactEmail: SITE.contactEmail,
+    supportPhone: SITE.supportPhone,
+    addressLine: "",
+    city: "Toronto",
+    province: "ON",
+    postalCode: "",
+    websiteUrl: "",
+    businessHours: "Mon to Fri, 9am – 6pm ET",
+    supportHours: SITE.supportHours,
+  },
+
+  social: { ...SITE.social },
+
+  footer: {
+    description: "",
+    copyrightText: "",
+    showSocial: true,
+    showNewsletter: true,
+    showAppBadges: true,
+  },
+
+  features: {
+    messaging: true,
+    favourites: true,
+    tutorRequests: true,
+    reviews: true,
+    onlineLessons: true,
+    inPersonLessons: true,
+    googleSignIn: true,
+    appleSignIn: true,
+  },
+
+  notifications: {
+    /** Master switch for everything except security mail. */
+    emailEnabled: true,
+    bookingEmails: true,
+    applicationEmails: true,
+    reviewEmails: true,
+    payoutEmails: true,
+    announcementEmails: true,
+  },
 };
+
+/**
+ * Settings groups that are objects rather than scalars. `getSettings()` merges
+ * these one level deep so a stored partial group cannot drop the defaults for
+ * the keys it does not mention (§19).
+ */
+export const SETTINGS_GROUPS = [
+  "branding", "theme", "seo", "contact", "social", "footer", "features", "notifications",
+];
 
 export const PAGE_SIZES = {
   tutorSearch: 12,
