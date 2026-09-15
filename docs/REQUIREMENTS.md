@@ -108,7 +108,9 @@ Verified on a clean database: `npm run seed` → `npx eslint src scripts` (clean
 | All 13 search dimensions | `src/lib/search/tutor-query.js` + `tutorSearchSchema` | Implemented |
 | All 6 filter groups | `src/components/search/SearchFilters.jsx` | Implemented |
 | Result card fields | `src/components/tutor/TutorCard.jsx` — all 11 spec fields | Implemented |
-| Card actions | View / availability / message / book / save | Implemented |
+| Card actions | View profile / save. Message and book now live on the profile rather than the card — the redesigned card leads with one CTA | Changed |
+| Card photo gallery | `TutorProfile.gallery` → `TutorGallery.jsx`; tutor-managed in `ProfileEditor` | Implemented |
+| Weekly availability on the card | `attachAvailableWeekdays()` reads `Availability.weeklyRules` | Implemented |
 | Filters shareable via URL | Filters write to the query string, not local state | Implemented |
 
 ## 15. Tutor profile
@@ -117,6 +119,7 @@ Verified on a clean database: `npm run seed` → `npx eslint src scripts` (clean
 |---|---|---|
 | Trust → Expertise → Social proof → Availability → Booking | `src/app/(public)/tutors/[slug]/page.js` section order | Implemented |
 | All required profile fields | `TutorProfileHeader` + `TutorProfileBody` | Implemented |
+| Teaching photos | `GallerySection` reuses the search card's `TutorGallery` | Implemented |
 | Book / Message / Save | `BookingWidget`, `MessageTutorPanel`, `FavouriteButton` | Implemented |
 | Never expose exact addresses | `toPublicTutor()` returns city only; QA asserts no coordinates or surnames | Implemented |
 

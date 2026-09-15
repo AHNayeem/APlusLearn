@@ -10,6 +10,16 @@ export const SITE = {
     "Find verified Canadian tutors for your child's exact course — online or in person. Compare, message and book lessons with transparent pricing.",
   supportEmail: "support@apluslearn.ca",
   supportPhone: "1-888-555-0142",
+  supportHours: "Mon to Sun, 9am – 9pm ET",
+  city: "Toronto, Ontario",
+  /** Public profiles linked from the footer. Blank entries are not rendered. */
+  social: {
+    facebook: "https://www.facebook.com/apluslearn",
+    x: "https://x.com/apluslearn",
+    linkedin: "https://www.linkedin.com/company/apluslearn",
+    instagram: "https://www.instagram.com/apluslearn",
+    youtube: "https://www.youtube.com/@apluslearn",
+  },
   locale: "en-CA",
   currency: "CAD",
   country: "CA",

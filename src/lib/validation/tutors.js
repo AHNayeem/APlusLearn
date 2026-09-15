@@ -71,6 +71,8 @@ export const onboardingStepSchemas = {
     languages: z.array(z.string().trim().min(2).max(40)).min(1, "Add at least one language."),
     avatarUrl: z.string().trim().max(500).optional(),
     introVideoUrl: z.string().trim().max(500).optional(),
+    /** Teaching-environment photos shown on the search card gallery. */
+    gallery: z.array(z.string().trim().min(1).max(500)).max(6, "Up to six photos.").optional(),
   }),
 
   EDUCATION: z.object({
@@ -177,6 +179,8 @@ export const updateTutorProfileSchema = z.object({
   languages: z.array(z.string().trim().min(2).max(40)).min(1).optional(),
   avatarUrl: z.string().trim().max(500).optional(),
   introVideoUrl: z.string().trim().max(500).optional(),
+  /** Teaching-environment photos shown on the search card gallery. */
+  gallery: z.array(z.string().trim().min(1).max(500)).max(6, "Up to six photos.").optional(),
   education: z.array(educationEntrySchema).optional(),
   experience: z.array(experienceEntrySchema).optional(),
   qualifications: z.array(z.enum(Object.values(QUALIFICATION_TYPES))).optional(),

@@ -98,6 +98,12 @@ const TutorProfileSchema = new mongoose.Schema(
     headline: { type: String, trim: true, maxlength: 120 },
     bio: { type: String, trim: true, maxlength: 4000 },
     introVideoUrl: { type: String, trim: true },
+    /**
+     * Teaching-environment photos shown on search cards and the profile
+     * gallery. Never an image of a home exterior or anything address-revealing
+     * (§15, §42) — moderation covers that at upload time.
+     */
+    gallery: { type: [String], default: [] },
 
     status: {
       type: String,

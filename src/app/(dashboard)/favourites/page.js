@@ -3,7 +3,7 @@ import { connectToDatabase } from "@/lib/db/connect";
 import { enforceRole } from "@/lib/auth/guards";
 import { LEARNER_ROLES } from "@/constants";
 import { listFavourites } from "@/services/student.service";
-import { toPublicTutor } from "@/services/tutor.service";
+import { toPublicTutor, attachAvailableWeekdays } from "@/services/tutor.service";
 import { Button, EmptyState } from "@/components/ui";
 import { DashboardPage, PageHeader } from "@/components/layout/DashboardShell";
 import { TutorCard } from "@/components/tutor/TutorCard";
@@ -16,6 +16,12 @@ export default async function FavouritesPage() {
   await connectToDatabase();
 
   const favourites = await listFavourites(user);
+  const tutors = await attachAvailableWeekdays(
+    favourites.map((favourite) => ({
+      ...toPublicTutor(favourite.tutorProfileId, favourite.tutorProfileId.userId),
+      isFavourite: true,
+    })),
+  );
 
   return (
     <DashboardPage>
@@ -29,7 +35,7 @@ export default async function FavouritesPage() {
         }
       />
 
-      {favourites.length === 0 ? (
+      {tutors.length === 0 ? (
         <EmptyState
           icon={<Heart className="size-7" />}
           title="No saved tutors yet"
@@ -38,14 +44,8 @@ export default async function FavouritesPage() {
         />
       ) : (
         <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
-          {favourites.map((favourite) => (
-            <TutorCard
-              key={String(favourite._id)}
-              tutor={{
-                ...toPublicTutor(favourite.tutorProfileId, favourite.tutorProfileId.userId),
-                isFavourite: true,
-              }}
-            />
+          {tutors.map((tutor) => (
+            <TutorCard key={tutor.id} tutor={tutor} />
           ))}
         </div>
       )}

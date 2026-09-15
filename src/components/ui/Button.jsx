@@ -15,6 +15,9 @@ const VARIANTS = {
     "bg-white text-ink-800 ring-1 ring-inset ring-ink-200 shadow-xs hover:bg-ink-50 hover:ring-ink-300 active:bg-ink-100",
   accent:
     "bg-accent-500 text-white shadow-sm hover:bg-accent-600 active:bg-accent-700 focus-visible:outline-accent-500",
+  // Marketplace CTA — "View profile" on tutor cards and their equivalents.
+  plum:
+    "bg-plum-700 text-white shadow-sm hover:bg-plum-800 active:bg-plum-900 focus-visible:outline-plum-700",
   ghost: "text-ink-700 hover:bg-ink-100 active:bg-ink-200",
   subtle: "bg-brand-50 text-brand-700 hover:bg-brand-100 active:bg-brand-200",
   danger:

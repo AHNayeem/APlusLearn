@@ -9,7 +9,7 @@ import {
   buildTutorSort,
   availabilityWindowFilter,
 } from "@/lib/search/tutor-query";
-import { toPublicTutor } from "./tutor.service";
+import { toPublicTutor, attachAvailableWeekdays } from "./tutor.service";
 import { getSettings } from "./settings.service";
 
 /**
@@ -85,6 +85,8 @@ export async function searchTutors(params, { viewerId } = {}) {
   if (params.sort === "DISTANCE" && coordinates) {
     items = items.sort((a, b) => (a.distanceKm ?? 1e9) - (b.distanceKm ?? 1e9));
   }
+
+  items = await attachAvailableWeekdays(items);
 
   return {
     items,
@@ -211,7 +213,7 @@ export async function featuredTutors({ limit = 6, courseId, subjectSlug, provinc
     .populate("userId", "firstName lastName avatarUrl")
     .lean();
 
-  return docs.map((profile) => toPublicTutor(profile, profile.userId));
+  return attachAvailableWeekdays(docs.map((profile) => toPublicTutor(profile, profile.userId)));
 }
 
 /** Marketplace supply counts used across public pages. */

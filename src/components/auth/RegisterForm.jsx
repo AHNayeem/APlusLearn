@@ -40,7 +40,9 @@ export function RegisterForm() {
     role: params.get("role") ?? ROLES.PARENT,
     firstName: "",
     lastName: "",
-    email: "",
+    // The footer's newsletter field hands the address over here; it is still
+    // validated server-side like any other submitted value.
+    email: params.get("email")?.slice(0, 254) ?? "",
     password: "",
     confirmPassword: "",
     acceptTerms: false,

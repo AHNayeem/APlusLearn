@@ -56,6 +56,7 @@ export function toPublicTutor(profile, user, { distanceKm } = {}) {
     headline: profile.headline,
     bio: profile.bio,
     introVideoUrl: profile.introVideoUrl ?? null,
+    gallery: profile.gallery ?? [],
 
     // Approximate location only — city level, never an address.
     city: profile.city,
@@ -113,6 +114,31 @@ export function toPublicTutor(profile, user, { distanceKm } = {}) {
     acceptingNewStudents: profile.acceptingNewStudents ?? true,
     timeZone: profile.timeZone,
   };
+}
+
+/**
+ * Attach the weekdays each tutor teaches on (0 = Sunday), so a search card can
+ * show a MON–SUN strip without a query per card. Weekly rules only — one-off
+ * exceptions are a calendar detail, not a signal for a summary card.
+ */
+export async function attachAvailableWeekdays(tutors) {
+  if (!tutors.length) return tutors;
+
+  const docs = await Availability.find({ tutorProfileId: { $in: tutors.map((t) => t.id) } })
+    .select("tutorProfileId weeklyRules")
+    .lean();
+
+  const byTutor = new Map(
+    docs.map((doc) => [
+      String(doc.tutorProfileId),
+      [...new Set((doc.weeklyRules ?? []).map((rule) => rule.weekday))].sort((a, b) => a - b),
+    ]),
+  );
+
+  return tutors.map((tutor) => ({
+    ...tutor,
+    availableWeekdays: byTutor.get(tutor.id) ?? [],
+  }));
 }
 
 export async function getPublicTutorBySlug(slug) {
@@ -758,7 +784,7 @@ export async function listMyTutors(userId) {
     .lean();
   const profileMap = new Map(profiles.map((p) => [String(p._id), p]));
 
-  return rows
+  const tutors = rows
     .map((row) => {
       const profile = profileMap.get(String(row._id));
       if (!profile) return null;
@@ -770,6 +796,8 @@ export async function listMyTutors(userId) {
       };
     })
     .filter(Boolean);
+
+  return attachAvailableWeekdays(tutors);
 }
 
 export { rateForCourse };

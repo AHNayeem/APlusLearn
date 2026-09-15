@@ -51,6 +51,64 @@ export const FOOTER_NAV = [
   },
 ];
 
+/**
+ * Footer discovery columns (§29). These are plain search URLs rather than a
+ * database read so the footer stays static on every page — the labels mirror
+ * the subjects the curriculum seeds, so every link returns results.
+ */
+export const FOOTER_SUBJECT_LINKS = [
+  { href: "/find-a-tutor?subject=mathematics", label: "Mathematics" },
+  { href: "/find-a-tutor?subject=english", label: "English" },
+  { href: "/find-a-tutor?subject=science", label: "General science" },
+  { href: "/find-a-tutor?subject=physics", label: "Physics" },
+  { href: "/find-a-tutor?subject=chemistry", label: "Chemistry" },
+  { href: "/find-a-tutor?subject=biology", label: "Biology" },
+  { href: "/find-a-tutor?subject=french", label: "French" },
+  { href: "/find-a-tutor?subject=computer-science", label: "Computer science" },
+  { href: "/find-a-tutor?subject=business-studies", label: "Business studies" },
+  { href: "/find-a-tutor?subject=history", label: "History" },
+  { href: "/find-a-tutor?subject=geography", label: "Geography" },
+  { href: "/find-a-tutor?subject=social-sciences", label: "Social sciences" },
+  { href: "/courses?popular=true", label: "Ontario course codes" },
+];
+
+/** The same subjects, scoped to online delivery (§14 `mode` filter). */
+export const FOOTER_ONLINE_LINKS = [
+  { href: "/find-a-tutor?mode=ONLINE&subject=mathematics", label: "Online math tutoring" },
+  { href: "/find-a-tutor?mode=ONLINE&subject=english", label: "Online English tutoring" },
+  { href: "/find-a-tutor?mode=ONLINE&subject=physics", label: "Online physics classes" },
+  { href: "/find-a-tutor?mode=ONLINE&subject=chemistry", label: "Online chemistry classes" },
+  { href: "/find-a-tutor?mode=ONLINE&subject=biology", label: "Online biology classes" },
+  { href: "/find-a-tutor?mode=ONLINE&subject=computer-science", label: "Online coding classes" },
+  { href: "/find-a-tutor?mode=ONLINE&subject=french", label: "Online French classes" },
+  { href: "/find-a-tutor?mode=ONLINE&courseCode=MCV4U", label: "MCV4U calculus help" },
+  { href: "/find-a-tutor?mode=ONLINE&courseCode=MHF4U", label: "MHF4U functions help" },
+  { href: "/find-a-tutor?mode=IN_PERSON", label: "In-person tutoring" },
+];
+
+/** Short, high-traffic marketing links for the lower footer band. */
+export const FOOTER_USEFUL_LINKS = [
+  { href: "/about", label: "About" },
+  { href: "/courses", label: "Courses" },
+  { href: "/how-it-works", label: "How it works" },
+  { href: "/pricing", label: "Pricing" },
+  { href: "/find-a-tutor", label: "Find a tutor" },
+  { href: "/become-a-tutor", label: "Become a tutor" },
+  { href: "/safety", label: "Safety" },
+  { href: "/verification", label: "Verification" },
+  { href: "/faq", label: "F.A.Q" },
+  { href: "/login", label: "Sign in now" },
+];
+
+/** Bottom bar. `/legal/[slug]` renders each of these. */
+export const FOOTER_LEGAL_LINKS = [
+  { href: "/support", label: "Support" },
+  { href: "/legal/terms", label: "Terms of use" },
+  { href: "/legal/privacy", label: "Privacy policy" },
+  { href: "/legal/cookies", label: "Cookie notice" },
+  { href: "/legal/accessibility", label: "Accessibility" },
+];
+
 /** Dashboard sidebars, keyed by role. Icons are lucide-react names. */
 export const PARENT_NAV = [
   { href: "/dashboard", label: "Overview", icon: "LayoutDashboard" },

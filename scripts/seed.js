@@ -50,6 +50,38 @@ const CITY_COORDS = {
   London: [-81.2497, 42.9849], Oshawa: [-78.8658, 43.8971],
 };
 
+/**
+ * Teaching-environment photos for the search-card gallery. Unsplash is the
+ * only image host `next.config.mjs` allows, and these are rooms and desks —
+ * never a building exterior, which would leak an address (§15, §42).
+ */
+const GALLERY_POOL = [
+  "photo-1517245386807-bb43f82c33c4",
+  "photo-1524178232363-1fb2b075b655",
+  "photo-1503676260728-1c00da094a0b",
+  "photo-1509062522246-3755977927d7",
+  "photo-1522202176988-66273c2fd55f",
+  "photo-1427504494785-3a9ca7044f45",
+  "photo-1544377193-33dcf4d68fb5",
+  "photo-1588072432836-e10032774350",
+  "photo-1497633762265-9d179a990aa6",
+  "photo-1513475382585-d06e58bcb0e0",
+  "photo-1434030216411-0b793f4b4173",
+  "photo-1546410531-bb4caa6b424d",
+  "photo-1571260899304-425eee4c7efc",
+  "photo-1523240795612-9a054b0db644",
+  "photo-1600880292203-757bb62b4baf",
+  "photo-1596495578065-6e0763fa1178",
+].map((id) => `https://images.unsplash.com/${id}?auto=format&fit=crop&w=800&q=70`);
+
+/** Five photos per tutor, rotating so no two neighbouring cards look alike. */
+function galleryFor(index) {
+  return Array.from(
+    { length: 5 },
+    (_, i) => GALLERY_POOL[(index * 3 + i) % GALLERY_POOL.length],
+  );
+}
+
 const timeToMinutes = (t) => {
   const [h, m] = t.split(":").map(Number);
   return h * 60 + m;
@@ -212,6 +244,7 @@ async function main() {
           userId: user._id,
           slug: `${slugify(`${t.firstName}-${t.lastName.charAt(0)}`)}-${slugify(t.city).slice(0, 4)}`,
           headline: t.headline, bio: t.bio,
+          gallery: galleryFor(tutorProfiles.length),
           status: "APPROVED", isSearchable: true, approvedAt: new Date(),
           education: t.education, experience: t.experience ?? [],
           qualifications: t.qualifications, octNumber: t.oct,
@@ -225,8 +258,14 @@ async function main() {
           provinceCodes: ["ON"],
           lessonModes: t.modes,
           onlineMeetingProviders: t.modes.includes("ONLINE") ? ["ZOOM", "GOOGLE_MEET"] : [],
+          // Not everyone teaching in person is willing to host at their own
+          // place, so alternate — otherwise every card looks identical.
           inPersonLocationTypes: t.modes.includes("IN_PERSON")
-            ? ["STUDENT_HOME", "LIBRARY", "PUBLIC_PLACE"] : [],
+            ? [
+                "STUDENT_HOME", "LIBRARY", "PUBLIC_PLACE",
+                ...(tutorProfiles.length % 2 === 0 ? ["TUTOR_LOCATION"] : []),
+              ]
+            : [],
           city: t.city, province: "ON", postalCodePrefix: t.postalCode.slice(0, 3),
           location: { type: "Point", coordinates: coords },
           travelRadiusKm: t.radius,

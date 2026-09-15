@@ -1,7 +1,31 @@
 import { GraduationCap, Briefcase, BookOpen, ShieldCheck } from "lucide-react";
 import { Badge, Card, CardBody, CardHeader, Rating, RatingBar, EmptyState } from "@/components/ui";
+import { TutorGallery } from "./TutorGallery";
 import { formatRate, formatDate } from "@/lib/utils/format";
 import { VERIFICATION_LABELS, VERIFICATION_DESCRIPTIONS } from "@/constants";
+
+/**
+ * The photos from the search card, at profile size. Same component, so what a
+ * parent clicked on is exactly what they land on.
+ */
+export function GallerySection({ tutor }) {
+  if (!tutor.gallery?.length) return null;
+
+  return (
+    <Card id="photos">
+      <CardHeader title={`Where ${tutor.firstName} teaches`} />
+      <CardBody>
+        <TutorGallery
+          images={tutor.gallery}
+          name={tutor.displayName}
+          monogram={tutor.firstName?.charAt(0)}
+          aspect="aspect-[16/9]"
+          sizes="(min-width: 1024px) 42rem, 100vw"
+        />
+      </CardBody>
+    </Card>
+  );
+}
 
 /** About / bio (§15). */
 export function AboutSection({ tutor }) {

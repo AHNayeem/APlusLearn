@@ -39,21 +39,24 @@ export default async function MyTutorsPage() {
       ) : (
         <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
           {tutors.map((tutor) => (
-            <div key={tutor.id} className="relative">
-              <TutorCard tutor={tutor} />
-              <div className="absolute right-4 top-4 flex flex-col items-end gap-1">
-                {tutor.upcomingCount > 0 && (
-                  <Badge tone="success" size="sm">
-                    {tutor.upcomingCount} upcoming
-                  </Badge>
-                )}
-                {tutor.lessonCount > 0 && (
-                  <Badge tone="neutral" size="sm">
-                    {tutor.lessonCount} completed
-                  </Badge>
-                )}
-              </div>
-            </div>
+            <TutorCard
+              key={tutor.id}
+              tutor={tutor}
+              overlay={
+                <>
+                  {tutor.upcomingCount > 0 && (
+                    <Badge tone="success" size="sm">
+                      {tutor.upcomingCount} upcoming
+                    </Badge>
+                  )}
+                  {tutor.lessonCount > 0 && (
+                    <Badge tone="neutral" size="sm" className="bg-white/90 backdrop-blur-sm">
+                      {tutor.lessonCount} completed
+                    </Badge>
+                  )}
+                </>
+              }
+            />
           ))}
         </div>
       )}

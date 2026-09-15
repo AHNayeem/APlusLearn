@@ -8,7 +8,7 @@ import { LEARNER_ROLES, SITE } from "@/constants";
 import { formatRate } from "@/lib/utils/format";
 import { TutorProfileHeader } from "@/components/tutor/TutorProfileHeader";
 import {
-  AboutSection, CoursesSection, CredentialsSection, TrustSection, ReviewsSection,
+  GallerySection, AboutSection, CoursesSection, CredentialsSection, TrustSection, ReviewsSection,
 } from "@/components/tutor/TutorProfileBody";
 import { BookingWidget } from "@/components/booking/BookingWidget";
 import { MessageTutorPanel } from "@/components/messaging/MessageTutorPanel";
@@ -62,6 +62,7 @@ export default async function TutorProfilePage({ params }) {
       <div className="container-page py-8">
         <div className="grid gap-8 lg:grid-cols-[1fr_24rem]">
           <div className="min-w-0 space-y-6">
+            <GallerySection tutor={tutor} />
             <AboutSection tutor={tutor} />
             <CoursesSection tutor={tutor} />
             <CredentialsSection tutor={tutor} />

@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { Eye, Save } from "lucide-react";
+import { Eye, Plus, Save, Trash2 } from "lucide-react";
 import { api } from "@/lib/api/client";
 import { useSubmit } from "@/hooks/useAsync";
 import {
@@ -33,12 +33,17 @@ export function ProfileEditor({ profile }) {
     city: profile.city ?? "",
     travelRadiusKm: profile.travelRadiusKm ?? 15,
     introVideoUrl: profile.introVideoUrl ?? "",
+    gallery: profile.gallery ?? [],
   });
 
   const set = (key, value) => setForm((f) => ({ ...f, [key]: value }));
 
   const { submit, pending, error, fieldErrors } = useSubmit(async () => {
-    await api.patch("/api/tutor/profile", form);
+    // Blank rows are a half-finished edit, not a value to store.
+    await api.patch("/api/tutor/profile", {
+      ...form,
+      gallery: form.gallery.map((url) => url.trim()).filter(Boolean),
+    });
     toast.success("Profile updated", "Changes are live immediately.");
     router.refresh();
   });
@@ -97,6 +102,46 @@ export function ProfileEditor({ profile }) {
                 error={fieldErrors.introVideoUrl}
                 placeholder="https://youtube.com/watch?v=…"
               />
+            </Field>
+
+            <Field
+              label="Photos"
+              hint="Up to six images of where and how you teach — they lead your search card. Never include a photo that shows your address."
+              error={fieldErrors.gallery}
+            >
+              <div className="space-y-2">
+                {form.gallery.map((url, index) => (
+                  <div key={index} className="flex items-center gap-2">
+                    <Input
+                      type="url"
+                      value={url}
+                      aria-label={`Photo ${index + 1} URL`}
+                      placeholder="https://…"
+                      onChange={(e) =>
+                        set("gallery", form.gallery.map((v, i) => (i === index ? e.target.value : v)))
+                      }
+                    />
+                    <Button
+                      variant="dangerGhost"
+                      size="icon"
+                      aria-label={`Remove photo ${index + 1}`}
+                      onClick={() => set("gallery", form.gallery.filter((_, i) => i !== index))}
+                    >
+                      <Trash2 className="size-4" />
+                    </Button>
+                  </div>
+                ))}
+                {form.gallery.length < 6 && (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    iconLeft={<Plus className="size-4" />}
+                    onClick={() => set("gallery", [...form.gallery, ""])}
+                  >
+                    Add a photo
+                  </Button>
+                )}
+              </div>
             </Field>
           </CardBody>
         </Card>

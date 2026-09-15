@@ -31,6 +31,20 @@
   --color-accent-800: #9d3710;
   --color-accent-900: #7e2f10;
 
+  /* Plum — the marketplace CTA family. Anchored to the footer's deep plum so
+     the "View profile" buttons on tutor cards read as the same chapter. */
+  --color-plum-50: #faf5fd;
+  --color-plum-100: #f3e8fb;
+  --color-plum-200: #e8d3f7;
+  --color-plum-300: #d7b1ef;
+  --color-plum-400: #bf82e3;
+  --color-plum-500: #a455d2;
+  --color-plum-600: #8a36b5;
+  --color-plum-700: #6d2b8e;
+  --color-plum-800: #5a2574;
+  --color-plum-900: #4a2160;
+  --color-plum-950: #2a1332;
+
   /* Neutral — slate family */
   --color-ink-50: #f8fafc;
   --color-ink-100: #f1f5f9;
@@ -71,6 +85,10 @@
   /* Surfaces */
   --color-canvas: #f7f9fc;
   --color-surface: #ffffff;
+
+  /* Footer — the deepest plum, shared with the plum scale above */
+  --color-footer: var(--color-plum-950);
+  --color-footer-deep: rgba(0, 0, 0, 0.2);
 
   /* Typography */
   --font-sans: var(--font-plus-jakarta), ui-sans-serif, system-ui, -apple-system,
@@ -187,6 +205,19 @@
   width: 100%;
   margin-inline: auto;
   max-width: 80rem;
+  padding-inline: 1rem;
+  @media (min-width: 640px) { padding-inline: 1.5rem; }
+  @media (min-width: 1024px) { padding-inline: 2rem; }
+}
+
+/**
+ * Wider gutter for the search results page, where the tutor card is a
+ * full-width row rather than a tile and needs the extra column.
+ */
+@utility container-wide {
+  width: 100%;
+  margin-inline: auto;
+  max-width: 90rem;
   padding-inline: 1rem;
   @media (min-width: 640px) { padding-inline: 1.5rem; }
   @media (min-width: 1024px) { padding-inline: 2rem; }

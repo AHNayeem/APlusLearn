@@ -6,7 +6,7 @@ import { tutorSearchSchema } from "@/lib/validation/search";
 import { searchTutors, searchFacets } from "@/services/search.service";
 import { listProvinces, listGrades, listSubjects } from "@/services/curriculum.service";
 import { getCurrentUser } from "@/lib/auth/current-user";
-import { Button, EmptyState, Pagination, SkeletonCard } from "@/components/ui";
+import { Button, EmptyState, Pagination, Skeleton } from "@/components/ui";
 import { TutorCard } from "@/components/tutor/TutorCard";
 import { SearchFilters } from "@/components/search/SearchFilters";
 import { SearchToolbar } from "@/components/search/SearchToolbar";
@@ -48,7 +48,7 @@ export default async function FindATutorPage({ searchParams }) {
   return (
     <div className="bg-canvas pb-16">
       <SearchHeader params={params} />
-      <div className="container-page">
+      <div className="container-wide">
         <Suspense fallback={<SearchSkeleton />} key={JSON.stringify(raw)}>
           <SearchResults params={params} rawParams={raw} />
         </Suspense>
@@ -67,7 +67,7 @@ async function SearchHeader({ params }) {
 
   return (
     <div className="border-b border-ink-200 bg-white">
-      <div className="container-page py-6">
+      <div className="container-wide py-6">
         <h1 className="text-2xl font-extrabold tracking-tight text-ink-900 sm:text-3xl">
           Find a tutor
         </h1>
@@ -113,11 +113,12 @@ async function SearchResults({ params, rawParams }) {
           <NoResults params={params} />
         ) : (
           <>
-            <div className="mt-6 grid gap-5 sm:grid-cols-2 xl:grid-cols-3">
+            <div className="mt-6 flex flex-col gap-5">
               {result.items.map((tutor) => (
                 <TutorCard
                   key={tutor.id}
                   tutor={tutor}
+                  layout="wide"
                   courseCode={result.resolved.course?.code}
                 />
               ))}
@@ -212,12 +213,43 @@ function SearchSkeleton() {
       </div>
       <div className="min-w-0" role="status" aria-label="Loading tutors">
         <div className="h-5 w-40 rounded shimmer" />
-        <div className="mt-6 grid gap-5 sm:grid-cols-2 xl:grid-cols-3">
-          {Array.from({ length: 6 }).map((_, i) => (
-            <SkeletonCard key={i} />
+        <div className="mt-6 flex flex-col gap-5">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <TutorCardSkeleton key={i} />
           ))}
         </div>
         <span className="sr-only">Loading tutors…</span>
+      </div>
+    </div>
+  );
+}
+
+/** Mirrors the wide card's two-column shape so the swap doesn't jump. */
+function TutorCardSkeleton() {
+  return (
+    <div className="rounded-2xl border border-ink-200 bg-white p-3.5 sm:p-4">
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,17rem)_minmax(0,1fr)] lg:gap-6">
+        <div className="flex flex-col gap-2">
+          <Skeleton className="aspect-[4/3] w-full rounded-xl" />
+          <div className="grid grid-cols-5 gap-1.5">
+            {Array.from({ length: 5 }).map((_, i) => (
+              <Skeleton key={i} className="aspect-square rounded-lg" />
+            ))}
+          </div>
+          <Skeleton className="h-11 w-full rounded-xl" />
+        </div>
+        <div className="flex flex-col gap-3.5">
+          <div className="flex items-start gap-3">
+            <Skeleton className="size-14 shrink-0 rounded-full" />
+            <div className="flex-1 space-y-2">
+              <Skeleton className="h-5 w-1/3" />
+              <Skeleton className="h-4 w-2/3" />
+            </div>
+          </div>
+          <Skeleton className="h-8 w-full rounded-lg" />
+          <Skeleton className="h-12 w-full rounded-xl" />
+          <Skeleton className="h-12 w-full rounded-lg" />
+        </div>
       </div>
     </div>
   );
