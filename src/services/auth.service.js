@@ -5,7 +5,7 @@ import { hashPassword, verifyPassword } from "@/lib/auth/password";
 import { createToken, hashToken } from "@/lib/auth/tokens";
 import { AppError, ConflictError, NotFoundError, AuthenticationError } from "@/lib/api/errors";
 import { toPlain } from "@/lib/utils/serialize";
-import { getEmailProvider, emailTemplates } from "./external/email-provider";
+import { sendEmail, emailTemplates } from "./external/email-provider";
 import { getOAuthProvider } from "./external/oauth-provider";
 import { recordAudit } from "./audit.service";
 
@@ -91,7 +91,9 @@ export async function sendVerificationEmail(user) {
     expiresAt: new Date(Date.now() + VERIFY_TTL_MS),
   });
 
-  await getEmailProvider().send({
+  // Best-effort: a transient provider outage must not fail registration, and
+  // "resend verification" is always available. The token is already stored.
+  await sendEmail({
     to: user.email,
     ...emailTemplates.verifyEmail({ firstName: user.firstName, token: raw }),
   });
@@ -176,21 +178,67 @@ export async function login({ email, password }, { request } = {}) {
   return toPlain({ ...user.toObject(), passwordHash: undefined });
 }
 
-/** Google/Apple sign-in; creates the account on first use (§9). */
-export async function oauthSignIn({ provider, credential, role }, { request } = {}) {
-  const identity = await getOAuthProvider().verifyCredential({ provider, credential });
-
-  let user = await User.findOne({
-    $or: [
-      { email: identity.email },
-      {
-        "oauthAccounts.provider": provider,
-        "oauthAccounts.providerAccountId": identity.providerAccountId,
-      },
-    ],
+/**
+ * Google/Apple sign-in; creates the account on first use (§9).
+ *
+ * The identity has already been cryptographically verified by the provider
+ * adapter. What this function decides is what that identity is allowed to do
+ * to an account, and the rules are conservative:
+ *
+ * - **Linking by email needs a provider-verified address.** Otherwise anyone
+ *   who can assert an unverified `email` claim could attach themselves to an
+ *   existing account.
+ * - **One identity, one account.** If the provider identity already belongs
+ *   to somebody else, the sign-in is refused rather than re-pointed.
+ * - **Role is never granted by OAuth.** `role` is honoured only when creating
+ *   a brand-new account; an existing user's role, status and profile are left
+ *   exactly as they are. RBAC stays where it lives (§10).
+ * - **Protected fields are not overwritten.** The provider may supply a name
+ *   or picture, and they are used only to fill a blank.
+ */
+export async function oauthSignIn({ provider, credential, role, nonce, profile }, { request } = {}) {
+  const identity = await getOAuthProvider().verifyCredential({
+    provider,
+    credential,
+    expectedNonce: nonce,
+    profile,
   });
 
+  // Look the provider identity up first: it is the strong key.
+  let user = await User.findOne({
+    "oauthAccounts.provider": provider,
+    "oauthAccounts.providerAccountId": identity.providerAccountId,
+  });
+
+  if (!user) {
+    const byEmail = await User.findOne({ email: identity.email });
+
+    if (byEmail) {
+      if (!identity.emailVerified) {
+        throw new AppError(
+          "An account already uses that email address. Sign in with your password to link this provider.",
+          { status: 409, code: "EMAIL_NOT_VERIFIED_BY_PROVIDER" },
+        );
+      }
+      user = byEmail;
+    }
+  } else if (user.email !== identity.email) {
+    // The provider changed the address on an identity we already know. Trust
+    // the link, not the new address — changing an account email is a
+    // deliberate, separately-verified action.
+    const clash = await User.findOne({ email: identity.email }).select("_id").lean();
+    if (clash && String(clash._id) !== String(user._id)) {
+      throw new ConflictError(
+        "That email address is already used by another account. Sign in with your password instead.",
+      );
+    }
+  }
+
   if (user) {
+    if (user.deletedAt) {
+      throw new AuthenticationError("That email or password is incorrect.");
+    }
+
     const alreadyLinked = user.oauthAccounts.some(
       (a) => a.provider === provider && a.providerAccountId === identity.providerAccountId,
     );
@@ -205,14 +253,25 @@ export async function oauthSignIn({ provider, credential, role }, { request } = 
       user.emailVerifiedAt = new Date();
       if (user.status === USER_STATUS.PENDING_VERIFICATION) user.status = USER_STATUS.ACTIVE;
     }
+    // Fill blanks only — never overwrite what the user has set themselves.
+    if (!user.avatarUrl && identity.avatarUrl) user.avatarUrl = identity.avatarUrl;
     user.lastLoginAt = new Date();
     await user.save();
+
+    await recordAudit({
+      actor: user,
+      action: AUDIT_ACTIONS.USER_LOGIN,
+      entityType: "User",
+      entityId: user._id,
+      metadata: { provider, linked: !alreadyLinked },
+      request,
+    });
   } else {
     const newRole = role ?? ROLES.PARENT;
     user = await User.create({
       email: identity.email,
-      firstName: identity.firstName,
-      lastName: identity.lastName,
+      firstName: identity.firstName || "New",
+      lastName: identity.lastName || "Member",
       avatarUrl: identity.avatarUrl,
       role: newRole,
       status: identity.emailVerified ? USER_STATUS.ACTIVE : USER_STATUS.PENDING_VERIFICATION,
@@ -275,7 +334,10 @@ export async function requestPasswordReset(email) {
     expiresAt: new Date(Date.now() + RESET_TTL_MS),
   });
 
-  await getEmailProvider().send({
+  // Deliberately not surfaced: a delivery error here would only ever happen
+  // for an address that exists, which would turn this endpoint into an
+  // account-enumeration oracle. It is logged instead.
+  await sendEmail({
     to: user.email,
     ...emailTemplates.resetPassword({ firstName: user.firstName, token: raw }),
   });
@@ -310,6 +372,8 @@ export async function resetPassword({ token, password }) {
   }
   await user.save();
 
+  await notifyPasswordChanged(user);
+
   return toPlain({ ...user.toObject(), passwordHash: undefined });
 }
 
@@ -326,7 +390,26 @@ export async function changePassword(userId, { currentPassword, password }) {
   user.tokenVersion = (user.tokenVersion ?? 0) + 1;
   await user.save();
 
+  await notifyPasswordChanged(user);
+
   return { changed: true };
+}
+
+/**
+ * Tell someone their password changed (§36).
+ *
+ * Sent after the fact and carrying no token, so it is safe to deliver to an
+ * address that may no longer be under the account owner's control — its whole
+ * job is to let a victim notice a takeover.
+ */
+async function notifyPasswordChanged(user) {
+  await sendEmail({
+    to: user.email,
+    ...emailTemplates.passwordChanged({
+      firstName: user.firstName,
+      whenLabel: new Date().toLocaleString("en-CA", { timeZone: user.timeZone || "America/Toronto" }),
+    }),
+  });
 }
 
 /** Invalidate every session for a user (logout everywhere, admin action). */

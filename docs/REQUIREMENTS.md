@@ -4,11 +4,15 @@ Every numbered section of `docs/Project.md`, mapped to what implements it.
 
 **Status key**
 - **Implemented** — built, wired end to end, and exercised by `npm run qa`
+- **Awaiting credentials** — the production integration is built and covered by
+  `npm run test:integrations`, but no account credentials exist in this
+  environment, so it has not been run against the live service (§38)
 - **Partial** — working, with a named limitation
-- **Mocked provider** — fully functional behind a development implementation; the real provider is a constructor swap (§38)
 - **Phase 2/3** — deliberately deferred, with the architecture in place
 
-Verified on a clean database: `npm run seed` → `npm run build` → `npm run qa` (70/70 passing), `npx eslint src scripts` (clean).
+Verified on a clean database: `npm run seed` → `npx eslint src scripts` (clean)
+→ `npm run build` (passes) → `npm run test:integrations` (111/111) →
+`npm run qa` (88/88).
 
 ---
 
@@ -65,7 +69,9 @@ Verified on a clean database: `npm run seed` → `npm run build` → `npm run qa
 | Email/password | `src/services/auth.service.js`, bcrypt cost 12 | Implemented |
 | Email verification | `AuthToken` + `/verify-email`; SHA-256 hashed, single-use, 24h | Implemented |
 | Forgot / reset password | `/forgot-password`, `/reset-password`; 1h expiry, bumps `tokenVersion` | Implemented |
-| Google / Apple sign-in | `services/external/oauth-provider.js` behind a verified-identity interface | Mocked provider |
+| Google / Apple sign-in | `OpenIdOAuthProvider` — ID token verified against the provider's JWKS (issuer, audience, expiry) with a single-use nonce from `/api/auth/oauth/nonce` | Awaiting credentials |
+| OAuth account safety | Email linking requires a provider-verified address; one identity maps to one account; role and protected fields are never changed by a sign-in | Implemented |
+| Password-change security notice | `passwordChanged` template, sent after reset and change; carries no token | Implemented |
 | Secure sessions | JWT (jose) in an httpOnly, SameSite=Lax cookie; `tokenVersion` enables revocation | Implemented |
 | Logout | `/api/auth/logout` clears the cookie and audits | Implemented |
 
@@ -157,10 +163,17 @@ Verified on a clean database: `npm run seed` → `npm run build` → `npm run qa
 
 | Requirement | Implementation | Status |
 |---|---|---|
-| Stripe Connect-shaped abstraction | `services/external/payment-provider.js` | Mocked provider |
+| Stripe Connect | `StripePaymentProvider` — hosted Checkout for the charge, Connect Express with separate charges and transfers for payouts | Awaiting credentials |
+| Card never touches this application | Hosted Checkout; `capturePayment()` is refused outright under Stripe, so the deployment stays outside PCI scope | Implemented |
+| Booking confirmed only by a verified webhook | `/api/webhooks/payments` → `webhook.service.js`; the browser's return page polls and confirms nothing | Implemented |
+| Webhook idempotency | Unique `(provider, eventId)` index on `WebhookEvent`; replays are acknowledged and dropped | Implemented |
+| Webhook amount validation | An event whose amount disagrees with the priced total is refused | Implemented |
+| Payment idempotency | Idempotency keys on checkout, refund and transfer creation | Implemented |
 | Student payment, commission, tutor amount | `lib/booking/pricing.js`; QA asserts commission + earnings = subtotal exactly | Implemented |
 | Refunds | `refundPayment()`, capped at the remaining balance | Implemented |
-| Payout onboarding / earnings / status / receipts | `/tutor/payouts`, `/tutor/earnings`, `/payments/[id]` | Implemented |
+| Payout onboarding / earnings / status / receipts | `/tutor/payouts`, `/tutor/earnings`, `/payments/[id]`; hosted Connect onboarding, resumable, with provider-reported eligibility | Implemented |
+| Payout eligibility is the provider's decision | `refreshPayoutAccount()` records what Stripe reports; it cannot declare an account complete | Implemented |
+| A payout is never sent twice | `providerTransferId` short-circuits a repeated "mark as paid"; the transfer carries a stable idempotency key | Implemented |
 | Commission configurable by admin | `/admin/settings` → `Settings.commissionPercent` | Implemented |
 | Calculations centralised server-side | Client never sends a price; QA asserts injected prices are ignored | Implemented |
 
@@ -224,8 +237,12 @@ Verified on a clean database: `npm run seed` → `npm run build` → `npm run qa
 
 | Requirement | Implementation | Status |
 |---|---|---|
-| Zoom / Google Meet / Teams | `services/external/meeting-provider.js` | Mocked provider |
-| Meeting info on the booking | `Booking.meeting` | Implemented |
+| Zoom | `ZoomMeetingProvider` — Server-to-Server OAuth; waiting room on, join-before-host off, recording off | Awaiting credentials |
+| Google Meet / Teams | Same `MeetingProvider` interface; both need a per-host OAuth grant rather than an account credential | Phase 2 |
+| Meeting info on the booking | `Booking.meeting`; released only to the purchaser, tutor and admins — never on a public profile or in search | Implemented |
+| Host credentials never stored | Zoom's `start_url` is dropped by the adapter; QA and the integration tests assert it | Implemented |
+| Cancellation and reschedule | A reschedule moves the existing room so the join link keeps working; a cancellation tears it down | Implemented |
+| Provider outage does not strand a paid lesson | Meeting creation failure is logged; the booking still confirms and the room is filled in later | Implemented |
 | 5 in-person location types | `IN_PERSON_LOCATIONS` | Implemented |
 | Addresses protected | `addressLine` is `select:false`, released only to parties on a confirmed booking | Implemented |
 
@@ -236,12 +253,19 @@ Verified on a clean database: `npm run seed` → `npm run build` → `npm run qa
 | All 10 notification types | `NOTIFICATION_TYPES` | Implemented |
 | Unread count, centre, read/unread | `/notifications`, `unreadNotificationCount()` | Implemented |
 | Preferences | Per-channel toggles in Settings | Implemented |
-| Email / SMS / push ready | `NOTIFICATION_CHANNELS` + `deliveredChannels`; email wired, SMS/push declared | Partial — email via mocked provider; SMS/push are Phase 2 |
+| Email / SMS / push ready | `NOTIFICATION_CHANNELS` + `deliveredChannels`; email wired through Resend, SMS/push declared | Partial — SMS/push are Phase 2 |
+| Transactional templates | 13 templates in `email-templates.js`: auth, booking, cancellation, reschedule, refund, tutor lifecycle, payouts. Responsive HTML + a real plain-text twin, built from one description | Implemented |
+| No email for in-app messages | Messaging notifies in-app only, per the product requirement | Implemented |
+| Delivery failure is contained | `sendEmail()` logs and returns; a bounced confirmation never undoes the booking it announces | Implemented |
 
 ## 29. SEO
 
 | Requirement | Implementation | Status |
 |---|---|---|
+| Production geocoding | `GoogleGeocodingProvider`, component-filtered to Canada, 4s timeout, bundled-table fallback | Awaiting credentials |
+| Exact addresses never geocoded or published | Lookups use postal code / city / province only; every coordinate is coarsened to ~1 km by `coarsenCoordinates()` | Implemented |
+| Geocoding failure is not fatal | Degrades to the bundled table, then to `null`; search falls back to non-geographic matching | Implemented |
+| Diagnostics leak no addresses | Failures log the provider's status only | Implemented |
 | `/ontario/grade-12/math/mhf4u` | `src/app/(public)/[province]/[grade]/[subject]/[course]/page.js` | Implemented |
 | `/tutors/mhf4u/scarborough` | `src/app/(public)/tutors/[slug]/[city]/page.js` | Implemented |
 | Shareable tutor URLs | `/tutors/[slug]`, stable slug per profile | Implemented |
@@ -290,7 +314,13 @@ Verified on a clean database: `npm run seed` → `npm run build` → `npm run qa
 | Secure password hashing | bcrypt cost 12, `select:false` | Implemented |
 | RBAC & API authorization | Enforced per route by the handler pipeline | Implemented |
 | Secure verification documents | Private storage, audited admin-only access | Implemented |
-| Payment information protected | Card data goes straight to the provider; only brand + last4 stored | Implemented |
+| Payment information protected | Hosted Checkout — no PAN ever reaches this application; only brand + last4 are stored, from a verified webhook | Implemented |
+| Webhook signature verification | Checked against the raw request body before any database access; unsigned and unverifiable calls are refused | Implemented |
+| OAuth CSRF / replay protection | Single-use httpOnly nonce, required in the ID token; consumed whether the attempt succeeds or fails | Implemented |
+| OAuth cannot escalate a role | Requested role applies only to a brand-new account; QA asserts an `ADMIN` request is refused | Implemented |
+| No secrets in URLs, logs or responses | Provider API keys travel in headers; `integrationStatus()` reports names only; QA asserts settings carry no credentials | Implemented |
+| Geocoding privacy | Coordinates coarsened to ~1 km before storage; failure diagnostics log no addresses | Implemented |
+| Meeting-link authorization | Released to the two parties and admins only; Zoom host `start_url` never stored | Implemented |
 | Minor privacy controls | `isMinor` + `shareFullNameWithTutor`; QA asserts masking | Implemented |
 | Audit logging | `AuditLog` on every admin and security action | Implemented |
 | Data retention / deletion | Account deletion anonymises and retains financial records | Implemented |
@@ -301,15 +331,23 @@ Verified on a clean database: `npm run seed` → `npm run build` → `npm run qa
 
 ## 38. External service strategy
 
-| Requirement | Implementation | Status |
-|---|---|---|
-| Payment abstraction | `PaymentProvider` / `MockPaymentProvider` | Mocked provider |
-| Email abstraction | `EmailProvider` / `ConsoleEmailProvider` | Mocked provider |
-| Auth providers | `OAuthProvider` / `DevOAuthProvider` | Mocked provider |
-| Geocoding | `lib/geo` with a bundled Canadian FSA/city table | Mocked provider |
-| Calendar | `CalendarProvider` interface declared | Phase 2 |
-| Video meetings | `MeetingProvider` / mock room links | Mocked provider |
-| UI unchanged when the real provider lands | All access goes through `get*Provider()` | Implemented |
+See [docs/INTEGRATIONS.md](INTEGRATIONS.md) for setup, dashboard configuration
+and webhook endpoints.
+
+| Requirement | Development | Production implementation | Status |
+|---|---|---|---|
+| Payment abstraction | `MockPaymentProvider` | `StripePaymentProvider` — hosted Checkout, Connect Express, refunds, transfers, signed webhooks | Awaiting credentials |
+| Email abstraction | `ConsoleEmailProvider` | `ResendEmailProvider` + 13 branded responsive templates | Awaiting credentials |
+| Auth providers | `DevOAuthProvider` | `OpenIdOAuthProvider` — Google and Apple ID tokens | Awaiting credentials |
+| Geocoding | `LocalTableGeocodingProvider` | `GoogleGeocodingProvider`, country-filtered, coarsened, with table fallback | Awaiting credentials |
+| Video meetings | `MockMeetingProvider` | `ZoomMeetingProvider` — Server-to-Server OAuth, create / move / tear down | Awaiting credentials |
+| Document storage | `LocalStorageProvider` | Interface declared; no object-store implementation | Phase 2 |
+| Calendar | — | `CalendarProvider` interface declared | Phase 2 |
+| Configuration-driven selection | `src/lib/config/env.js`; `APP_ENV` + one `*_PROVIDER` per integration | — | Implemented |
+| Production never silently fakes | `PAYMENT_PROVIDER`/`EMAIL_PROVIDER=development` refused under `APP_ENV=production`; a named provider without credentials stops the boot | — | Implemented |
+| Start-up validation | `src/instrumentation.js` — warns in development, refuses to boot in production | — | Implemented |
+| Operator visibility | Admin → Platform settings → Integrations: provider, mode and recent webhook deliveries | — | Implemented |
+| UI unchanged when the real provider lands | All access goes through `get*Provider()`; no service or component names a provider | — | Implemented |
 
 ## 39–40. No fake buttons; realistic data
 
@@ -363,16 +401,84 @@ Verified on a clean database: `npm run seed` → `npm run build` → `npm run qa
 | Lint | `npx eslint src scripts` | Clean |
 | Build | `npm run build` | Passes, no warnings |
 | Database connectivity | `databaseStatus()` on the admin dashboard | Healthy |
-| Route checks | 22 public + 39 authenticated pages | All 200 |
+| Route checks | 22 public + 40 authenticated pages | All 200 |
 | Authorization checks | Anonymous 401, wrong-role 403, cross-account 403 | Enforced |
-| Journey checks | `npm run qa` | 70/70 |
+| Journey checks | `npm run qa` | 88/88 |
+| Integration adapters | `npm run test:integrations` | 111/111 |
+
+### Integration adapter coverage
+
+`scripts/integration-tests.mjs` runs the real adapter classes with `fetch`
+stubbed, Stripe webhooks signed with the genuine signing scheme, and OAuth
+tokens signed by a key pair generated in process. It contacts no third party,
+so it is safe to run in CI.
+
+| Area | What is asserted |
+|---|---|
+| Configuration | Auto-detection in development; production refuses a development payment or email provider, refuses a named provider with missing secrets, and never guesses; the status report contains no secret values |
+| Payments | The server-priced amount is what is charged; idempotency keys on checkout, refund and transfer; a raw card is refused; refund carries the policy outcome; Connect accounts start unpayable and are set to manual payouts; only masked bank details come back |
+| Webhooks | A wrong secret is rejected; an hour-old signature is rejected; a duplicate delivery changes nothing and is counted as a retry; a mismatched amount is refused and leaves the payment unsettled; a late failure cannot un-pay a settled payment; only card brand and last4 are stored; a dashboard refund reconciles once; unknown events are acknowledged |
+| Email | Key travels in a header not a URL; both HTML and text parts are sent; delivery is idempotent; a provider rejection surfaces its reason; an outage does not throw into the calling service; all 13 templates render; template input is HTML-escaped; a security notice carries no token |
+| OAuth | A valid token verifies; wrong audience, wrong issuer, tampered signature and a mismatched nonce are all rejected; Apple's string booleans and one-time name are handled; an unconfigured provider refuses rather than trusting |
+| Geocoding | A rooftop coordinate is coarsened before it leaves the module; an unknown location, a rejected key and a network failure all degrade to `null`; an outage falls back to the bundled table; distance maths is correct and symmetric |
+| Meetings | Server-to-Server auth; correct start time, duration and safety settings; the host `start_url` is never returned or stored; a reschedule PATCHes rather than re-creates; the token is cached; cancellation deletes the room |
 
 ---
 
 ## Known limitations
 
-1. **External providers are development implementations.** Payments, email, OAuth, geocoding and meeting links run through working mocks. Each sits behind an interface (§38) so connecting the real service is a constructor change, but no real money moves and no real email is sent until credentials are supplied.
-2. **Geocoding covers 20 Ontario cities and ~30 forward sortation areas.** Outside that table, distance search falls back to the province's largest city. A real geocoder removes the limit.
-3. **Rate limiting is in-process.** Adequate for a single instance; a multi-instance deployment should move the store to Redis. The call signature is designed not to change.
-4. **Payouts are created manually by an administrator.** The logic is complete and idempotent; production would call `createPayout()` from a scheduled job.
-5. **Only Ontario has curriculum data.** Seven other provinces exist and can be opened from the admin curriculum manager; they need course data before they are useful.
+Deliberately separated by *why* each one is still open.
+
+### Implemented and verified
+
+Everything above marked **Implemented** runs end to end and is covered by
+`npm run qa` (88/88) or `npm run test:integrations` (111/111).
+
+### Implemented, awaiting credentials
+
+The production adapters for **Stripe**, **Resend**, **Google/Apple OAuth**,
+**Google Geocoding** and **Zoom** are written, wired through the existing
+interfaces and covered by the adapter test suite — but no account credentials
+exist in this environment, so none has been exercised against the live
+service. Each still needs a sandbox smoke test once keys are available:
+a test-mode checkout and refund, a Connect onboarding run, an email to a
+controlled address, a full Google sign-in, a handful of Ontario postal codes,
+and one online booking end to end.
+[docs/INTEGRATIONS.md](INTEGRATIONS.md) lists the external dashboard
+configuration each one needs.
+
+Apple additionally requires a paid Developer Program membership to create the
+Services ID that `APPLE_CLIENT_ID` refers to.
+
+### Requires production infrastructure
+
+1. **Rate limiting is in-process.** Adequate for a single instance; a
+   multi-instance deployment should move the store to Redis. The call
+   signature is designed not to change.
+2. **Payouts are created manually by an administrator.** The logic is complete
+   and idempotent; production would call `createPayout()` from a scheduled job.
+3. **Webhook delivery needs a public URL.** Locally, use
+   `stripe listen --forward-to localhost:3000/api/webhooks/payments`.
+
+### Not implemented
+
+1. **Object-store document storage.** Verification documents are written to
+   `./.storage/documents` and served only through the audited admin route.
+   `StorageProvider` is the interface a production implementation would satisfy;
+   it is the one integration with no production adapter yet.
+2. **Calendar sync.** `CalendarProvider` is declared and `Availability`
+   already stores `externalCalendars`, but nothing implements it (Phase 2).
+3. **SMS and push notifications.** The channels exist on the model and in
+   `NOTIFICATION_CHANNELS`; only in-app and email are delivered (Phase 2).
+4. **Google Meet and Microsoft Teams.** They reach the same `MeetingProvider`
+   interface, but each needs a per-host OAuth grant rather than the account
+   credential Zoom uses.
+
+### Scope
+
+1. **Only Ontario has curriculum data.** Seven other provinces exist and can
+   be opened from the admin curriculum manager; they need course data before
+   they are useful.
+2. **Development geocoding covers 20 Ontario cities and ~30 forward sortation
+   areas.** That is the *fallback* table now, not the only option — setting
+   `GEOCODING_PROVIDER=google` removes the limit.

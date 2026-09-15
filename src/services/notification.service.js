@@ -2,7 +2,7 @@ import "server-only";
 import { Notification, User } from "@/models";
 import { NOTIFICATION_CHANNELS, PAGE_SIZES } from "@/constants";
 import { toPlain } from "@/lib/utils/serialize";
-import { getEmailProvider } from "./external/email-provider";
+import { sendEmail } from "./external/email-provider";
 
 /**
  * Notification delivery (§28).
@@ -37,9 +37,9 @@ export async function notify({
   });
 
   if (channels.includes(NOTIFICATION_CHANNELS.EMAIL) && email) {
-    await dispatchEmail(notification._id, userId, email).catch((error) =>
-      console.error("[notify] email dispatch failed:", error.message),
-    );
+    // A bounced notification must never undo the thing it is announcing, so
+    // delivery is best-effort and the in-app record stands either way.
+    await dispatchEmail(notification._id, userId, email);
   }
 
   return toPlain(notification);
@@ -51,7 +51,9 @@ async function dispatchEmail(notificationId, userId, email) {
   if (!user) return;
   if (user.notificationPreferences?.[NOTIFICATION_CHANNELS.EMAIL] === false) return;
 
-  await getEmailProvider().send({ to: user.email, ...email });
+  const result = await sendEmail({ to: user.email, ...email });
+  if (!result.delivered) return;
+
   await Notification.updateOne(
     { _id: notificationId },
     { $addToSet: { deliveredChannels: NOTIFICATION_CHANNELS.EMAIL } },

@@ -1,9 +1,12 @@
 /**
- * Geocoding and distance (§29).
+ * Location primitives (§29).
  *
- * The provider abstraction means the app works without a Maps API key: a
- * local Canadian postal-code/city table resolves the common cases. Wiring a
- * real geocoder later means implementing `lookup()` and nothing else (§38).
+ * Pure data and maths: distance, the bundled Canadian centroid tables, and
+ * the coarsening rule that keeps a stored coordinate approximate. Resolving
+ * free text to a coordinate is a provider concern and lives in
+ * `services/external/geocoding-provider.js`; this module has no I/O, so
+ * anything that only needs a distance can import it without pulling a
+ * server-only dependency along.
  */
 
 import { escapeRegex } from "@/lib/security/sanitize";
@@ -50,7 +53,7 @@ export const CITY_CENTROIDS = {
 };
 
 /** First three characters of a postal code -> approximate centroid. */
-const FSA_CENTROIDS = {
+export const FSA_CENTROIDS = {
   M1B: { city: "Scarborough", province: "ON", coordinates: [-79.1943, 43.8067] },
   M1C: { city: "Scarborough", province: "ON", coordinates: [-79.1596, 43.7845] },
   M1E: { city: "Scarborough", province: "ON", coordinates: [-79.1895, 43.7635] },
@@ -85,51 +88,25 @@ const FSA_CENTROIDS = {
   N6A: { city: "London", province: "ON", coordinates: [-81.2497, 42.9849] },
 };
 
-/**
- * Resolve a free-text location to coordinates.
- * Returns null when nothing matches — callers fall back to non-geo search.
- */
-export async function geocode({ postalCode, city, province } = {}) {
-  if (postalCode) {
-    const fsa = String(postalCode).toUpperCase().replace(/\s/g, "").slice(0, 3);
-    const hit = FSA_CENTROIDS[fsa];
-    if (hit) return { ...hit, precision: "POSTAL_CODE", postalCodePrefix: fsa };
-
-    // Unknown FSA: fall back to the province's largest city so distance
-    // search still returns something sensible rather than nothing.
-    const provinceGuess = provinceFromFsa(fsa);
-    if (provinceGuess) {
-      const fallback = Object.values(CITY_CENTROIDS).find((c) => c.province === provinceGuess);
-      if (fallback) return { ...fallback, precision: "PROVINCE", postalCodePrefix: fsa };
-    }
-  }
-
-  if (city) {
-    const key = String(city).toLowerCase().trim();
-    const hit = CITY_CENTROIDS[key] ?? CITY_CENTROIDS[key.replace(/\s+/g, "")];
-    if (hit) return { ...hit, precision: "CITY" };
-
-    // Loose prefix match, e.g. "Toronto, ON".
-    const loose = Object.entries(CITY_CENTROIDS).find(([name]) => key.startsWith(name));
-    if (loose) return { ...loose[1], precision: "CITY" };
-  }
-
-  if (province) {
-    const fallback = Object.values(CITY_CENTROIDS).find((c) => c.province === province);
-    if (fallback) return { ...fallback, precision: "PROVINCE" };
-  }
-
-  return null;
-}
-
 /** First letter of a Canadian FSA maps to a region. */
-function provinceFromFsa(fsa) {
+export function provinceFromFsa(fsa) {
   const map = {
     A: "NL", B: "NS", C: "PE", E: "NB", G: "QC", H: "QC", J: "QC",
     K: "ON", L: "ON", M: "ON", N: "ON", P: "ON", R: "MB", S: "SK",
     T: "AB", V: "BC", X: "NT", Y: "YT",
   };
   return map[fsa?.charAt(0)] ?? null;
+}
+
+/**
+ * Round a coordinate pair down to roughly a kilometre.
+ *
+ * A production geocoder will happily return a rooftop for a full address. A
+ * tutor's home is never stored or published at that resolution, so every
+ * coordinate that enters the system passes through here first (§15, §42).
+ */
+export function coarsenCoordinates([lng, lat]) {
+  return [Math.round(lng * 100) / 100, Math.round(lat * 100) / 100];
 }
 
 /** City suggestions for the location input. */

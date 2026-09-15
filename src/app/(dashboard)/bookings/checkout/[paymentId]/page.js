@@ -2,7 +2,7 @@ import { notFound, redirect } from "next/navigation";
 import { connectToDatabase } from "@/lib/db/connect";
 import { enforceRole } from "@/lib/auth/guards";
 import { LEARNER_ROLES, PAYMENT_STATUS } from "@/constants";
-import { getPayment } from "@/services/payment.service";
+import { getPayment, checkoutUrlFor } from "@/services/payment.service";
 import { Booking } from "@/models";
 import { toPlain } from "@/lib/utils/serialize";
 import { DashboardPage, PageHeader } from "@/components/layout/DashboardShell";
@@ -28,6 +28,13 @@ export default async function CheckoutPage({ params }) {
   // Already paid: send them to the lesson rather than charging twice.
   if (payment.status === PAYMENT_STATUS.PAID) {
     redirect(`/bookings/${bookings[0].id}`);
+  }
+
+  // With a hosted provider the card is entered on their page, not ours. A
+  // lapsed session is rebuilt rather than shown, so this link always works.
+  const checkout = await checkoutUrlFor(paymentId, user);
+  if (checkout.hosted && checkout.url) {
+    redirect(checkout.url);
   }
 
   return (

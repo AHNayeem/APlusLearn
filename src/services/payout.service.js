@@ -5,6 +5,7 @@ import {
   PAYOUT_STATUS,
   BOOKING_STATUS,
   NOTIFICATION_TYPES,
+  NOTIFICATION_CHANNELS,
   AUDIT_ACTIONS,
   PAGE_SIZES,
   ROLES,
@@ -14,6 +15,7 @@ import { toPlain } from "@/lib/utils/serialize";
 import { publicReference } from "@/lib/auth/tokens";
 import { formatMoney } from "@/lib/utils/format";
 import { getPaymentProvider } from "./external/payment-provider";
+import { emailTemplates } from "./external/email-provider";
 import { getSettings } from "./settings.service";
 import { notify } from "./notification.service";
 import { recordAudit } from "./audit.service";
@@ -38,11 +40,20 @@ export async function startPayoutOnboarding(tutorUserId) {
   const provider = getPaymentProvider();
   const existing = await PayoutAccount.findOne({ tutorUserId });
 
-  if (existing?.onboardingStatus === "COMPLETE") {
+  if (existing?.onboardingStatus === "COMPLETE" && existing.payoutsEnabled) {
     return toPlain(existing);
   }
 
-  const result = await provider.createConnectedAccount({ email: user.email });
+  // Passing the existing account id is what makes "continue where I left off"
+  // work: the provider returns a fresh link onto the same account rather than
+  // opening a second one.
+  const result = await provider.createConnectedAccount({
+    email: user.email,
+    accountId: existing?.provider === provider.name ? existing.providerAccountId : undefined,
+    returnUrl: payoutUrl("?onboarding=complete"),
+    refreshUrl: payoutUrl("?onboarding=refresh"),
+    metadata: { tutorUserId: String(tutorUserId) },
+  });
 
   const account = await PayoutAccount.findOneAndUpdate(
     { tutorUserId },
@@ -53,7 +64,9 @@ export async function startPayoutOnboarding(tutorUserId) {
         onboardingStatus: result.onboardingStatus,
         payoutsEnabled: result.payoutsEnabled,
         chargesEnabled: result.chargesEnabled,
+        detailsSubmitted: result.detailsSubmitted ?? false,
         requirementsDue: result.requirementsDue,
+        disabledReason: result.disabledReason ?? undefined,
       },
     },
     { upsert: true, returnDocument: "after", setDefaultsOnInsert: true },
@@ -62,35 +75,85 @@ export async function startPayoutOnboarding(tutorUserId) {
   return { ...toPlain(account), onboardingUrl: result.onboardingUrl };
 }
 
-/** Finish onboarding. A real provider drives this through a webhook. */
-export async function completePayoutOnboarding(tutorUserId) {
+function payoutUrl(suffix = "") {
+  const base = (process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000").replace(/\/$/, "");
+  return `${base}/tutor/payouts${suffix}`;
+}
+
+/**
+ * Re-read the payout account's real state from the provider (§20).
+ *
+ * The tutor returning from hosted onboarding triggers this, and so does the
+ * provider's own `account.updated` webhook. It never *declares* an account
+ * complete — only the provider decides whether identity and banking checks
+ * have passed, and this records whatever they say.
+ */
+export async function refreshPayoutAccount(tutorUserId) {
   const account = await PayoutAccount.findOne({ tutorUserId });
   if (!account) throw new NotFoundError("Start payout setup first.");
 
-  const result = await getPaymentProvider().completeConnectedAccount({
+  const result = await getPaymentProvider().refreshConnectedAccount({
     accountId: account.providerAccountId,
   });
+
+  return applyAccountState(account, result);
+}
+
+/** Apply provider-reported account state and notify on the transitions. */
+export async function applyAccountState(account, result) {
+  const wasEnabled = account.payoutsEnabled;
 
   Object.assign(account, {
     onboardingStatus: result.onboardingStatus,
     payoutsEnabled: result.payoutsEnabled,
     chargesEnabled: result.chargesEnabled,
-    bankName: result.bankName,
-    accountLast4: result.accountLast4,
-    requirementsDue: result.requirementsDue,
-    completedAt: new Date(),
+    detailsSubmitted: result.detailsSubmitted ?? account.detailsSubmitted,
+    bankName: result.bankName ?? account.bankName,
+    accountLast4: result.accountLast4 ?? account.accountLast4,
+    requirementsDue: result.requirementsDue ?? [],
+    disabledReason: result.disabledReason ?? undefined,
   });
+  if (result.payoutsEnabled && !account.completedAt) account.completedAt = new Date();
   await account.save();
 
-  await notify({
-    userId: tutorUserId,
-    type: NOTIFICATION_TYPES.PAYOUT_UPDATED,
-    title: "Payouts are enabled",
-    body: "Your earnings will now be paid out automatically after each lesson's hold period.",
-    href: "/tutor/payouts",
-  });
+  const tutor = await User.findById(account.tutorUserId).select("firstName").lean();
+
+  if (result.payoutsEnabled && !wasEnabled) {
+    await notify({
+      userId: account.tutorUserId,
+      type: NOTIFICATION_TYPES.PAYOUT_UPDATED,
+      title: "Payouts are enabled",
+      body: "Your earnings will now be paid out automatically after each lesson's hold period.",
+      href: "/tutor/payouts",
+      channels: [NOTIFICATION_CHANNELS.IN_APP, NOTIFICATION_CHANNELS.EMAIL],
+      email: emailTemplates.payoutsEnabled({ firstName: tutor?.firstName ?? "there" }),
+    });
+  } else if (!result.payoutsEnabled && wasEnabled) {
+    // Payouts were switched off — the tutor needs to know why, and that their
+    // money is being held rather than lost.
+    await notify({
+      userId: account.tutorUserId,
+      type: NOTIFICATION_TYPES.PAYOUT_UPDATED,
+      title: "Payouts are paused",
+      body:
+        result.requirementsDue?.length
+          ? `Our payments partner needs: ${result.requirementsDue.join(", ")}.`
+          : "Our payments partner needs more information before your next payout.",
+      href: "/tutor/payouts",
+      channels: [NOTIFICATION_CHANNELS.IN_APP, NOTIFICATION_CHANNELS.EMAIL],
+      email: emailTemplates.payoutOnboardingRequired({
+        firstName: tutor?.firstName ?? "there",
+        requirements: result.requirementsDue ?? [],
+      }),
+    });
+  }
 
   return toPlain(account);
+}
+
+/** Look a payout account up by the provider's own identifier, for webhooks. */
+export async function payoutAccountByProviderId(providerAccountId) {
+  return PayoutAccount.findOne({ providerAccountId });
 }
 
 /** Lessons ready to be paid out to a tutor. */
@@ -185,9 +248,26 @@ export async function updatePayoutStatus(payoutId, { status, note, scheduledFor 
 
   if (status === PAYOUT_STATUS.PAID) {
     const account = await PayoutAccount.findOne({ tutorUserId: payout.tutorUserId }).lean();
+
+    if (!account?.payoutsEnabled) {
+      throw new BusinessRuleError(
+        "This tutor's payout account is not enabled, so money cannot be sent yet.",
+        "PAYOUT_ACCOUNT_INCOMPLETE",
+      );
+    }
+    // Already sent: re-marking a payout paid must never move money twice.
+    if (payout.providerTransferId) {
+      return toPlain(payout);
+    }
+
     const transfer = await getPaymentProvider().createTransfer({
-      accountId: account?.providerAccountId,
+      accountId: account.providerAccountId,
       amountCents: payout.amountCents,
+      currency: payout.currency,
+      metadata: { payoutReference: payout.reference, tutorUserId: String(payout.tutorUserId) },
+      // The payout reference is stable, so a retried "mark as paid" is
+      // recognised by the provider instead of sending a second transfer.
+      idempotencyKey: `transfer-${payout.reference}`,
     });
     payout.providerTransferId = transfer.transferId;
     payout.paidAt = new Date();
@@ -204,17 +284,30 @@ export async function updatePayoutStatus(payoutId, { status, note, scheduledFor 
   if (scheduledFor) payout.scheduledFor = new Date(scheduledFor);
   await payout.save();
 
+  const tutor = await User.findById(payout.tutorUserId).select("firstName").lean();
+  const paid = status === PAYOUT_STATUS.PAID;
+
   await notify({
     userId: payout.tutorUserId,
     type: NOTIFICATION_TYPES.PAYOUT_UPDATED,
-    title:
-      status === PAYOUT_STATUS.PAID
-        ? `${formatMoney(payout.amountCents)} is on its way`
-        : `Payout ${payout.reference} is now ${status.toLowerCase().replace("_", " ")}`,
+    title: paid
+      ? `${formatMoney(payout.amountCents)} is on its way`
+      : `Payout ${payout.reference} is now ${status.toLowerCase().replace("_", " ")}`,
     body: note,
     href: "/tutor/payouts",
     entityType: "Payout",
     entityId: payout._id,
+    channels: paid
+      ? [NOTIFICATION_CHANNELS.IN_APP, NOTIFICATION_CHANNELS.EMAIL]
+      : [NOTIFICATION_CHANNELS.IN_APP],
+    email: paid
+      ? emailTemplates.payoutSent({
+          firstName: tutor?.firstName ?? "there",
+          amountLabel: formatMoney(payout.amountCents),
+          lessonCountLabel: `${payout.lessonCount} completed lesson${payout.lessonCount === 1 ? "" : "s"}`,
+          reference: payout.reference,
+        })
+      : undefined,
   });
 
   await recordAudit({

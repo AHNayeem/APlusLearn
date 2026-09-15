@@ -13,7 +13,7 @@ import { NotFoundError, BusinessRuleError, AuthenticationError } from "@/lib/api
 import { toPlain, compact } from "@/lib/utils/serialize";
 import { verifyPassword } from "@/lib/auth/password";
 import { escapeRegex } from "@/lib/security/sanitize";
-import { geocode } from "@/lib/geo";
+import { geocode } from "./external/geocoding-provider";
 import { recordAudit } from "./audit.service";
 import { revokeAllSessions } from "./auth.service";
 

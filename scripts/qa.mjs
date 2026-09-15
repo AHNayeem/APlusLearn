@@ -497,6 +497,132 @@ async function main() {
   const adminDisputes = await admin("/api/admin/disputes");
   check("admin lists disputes", adminDisputes.ok);
 
+  // --- External integrations ----------------------------------------------
+  section("External integrations");
+
+  // Webhooks. In development the payment provider signs nothing and can prove
+  // nothing, so the endpoint must refuse everything rather than trust it — and
+  // it must never confirm a booking on an unverified call.
+  const unsignedHook = await anon("/api/webhooks/payments", {
+    method: "POST",
+    body: { id: "evt_qa", type: "checkout.session.completed", data: { object: {} } },
+  });
+  check("webhook without a signature is refused", unsignedHook.status === 400);
+  check(
+    "the refusal names the reason without leaking configuration",
+    unsignedHook.payload?.error?.code === "UNSIGNED",
+  );
+
+  const forgedHook = await fetch(`${BASE}/api/webhooks/payments`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "stripe-signature": "t=1,v1=deadbeef" },
+    body: JSON.stringify({ id: "evt_qa2", type: "checkout.session.completed", data: { object: {} } }),
+  });
+  check(
+    "webhook with an unverifiable signature is refused",
+    forgedHook.status === 400 || forgedHook.status === 503,
+    `status ${forgedHook.status}`,
+  );
+
+  const connectHook = await anon("/api/webhooks/payments?connect=1", { method: "POST", body: {} });
+  check("the Connect webhook endpoint is equally strict", connectHook.status === 400);
+
+  // OAuth. The nonce endpoint is what makes a sign-in attempt single-use.
+  const nonce = await anon("/api/auth/oauth/nonce");
+  check("a sign-in nonce can be minted", nonce.ok && nonce.payload.data.nonce?.length >= 16);
+  check(
+    "the nonce response lists providers without exposing secrets",
+    Array.isArray(nonce.payload.data.providers) &&
+      !JSON.stringify(nonce.payload.data).match(/secret|client_secret|sk_|whsec/i),
+  );
+
+  const forgedIdentity = await anon("/api/auth/oauth", {
+    method: "POST",
+    body: { provider: "GOOGLE", credential: "not-a-real-token-at-all" },
+  });
+  check(
+    "an unverifiable OAuth credential never creates a session",
+    !forgedIdentity.ok && !forgedIdentity.payload?.data?.user,
+    `status ${forgedIdentity.status}`,
+  );
+
+  const roleGrab = await anon("/api/auth/oauth", {
+    method: "POST",
+    body: { provider: "GOOGLE", credential: "x".repeat(20), role: "ADMIN" },
+  });
+  check("OAuth cannot be used to request an ADMIN role", roleGrab.status === 422 || !roleGrab.ok);
+
+  // Geocoding. A location the geocoder cannot resolve must degrade, not fail.
+  const geoSearch = await anon("/api/search/tutors?postalCode=M5V3L9&distanceKm=25&mode=IN_PERSON");
+  check("search by postal code works", geoSearch.ok);
+
+  const unknownPlace = await anon("/api/search/tutors?postalCode=ZZZ9Z9&province=ON");
+  check(
+    "an unresolvable location degrades instead of breaking search",
+    unknownPlace.ok && Array.isArray(unknownPlace.payload.data.tutors),
+  );
+
+  const farAway = await anon("/api/search/tutors?city=Whitehorse&province=YT&mode=IN_PERSON");
+  check("an unserved city returns an empty result, not an error", farAway.ok);
+
+  // Meeting links are private to the two participants (§27).
+  const publicTutor = await anon(`/api/tutors/${tutorId}`);
+  check(
+    "a public tutor profile never carries a meeting link",
+    publicTutor.ok && !JSON.stringify(publicTutor.payload.data).match(/zoom\.us|meet\.google|teams\.microsoft/),
+  );
+  check(
+    "public search results never carry a meeting link",
+    !JSON.stringify(search.payload.data).match(/zoom\.us|meet\.google|teams\.microsoft/),
+  );
+
+  const participantView = await parent(`/api/bookings/${bookingId}`);
+  check(
+    "the purchaser can see their own meeting link",
+    participantView.ok && Boolean(participantView.payload.data.booking?.meeting?.joinUrl),
+  );
+
+  // The signed-in tutor is whoever the seed made; the booking above went to
+  // the top search result, which may be someone else. Check whichever
+  // property actually applies — both matter.
+  const tutorSelf = await tutor("/api/tutor/profile");
+  const bookingTutorProfileId =
+    participantView.payload?.data?.booking?.tutorProfileId?.id ??
+    participantView.payload?.data?.booking?.tutorProfileId;
+  const tutorIsParticipant =
+    String(tutorSelf.payload?.data?.profile?.id) === String(bookingTutorProfileId);
+
+  const tutorView = await tutor(`/api/bookings/${bookingId}`);
+  if (tutorIsParticipant) {
+    check(
+      "the tutor on the lesson can see its meeting link",
+      tutorView.ok && Boolean(tutorView.payload.data.booking?.meeting?.joinUrl),
+    );
+  } else {
+    check(
+      "a tutor who is not on the lesson cannot see it at all",
+      tutorView.status === 403,
+      `status ${tutorView.status}`,
+    );
+  }
+
+  const adminView = await admin(`/api/bookings/${bookingId}`);
+  check(
+    "an administrator can see the lesson for support and audit",
+    adminView.ok && Boolean(adminView.payload.data.booking?.meeting?.joinUrl),
+  );
+
+  const anonView = await anon(`/api/bookings/${bookingId}`);
+  check("an anonymous request cannot see a meeting link", anonView.status === 401);
+
+  // Configuration is admin-only and never reaches a non-admin.
+  const adminSettingsPage = await admin("/api/admin/settings");
+  check("admin can read platform settings", adminSettingsPage.ok);
+  check(
+    "platform settings carry no provider credentials",
+    !JSON.stringify(adminSettingsPage.payload?.data ?? {}).match(/sk_live|sk_test|whsec|RESEND|api_key/i),
+  );
+
   // --- Validation ----------------------------------------------------------
   section("Validation");
 

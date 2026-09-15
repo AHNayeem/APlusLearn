@@ -76,3 +76,39 @@ export async function readSessionToken() {
   const store = await cookies();
   return store.get(SESSION.cookieName)?.value ?? null;
 }
+
+/**
+ * Single-use sign-in nonce for OAuth (§9, §36).
+ *
+ * The value is handed to the provider's client library and comes back inside
+ * the signed ID token; the copy in this httpOnly cookie is what the server
+ * compares it against. An ID token captured from another site, or replayed
+ * later, will not have a matching cookie — which is the CSRF and replay
+ * protection for a flow that has no redirect to carry `state`.
+ */
+const OAUTH_NONCE_COOKIE = "aplus_oauth_nonce";
+const OAUTH_NONCE_MAX_AGE = 10 * 60;
+
+export async function issueOAuthNonce() {
+  const nonce = crypto.randomUUID().replace(/-/g, "");
+  const store = await cookies();
+  store.set(OAUTH_NONCE_COOKIE, nonce, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    path: "/",
+    maxAge: OAUTH_NONCE_MAX_AGE,
+  });
+  return nonce;
+}
+
+export async function readOAuthNonce() {
+  const store = await cookies();
+  return store.get(OAUTH_NONCE_COOKIE)?.value ?? null;
+}
+
+/** Consume it: a nonce is good for exactly one sign-in attempt. */
+export async function clearOAuthNonce() {
+  const store = await cookies();
+  store.delete(OAUTH_NONCE_COOKIE);
+}

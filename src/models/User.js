@@ -57,6 +57,13 @@ const UserSchema = new mongoose.Schema(
 
     oauthAccounts: { type: [OAuthAccountSchema], default: [] },
 
+    /**
+     * The payment provider's customer record for this purchaser. Storing it
+     * keeps a returning parent's saved cards and receipts together on the
+     * provider side; it holds no card data itself.
+     */
+    paymentCustomerId: { type: String, trim: true, index: true, sparse: true },
+
     timeZone: { type: String, default: "America/Toronto" },
 
     // Coarse location used for distance search and local relevance. Exact

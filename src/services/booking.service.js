@@ -14,6 +14,7 @@ import {
   BLOCKING_BOOKING_STATUSES,
   CANCELLED_STATUSES,
   LESSON_MODES,
+  MEETING_PROVIDERS,
   RECURRENCE,
   NOTIFICATION_TYPES,
   NOTIFICATION_CHANNELS,
@@ -43,7 +44,7 @@ import {
 import { isSlotBookable } from "@/lib/booking/slots";
 import { getSettings } from "./settings.service";
 import { getMeetingProvider } from "./external/meeting-provider";
-import { getEmailProvider, emailTemplates } from "./external/email-provider";
+import { emailTemplates } from "./external/email-provider";
 import { createPaymentForBooking, refundPayment } from "./payment.service";
 import { notify } from "./notification.service";
 import { recordAudit } from "./audit.service";
@@ -251,7 +252,6 @@ export async function confirmBookings(paymentId, { meetingProvider } = {}) {
   const bookings = await Booking.find({ paymentId, status: BOOKING_STATUS.PENDING_PAYMENT });
   if (!bookings.length) return { confirmed: 0 };
 
-  const meetings = getMeetingProvider();
   const confirmed = [];
 
   for (const booking of bookings) {
@@ -259,13 +259,7 @@ export async function confirmBookings(paymentId, { meetingProvider } = {}) {
     booking.confirmedAt = new Date();
 
     if (booking.mode === LESSON_MODES.ONLINE) {
-      const provider = meetingProvider ?? "ZOOM";
-      booking.meeting = await meetings.createMeeting({
-        provider,
-        topic: `${booking.courseName} lesson`,
-        startAt: booking.startAt,
-        durationMinutes: booking.durationMinutes,
-      });
+      booking.meeting = await createMeetingFor(booking, meetingProvider);
     }
 
     await booking.save();
@@ -278,6 +272,41 @@ export async function confirmBookings(paymentId, { meetingProvider } = {}) {
   ]);
 
   return { confirmed: confirmed.length, bookings: toPlain(confirmed) };
+}
+
+/**
+ * Create the meeting room for an online lesson (§27).
+ *
+ * A meeting provider being down must not strand a lesson the student has
+ * already paid for: the booking still confirms, and the link is filled in on
+ * the next reschedule or by an administrator. The join URL is private to the
+ * two participants — `getBooking()` is what enforces that.
+ */
+async function createMeetingFor(booking, requestedProvider) {
+  const provider = requestedProvider ?? MEETING_PROVIDERS.ZOOM;
+  try {
+    return await getMeetingProvider().createMeeting({
+      provider,
+      topic: `${booking.courseName} lesson`,
+      agenda: booking.courseCode ? `${booking.courseName} (${booking.courseCode})` : undefined,
+      startAt: booking.startAt,
+      durationMinutes: booking.durationMinutes,
+      timeZone: booking.timeZone,
+    });
+  } catch (error) {
+    console.error(`[booking] meeting creation failed for ${booking.reference}:`, error.message);
+    return undefined;
+  }
+}
+
+/** Tear a room down so a cancelled lesson's link stops working. */
+async function releaseMeetingFor(booking) {
+  if (!booking.meeting?.meetingId) return;
+  try {
+    await getMeetingProvider().deleteMeeting({ meetingId: booking.meeting.meetingId });
+  } catch (error) {
+    console.error(`[booking] meeting teardown failed for ${booking.reference}:`, error.message);
+  }
 }
 
 async function notifyBookingConfirmed(bookings) {
@@ -529,6 +558,10 @@ export async function cancelBooking(id, { reason, cancelSeries }, actor) {
       policyApplied: outcome.policyApplied,
     };
 
+    // The room outlives the lesson unless it is torn down, and a stale link
+    // is a room two strangers could still walk into (§27).
+    if (target.mode === LESSON_MODES.ONLINE) await releaseMeetingFor(target);
+
     await target.save();
     totalRefund += outcome.refundCents;
     cancelled.push(target);
@@ -610,22 +643,37 @@ async function notifyCancellation(bookings, role, refundCents) {
   const label = bookings.length > 1 ? `${bookings.length} lessons were` : "Your lesson was";
 
   const recipients = [
-    { userId: first.purchaserId, href: `/bookings/${first._id}` },
-    { userId: first.tutorUserId, href: `/tutor/bookings/${first._id}` },
+    { userId: first.purchaserId, href: `/bookings/${first._id}`, isPurchaser: true },
+    { userId: first.tutorUserId, href: `/tutor/bookings/${first._id}`, isPurchaser: false },
   ];
 
+  const users = await User.find({ _id: { $in: recipients.map((r) => r.userId) } })
+    .select("firstName")
+    .lean();
+  const nameOf = new Map(users.map((u) => [String(u._id), u.firstName]));
+
   for (const recipient of recipients) {
+    // Only the person who paid is told about a refund; the refund figure
+    // itself was resolved by lib/booking/policy, never recalculated here.
+    const refundLabel =
+      recipient.isPurchaser && refundCents > 0 ? formatMoney(refundCents) : null;
+
     await notify({
       userId: recipient.userId,
       type: NOTIFICATION_TYPES.BOOKING_CANCELLED,
       title: `${label} cancelled`,
-      body:
-        refundCents > 0 && String(recipient.userId) === String(first.purchaserId)
-          ? `${first.courseName} on ${formatDate(first.startAt, { weekday: "short" })}. ${formatMoney(refundCents)} will be refunded.`
-          : `${first.courseName} on ${formatDate(first.startAt, { weekday: "short" })}.`,
+      body: refundLabel
+        ? `${first.courseName} on ${formatDate(first.startAt, { weekday: "short" })}. ${refundLabel} will be refunded.`
+        : `${first.courseName} on ${formatDate(first.startAt, { weekday: "short" })}.`,
       href: recipient.href,
       entityType: "Booking",
       entityId: first._id,
+      channels: [NOTIFICATION_CHANNELS.IN_APP, NOTIFICATION_CHANNELS.EMAIL],
+      email: emailTemplates.bookingCancelled({
+        firstName: nameOf.get(String(recipient.userId)) ?? "there",
+        booking: bookingEmailPayload(first, ""),
+        refundLabel: refundLabel ?? (recipient.isPurchaser ? "None" : "—"),
+      }),
     });
   }
 }
@@ -796,14 +844,40 @@ export async function rescheduleBooking(id, { startAt, durationMinutes, reason }
     });
   }
 
+  const previousLabel = `${formatDate(booking.startAt, { weekday: "long", timeZone: booking.timeZone })} at ${formatTime(booking.startAt, booking.timeZone)}`;
+
   booking.startAt = new Date(startAt);
   booking.endAt = addMinutes(new Date(startAt), duration);
   booking.durationMinutes = duration;
+
+  // Move the existing room rather than issuing a new link, so a join link
+  // already in someone's calendar keeps working (§27).
+  if (booking.mode === LESSON_MODES.ONLINE) {
+    if (booking.meeting?.meetingId) {
+      try {
+        await getMeetingProvider().updateMeeting({
+          meetingId: booking.meeting.meetingId,
+          topic: `${booking.courseName} lesson`,
+          startAt: booking.startAt,
+          durationMinutes: duration,
+          timeZone: booking.timeZone,
+        });
+      } catch (error) {
+        console.error(`[booking] meeting move failed for ${booking.reference}:`, error.message);
+      }
+    } else {
+      // A lesson confirmed while the provider was down gets its room now.
+      booking.meeting = await createMeetingFor(booking);
+    }
+  }
+
   await booking.save();
 
   await refreshNextAvailable(booking.tutorProfileId);
 
   const otherParty = role === "TUTOR" ? booking.purchaserId : booking.tutorUserId;
+  const recipient = await User.findById(otherParty).select("firstName").lean();
+
   await notify({
     userId: otherParty,
     type: NOTIFICATION_TYPES.BOOKING_CHANGED,
@@ -812,6 +886,13 @@ export async function rescheduleBooking(id, { startAt, durationMinutes, reason }
     href: role === "TUTOR" ? `/bookings/${booking._id}` : `/tutor/bookings/${booking._id}`,
     entityType: "Booking",
     entityId: booking._id,
+    channels: [NOTIFICATION_CHANNELS.IN_APP, NOTIFICATION_CHANNELS.EMAIL],
+    email: emailTemplates.bookingRescheduled({
+      firstName: recipient?.firstName ?? "there",
+      booking: bookingEmailPayload(booking, ""),
+      previousLabel,
+      reason,
+    }),
   });
 
   return toPlain(booking);

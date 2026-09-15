@@ -12,6 +12,7 @@ export { StudentProfile } from "./StudentProfile.js";
 export { Availability } from "./Availability.js";
 export { Booking } from "./Booking.js";
 export { Payment, Payout, PayoutAccount } from "./Payment.js";
+export { WebhookEvent } from "./WebhookEvent.js";
 export { Conversation, Message } from "./Messaging.js";
 export { TutorRequest, TutorMatch } from "./TutorRequest.js";
 export { Favourite, Review, Notification } from "./Engagement.js";

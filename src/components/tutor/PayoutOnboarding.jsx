@@ -10,23 +10,43 @@ import { Alert, Badge, Button, Card, CardBody, CardHeader, useToast } from "@/co
 /**
  * Payout account setup (§20, §38).
  *
- * Modelled on Stripe Connect's onboarding: start → provider collects details
- * → account becomes payable. The development provider completes on request.
+ * Start → the provider collects and verifies the details → the account
+ * becomes payable. With Stripe Connect the details are collected on Stripe's
+ * own hosted pages, so this component hands off to `onboardingUrl` and never
+ * sees a bank account; the development provider keeps the flow in-app.
  */
-export function PayoutOnboarding({ account }) {
+export function PayoutOnboarding({ account, mode = "development" }) {
   const router = useRouter();
   const toast = useToast();
+  const hosted = mode === "production";
 
   const { submit: start, pending: starting } = useSubmit(async () => {
     const result = await api.post("/api/payouts/account", { action: "START" });
+    const url = result.account?.onboardingUrl;
+
+    // A hosted provider returns an absolute URL to its own onboarding.
+    if (hosted && /^https?:\/\//.test(url ?? "")) {
+      window.location.href = url;
+      return result;
+    }
+
     toast.success("Payout setup started", "Complete the details to enable payouts.");
     router.refresh();
     return result;
   });
 
   const { submit: complete, pending: completing } = useSubmit(async () => {
-    await api.post("/api/payouts/account", { action: "COMPLETE" });
-    toast.success("Payouts enabled", "Your earnings will now be sent automatically.");
+    const result = await api.post("/api/payouts/account", { action: "REFRESH" });
+    if (result.account?.payoutsEnabled) {
+      toast.success("Payouts enabled", "Your earnings will now be sent automatically.");
+    } else {
+      toast.info(
+        "Not verified yet",
+        result.account?.requirementsDue?.length
+          ? `Still needed: ${result.account.requirementsDue.map((r) => r.replace(/_/g, " ")).join(", ")}.`
+          : "Our payments partner is still reviewing your details.",
+      );
+    }
     router.refresh();
   });
 
@@ -70,15 +90,27 @@ export function PayoutOnboarding({ account }) {
         description="Connect where your earnings should be sent."
       />
       <CardBody>
-        <Alert tone="info" title="Development payment provider" className="mb-4">
-          No real bank details are collected. In production this hands off to Stripe Connect, which
-          collects and verifies them directly — we never see or store them.
-        </Alert>
+        {hosted ? (
+          <Alert tone="info" title="Verified by Stripe" className="mb-4">
+            Your identity and bank details are collected and verified by Stripe on their own secure
+            pages. They are never sent to or stored by APlus Learn.
+          </Alert>
+        ) : (
+          <Alert tone="info" title="Development payment provider" className="mb-4">
+            No real bank details are collected. In production this hands off to Stripe Connect,
+            which collects and verifies them directly — we never see or store them.
+          </Alert>
+        )}
 
         {account?.onboardingStatus === "IN_PROGRESS" ? (
           <>
             <p className="mb-4 text-sm text-ink-600">
               Your account is created but not yet verified.
+              {account.disabledReason && (
+                <span className="mt-2 block">
+                  Reason given: {account.disabledReason.replace(/_/g, " ")}
+                </span>
+              )}
               {account.requirementsDue?.length > 0 && (
                 <span className="mt-2 block">
                   Still needed:{" "}
@@ -86,13 +118,25 @@ export function PayoutOnboarding({ account }) {
                 </span>
               )}
             </p>
-            <Button
-              onClick={complete}
-              loading={completing}
-              iconRight={<ArrowRight className="size-4" />}
-            >
-              Complete verification
-            </Button>
+            <div className="flex flex-wrap gap-2">
+              {hosted && (
+                <Button
+                  onClick={start}
+                  loading={starting}
+                  iconRight={<ArrowRight className="size-4" />}
+                >
+                  Continue setup
+                </Button>
+              )}
+              <Button
+                variant={hosted ? "secondary" : "primary"}
+                onClick={complete}
+                loading={completing}
+                iconRight={hosted ? undefined : <ArrowRight className="size-4" />}
+              >
+                {hosted ? "Refresh status" : "Complete verification"}
+              </Button>
+            </div>
           </>
         ) : (
           <Button

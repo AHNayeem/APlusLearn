@@ -5,6 +5,7 @@ import { ROLES, PAYOUT_STATUS, PAYOUT_STATUS_LABELS } from "@/constants";
 import { listPayouts, getPayoutAccount } from "@/services/payout.service";
 import { tutorEarnings } from "@/services/payment.service";
 import { getSettings } from "@/services/settings.service";
+import { paymentProviderStatus } from "@/services/external/payment-provider";
 import {
   Badge, Card, CardBody, CardHeader, EmptyState, StatCard, Table, THead, TH, TBody, TR, TD,
 } from "@/components/ui";
@@ -116,7 +117,7 @@ export default async function TutorPayoutsPage() {
         </Card>
 
         <div className="lg:order-2">
-          <PayoutOnboarding account={account} />
+          <PayoutOnboarding account={account} mode={paymentProviderStatus().mode} />
         </div>
       </div>
     </DashboardPage>

@@ -12,7 +12,7 @@ import { NotFoundError, AuthorizationError, BusinessRuleError, ConflictError } f
 import { toPlain } from "@/lib/utils/serialize";
 import { publicReference } from "@/lib/auth/tokens";
 import { addDays } from "@/lib/utils/time";
-import { geocode } from "@/lib/geo";
+import { geocode } from "./external/geocoding-provider";
 import { scoreTutorForRequest, explainMatch } from "@/lib/matching/score";
 import { toPublicTutor } from "./tutor.service";
 import { notify, notifyMany } from "./notification.service";

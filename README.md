@@ -55,10 +55,16 @@ sitting in the admin review queue.
 | `npm run seed` | Wipe and reseed the database |
 | `npm run seed:keep` | Add missing seed data without wiping |
 | `npm run qa` | End-to-end API test suite against a running dev server |
+| `npm run test:integrations` | Provider adapter tests — no network, no third party |
 
 `npm run qa` exercises the full parent, tutor and admin journeys over real
 HTTP — including the authorization checks that must *fail*. Run `npm run dev`
 in one terminal and `npm run qa` in another.
+
+`npm run test:integrations` runs the Stripe, Resend, OAuth, geocoding and Zoom
+adapters with `fetch` stubbed, webhooks signed with the real signing scheme and
+OAuth tokens signed by a key pair generated in process. It contacts nothing
+external, so it is safe in CI.
 
 ---
 
@@ -86,7 +92,7 @@ src/
 │   ├── (dashboard)/   parent & student area
 │   ├── tutor/         tutor workspace
 │   ├── admin/         admin console
-│   └── api/           100 route handlers
+│   └── api/           101 route handlers
 ├── components/
 │   ├── ui/            18 design-system primitives
 │   └── …              feature components by domain
@@ -96,10 +102,11 @@ src/
 │   ├── booking/       pricing, cancellation policy, slot generation
 │   ├── matching/      tutor ↔ request scoring
 │   ├── search/        query construction
+│   ├── config/        runtime configuration and provider selection
 │   ├── security/      rate limiting, input sanitising
 │   └── db/            cached MongoDB connection
-├── services/          19 domain services + external provider abstractions
-├── models/            14 model files
+├── services/          20 domain services + external provider abstractions
+├── models/            15 model files
 └── constants/         roles, permissions, domain enums, platform defaults
 ```
 
@@ -130,24 +137,42 @@ reachable and served only through an audited admin route.
 
 ## External services
 
-Every integration sits behind an interface with a working development
-implementation, so the application is fully functional with no third-party
-credentials:
+Every integration sits behind an interface with both a working development
+implementation and a production adapter. The application is fully functional
+with no third-party credentials, and connecting a real provider is
+configuration rather than code.
 
-| Service | Development fallback | Production |
-|---|---|---|
-| Payments | `MockPaymentProvider` — models every state transition | Stripe Connect |
-| Email | `ConsoleEmailProvider` — prints links to the server log | Any transactional provider |
-| OAuth | Local identity (non-production only) | Google / Apple |
-| Meetings | Deterministic room links | Zoom / Meet / Teams |
-| Geocoding | Bundled Canadian city & FSA table | Maps provider |
-| Document storage | Private local directory | Object storage |
+| Service | Development | Production | Selector |
+|---|---|---|---|
+| Payments | `MockPaymentProvider` — models every state transition | **Stripe** — hosted Checkout + Connect Express | `PAYMENT_PROVIDER` |
+| Email | `ConsoleEmailProvider` — prints links to the server log | **Resend** | `EMAIL_PROVIDER` |
+| OAuth | Local identity (non-production only) | **Google / Apple** — verified ID tokens | `OAUTH_PROVIDER` |
+| Geocoding | Bundled Canadian city & FSA table | **Google Geocoding API** | `GEOCODING_PROVIDER` |
+| Meetings | Deterministic room links | **Zoom** — Server-to-Server OAuth | `MEETING_PROVIDER` |
+| Document storage | Private local directory | *(interface only)* | — |
 
-Connecting a real provider means implementing the interface and returning it
-from the corresponding `get*Provider()`. No UI or service code changes.
+```
+APP_ENV=development   auto-detect: whatever has credentials is used,
+                      everything else falls back to a working fake.
+
+APP_ENV=production    nothing is auto-detected. Every selector must name a
+                      provider, and naming a real one without its secrets
+                      stops the server starting.
+```
+
+`PAYMENT_PROVIDER=development` and `EMAIL_PROVIDER=development` are refused
+outright once `APP_ENV=production`: there is no configuration in which a
+production deployment takes fake money or silently swallows a password-reset
+email. Which mode each integration is running in is shown at
+**Admin → Platform settings → Integrations**, alongside recent webhook
+deliveries.
+
+Setup, credentials, webhook endpoints and external dashboard configuration:
+**[`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md)**.
 
 **Test cards** (development payment provider): `4242 4242 4242 4242` succeeds;
-any number ending `0002` exercises the declined-card path.
+any number ending `0002` exercises the declined-card path. Under Stripe the
+card is entered on Stripe's own page — use their test cards instead.
 
 ---
 
@@ -156,6 +181,9 @@ any number ending `0002` exercises the declined-card path.
 - [`docs/Project.md`](docs/Project.md) — the original requirement document
 - [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) — coverage matrix mapping every
   requirement to its implementation, with status and known limitations
+- [`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md) — production integrations:
+  providers, environment variables, webhook endpoints, OAuth callback
+  configuration and deployment requirements
 
 ---
 
@@ -163,4 +191,4 @@ any number ending `0002` exercises the declined-card path.
 
 Next.js 16 (App Router, Turbopack) · React 19.2 with the React Compiler ·
 JavaScript only · Tailwind CSS v4 · MongoDB with Mongoose 9 · Zod 4 ·
-jose · bcrypt · motion
+jose · bcrypt · motion · Stripe

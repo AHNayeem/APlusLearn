@@ -42,6 +42,19 @@ const PaymentSchema = new mongoose.Schema(
     provider: { type: String, default: "MOCK" },
     providerCheckoutId: { type: String, trim: true, index: true },
     providerPaymentIntentId: { type: String, trim: true, index: true },
+    /** The settled charge, needed to reconcile a refund back to a payout. */
+    providerChargeId: { type: String, trim: true },
+    /**
+     * Hosted checkout only. The provider's payment page for this payment, and
+     * when that page stops working — a stale session is rebuilt rather than
+     * shown. Not a secret: it is single-purpose and scoped to this payment.
+     */
+    providerCheckoutUrl: { type: String, trim: true },
+    checkoutExpiresAt: { type: Date },
+    /** Bumped each time a lapsed session is rebuilt; keys the idempotency. */
+    checkoutAttempts: { type: Number, default: 0 },
+    /** False for a test-mode charge. Set from the provider, never from config. */
+    livemode: { type: Boolean, default: false },
     /** Last four digits only. Full instrument data never touches our database. */
     paymentMethodBrand: { type: String, trim: true },
     paymentMethodLast4: { type: String, trim: true, maxlength: 4 },
@@ -76,7 +89,7 @@ const PayoutAccountSchema = new mongoose.Schema(
       index: true,
     },
     provider: { type: String, default: "MOCK" },
-    providerAccountId: { type: String, trim: true },
+    providerAccountId: { type: String, trim: true, index: true },
     onboardingStatus: {
       type: String,
       enum: ["NOT_STARTED", "IN_PROGRESS", "RESTRICTED", "COMPLETE"],
@@ -91,6 +104,9 @@ const PayoutAccountSchema = new mongoose.Schema(
     country: { type: String, default: "CA" },
     currency: { type: String, default: "CAD" },
     requirementsDue: { type: [String], default: [] },
+    /** The provider's own reason for withholding payouts, shown to the tutor. */
+    disabledReason: { type: String, trim: true },
+    detailsSubmitted: { type: Boolean, default: false },
     completedAt: { type: Date },
   },
   { timestamps: true },
@@ -126,7 +142,7 @@ const PayoutSchema = new mongoose.Schema(
     scheduledFor: { type: Date },
     paidAt: { type: Date },
     processedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
-    providerTransferId: { type: String, trim: true },
+    providerTransferId: { type: String, trim: true, index: true },
     failureReason: { type: String, trim: true },
   },
   { timestamps: true },

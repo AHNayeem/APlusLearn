@@ -1,28 +1,29 @@
 import { NextResponse } from "next/server";
 import { connectToDatabase } from "@/lib/db/connect";
-import { confirmBookings } from "@/services/booking.service";
-import { Payment } from "@/models";
-import { PAYMENT_STATUS } from "@/constants";
+import { handlePaymentWebhook } from "@/services/webhook.service";
+import { AppError } from "@/lib/api/errors";
 
 /**
- * Payment provider webhook (§20, §38).
+ * Payment provider webhook (§20, §36, §38).
  *
- * Deliberately outside `routeHandler`: a webhook has no session, and its
- * authenticity comes from a signature rather than a cookie. The development
- * provider does not sign, so this only accepts calls when a signing secret is
- * configured *and* the signature matches.
+ * Deliberately outside `routeHandler`: a webhook carries no session, and its
+ * authenticity comes from a signature over the **raw** body rather than from
+ * a cookie. Reading the body as text — not `request.json()` — is load-bearing:
+ * re-serialising the payload would change a byte somewhere and every
+ * signature would fail.
+ *
+ * The route stays thin; verification, idempotency and state changes all live
+ * in `webhook.service`.
+ *
+ *   Production endpoint:  POST /api/webhooks/payments
+ *   Connect endpoint:     POST /api/webhooks/payments?connect=1
  */
-export async function POST(request) {
-  const secret = process.env.STRIPE_WEBHOOK_SECRET;
-  const signature = request.headers.get("stripe-signature");
+export const dynamic = "force-dynamic";
 
-  if (!secret) {
-    // Nothing is configured to call this yet; refuse rather than trust it.
-    return NextResponse.json(
-      { ok: false, error: { code: "NOT_CONFIGURED", message: "Webhooks are not configured." } },
-      { status: 503 },
-    );
-  }
+export async function POST(request) {
+  const signature =
+    request.headers.get("stripe-signature") ?? request.headers.get("x-provider-signature");
+
   if (!signature) {
     return NextResponse.json(
       { ok: false, error: { code: "UNSIGNED", message: "Missing signature." } },
@@ -30,45 +31,32 @@ export async function POST(request) {
     );
   }
 
-  const payload = await request.json().catch(() => null);
-  if (!payload?.type) {
+  const payload = await request.text();
+  const connect = new URL(request.url).searchParams.get("connect") === "1";
+
+  try {
+    await connectToDatabase();
+    const result = await handlePaymentWebhook({ payload, signature, connect });
+    return NextResponse.json({ ok: true, data: result });
+  } catch (error) {
+    // A signature failure or an unconfigured endpoint is the caller's problem
+    // and must not be retried; anything else is ours, and a 500 asks the
+    // provider to redeliver.
+    if (error instanceof AppError) {
+      console.warn(`[webhook] rejected: ${error.code}`);
+      return NextResponse.json(
+        { ok: false, error: { code: error.code, message: error.message } },
+        { status: error.status },
+      );
+    }
+
+    console.error("[webhook] processing failed:", error.message);
     return NextResponse.json(
-      { ok: false, error: { code: "BAD_PAYLOAD", message: "Unrecognised event." } },
-      { status: 400 },
+      {
+        ok: false,
+        error: { code: "WEBHOOK_FAILED", message: "The event could not be processed." },
+      },
+      { status: 500 },
     );
   }
-
-  await connectToDatabase();
-
-  switch (payload.type) {
-    case "payment_intent.succeeded": {
-      const payment = await Payment.findOne({
-        providerPaymentIntentId: payload.data?.object?.id,
-      });
-      if (payment && payment.status !== PAYMENT_STATUS.PAID) {
-        payment.status = PAYMENT_STATUS.PAID;
-        payment.paidAt = new Date();
-        await payment.save();
-        await confirmBookings(payment._id);
-      }
-      break;
-    }
-    case "payment_intent.payment_failed": {
-      await Payment.updateOne(
-        { providerPaymentIntentId: payload.data?.object?.id },
-        {
-          $set: {
-            status: PAYMENT_STATUS.FAILED,
-            failureReason: payload.data?.object?.last_payment_error?.message,
-          },
-        },
-      );
-      break;
-    }
-    default:
-      // Unknown events are acknowledged so the provider stops retrying.
-      break;
-  }
-
-  return NextResponse.json({ ok: true, data: { received: true } });
 }

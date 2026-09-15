@@ -25,7 +25,7 @@ import { toPlain, compact } from "@/lib/utils/serialize";
 import { slugify } from "@/lib/utils/slug";
 import { publicName } from "@/lib/utils/format";
 import { rateForCourse } from "@/lib/booking/pricing";
-import { geocode } from "@/lib/geo";
+import { geocode } from "./external/geocoding-provider";
 import { ONBOARDING_STEPS } from "@/models/TutorApplication";
 import { getEmailProvider, emailTemplates } from "./external/email-provider";
 import { notify } from "./notification.service";

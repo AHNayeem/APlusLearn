@@ -64,6 +64,20 @@ export const changePasswordSchema = z
 export const oauthSignInSchema = z.object({
   provider: z.enum(["GOOGLE", "APPLE"]),
   credential: z.string().min(8, "The sign-in response was incomplete."),
+  /**
+   * Only honoured when creating a brand-new account. An existing user's role
+   * is never changed by a social sign-in — see `oauthSignIn` (§10).
+   */
   role: z.enum([ROLES.PARENT, ROLES.STUDENT, ROLES.TUTOR]).optional(),
+  /**
+   * Apple sends the member's name exactly once, alongside the token rather
+   * than inside it. It is used only to fill blanks on a new account.
+   */
+  profile: z
+    .object({
+      firstName: z.string().trim().max(60).optional(),
+      lastName: z.string().trim().max(60).optional(),
+    })
+    .optional(),
   next: z.string().max(300).optional(),
 });

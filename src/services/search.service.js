@@ -2,7 +2,8 @@ import "server-only";
 import { TutorProfile, Availability, Favourite, Course, Subject, Grade } from "@/models";
 import { PAGE_SIZES, AVAILABILITY_WINDOWS, LESSON_MODES } from "@/constants";
 import { toPlain } from "@/lib/utils/serialize";
-import { geocode, distanceKm } from "@/lib/geo";
+import { distanceKm } from "@/lib/geo";
+import { geocode } from "./external/geocoding-provider";
 import {
   buildTutorQuery,
   buildTutorSort,
