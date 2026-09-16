@@ -80,7 +80,7 @@ export default async function DashboardPageRoute() {
         </Alert>
       )}
 
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard
           label="Upcoming lessons"
           value={formatNumber(summary.upcoming)}
@@ -122,8 +122,8 @@ export default async function DashboardPageRoute() {
         </Alert>
       )}
 
-      <div className="mt-6 grid gap-6 lg:grid-cols-[1.6fr_1fr]">
-        <div className="space-y-6">
+      <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-[1.6fr_1fr]">
+        <div className="min-w-0 space-y-6">
           <NextLessonCard booking={summary.nextLesson} />
 
           <Card>
@@ -160,7 +160,7 @@ export default async function DashboardPageRoute() {
           </Card>
         </div>
 
-        <div className="space-y-6">
+        <div className="min-w-0 space-y-6">
           <Card>
             <CardHeader
               title="Messages"

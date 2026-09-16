@@ -88,7 +88,7 @@ export default async function TutorDashboardPage() {
 
       <ApplicationStatusBanner application={application} profile={profile} />
 
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard
           label="Upcoming lessons"
           value={formatNumber(summary.upcoming)}
@@ -140,8 +140,8 @@ export default async function TutorDashboardPage() {
         </Alert>
       )}
 
-      <div className="mt-6 grid gap-6 lg:grid-cols-[1.6fr_1fr]">
-        <div className="space-y-6">
+      <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-[1.6fr_1fr]">
+        <div className="min-w-0 space-y-6">
           {summary.nextLesson && <NextLessonCard booking={summary.nextLesson} />}
 
           <Card>
@@ -242,7 +242,7 @@ export default async function TutorDashboardPage() {
           </Card>
         </div>
 
-        <div className="space-y-6">
+        <div className="min-w-0 space-y-6">
           <Card>
             <CardHeader
               title="Messages"

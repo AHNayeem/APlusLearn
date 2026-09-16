@@ -83,7 +83,7 @@ export function ConversationView({ conversation, messages: initialMessages, book
   const tutorProfile = conversation.tutorProfileId;
 
   return (
-    <div className="flex h-[calc(100dvh-8rem)] flex-col rounded-2xl border border-ink-200 bg-white lg:h-[calc(100dvh-10rem)]">
+    <div className="flex h-[calc(100dvh-8rem)] min-w-0 flex-col rounded-2xl border border-ink-200 bg-white lg:h-[calc(100dvh-10rem)]">
       <header className="flex items-center gap-3 border-b border-ink-200 p-4">
         <Avatar src={other?.avatarUrl} name={other?.name} size="md" />
         <div className="min-w-0 flex-1">

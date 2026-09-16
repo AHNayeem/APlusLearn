@@ -28,7 +28,7 @@ export default async function TutorConversationPage({ params }) {
 
   return (
     <DashboardPage>
-      <div className="grid gap-6 lg:grid-cols-[20rem_1fr]">
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[20rem_1fr]">
         <Card className="hidden lg:block">
           <CardBody className="max-h-[calc(100dvh-10rem)] overflow-y-auto p-0">
             <ConversationList

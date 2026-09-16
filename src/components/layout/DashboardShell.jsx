@@ -7,13 +7,17 @@ import { DashboardNav } from "./DashboardNav";
  */
 export function DashboardShell({ items, user, badges, branding, children }) {
   return (
-    <div className="flex min-h-dvh bg-canvas">
+    /* Column on small screens so the mobile top bar spans the full width; the
+       sidebar only becomes a flex *row* sibling once it is actually visible at
+       `lg`. Laying these out as a row below `lg` is what left a dead gutter on
+       the left and squeezed the content column. */
+    <div className="flex min-h-dvh w-full flex-col bg-canvas lg:flex-row">
       <DashboardNav items={items} user={user} badges={badges} branding={branding} />
-      <div className="flex min-w-0 flex-1 flex-col">
-        <header className="sticky top-0 z-30 hidden h-[var(--header-height)] items-center justify-end gap-4 border-b border-ink-200 bg-white/90 px-8 backdrop-blur-lg lg:flex">
+      <div className="flex w-full min-w-0 max-w-full flex-1 flex-col">
+        <header className="sticky top-0 z-30 hidden h-[var(--header-height)] w-full items-center justify-end gap-4 border-b border-ink-200 bg-white/90 px-4 backdrop-blur-lg sm:px-6 lg:flex lg:px-8">
           <UserMenu user={user} />
         </header>
-        <main id="main" className="min-w-0 flex-1">
+        <main id="main" className="w-full min-w-0 max-w-full flex-1">
           {children}
         </main>
       </div>
@@ -37,5 +41,9 @@ export function PageHeader({ title, description, action, breadcrumb, className }
 
 /** Consistent page padding inside the dashboard. */
 export function DashboardPage({ className, children }) {
-  return <div className={cn("p-5 sm:p-6 lg:p-8", className)}>{children}</div>;
+  return (
+    <div className={cn("w-full min-w-0 max-w-full px-4 py-5 sm:px-6 sm:py-6 lg:px-8 lg:py-8", className)}>
+      {children}
+    </div>
+  );
 }

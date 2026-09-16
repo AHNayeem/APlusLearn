@@ -74,19 +74,25 @@ export function DashboardNav({ items, user, badges = {}, branding }) {
 
   return (
     <>
-      {/* Mobile top bar */}
-      <header className="sticky top-0 z-40 flex h-16 items-center justify-between gap-3 border-b border-ink-200 bg-white/90 px-4 backdrop-blur-lg lg:hidden">
+      {/* Mobile top bar. Full width with the three slots pinned apart: the
+          toggle and the avatar never shrink, so only the wordmark gives way if
+          the viewport gets tight. */}
+      <header className="sticky top-0 z-40 flex h-16 w-full min-w-0 items-center justify-between gap-2 border-b border-ink-200 bg-white/90 px-4 backdrop-blur-lg sm:gap-3 sm:px-6 lg:hidden">
         <button
           type="button"
           onClick={() => setOpen(true)}
           aria-label="Open navigation"
           aria-expanded={open}
-          className="inline-flex size-10 items-center justify-center rounded-xl text-ink-700 hover:bg-ink-100"
+          className="inline-flex size-10 shrink-0 items-center justify-center rounded-xl text-ink-700 hover:bg-ink-100"
         >
           <Menu className="size-5" />
         </button>
-        <Logo mark branding={branding} />
-        <UserMenu user={user} />
+        <div className="flex min-w-0 flex-1 justify-center overflow-hidden">
+          <Logo mark branding={branding} />
+        </div>
+        <div className="shrink-0">
+          <UserMenu user={user} />
+        </div>
       </header>
 
       <AnimatePresence>
@@ -106,7 +112,7 @@ export function DashboardNav({ items, user, badges = {}, branding }) {
               animate={{ x: 0 }}
               exit={{ x: "-100%" }}
               transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
-              className="relative flex h-full w-[17rem] max-w-[85vw] flex-col bg-white shadow-xl"
+              className="relative flex h-full w-[17rem] max-w-[calc(100vw-3rem)] flex-col bg-white shadow-xl"
             >
               <div className="flex items-center justify-between border-b border-ink-200 p-4">
                 <Logo branding={branding} />

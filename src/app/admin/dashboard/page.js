@@ -50,7 +50,7 @@ export default async function AdminDashboardPage() {
       )}
 
       {/* Action queues first — this is what an admin opens the console for. */}
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <QueueCard
           label="Tutor applications"
           count={queues.pendingApplications}
@@ -82,7 +82,7 @@ export default async function AdminDashboardPage() {
       </div>
 
       <h2 className="mb-4 mt-8 text-sm font-bold text-ink-900">Last 30 days</h2>
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard
           label="Gross tutoring sales"
           value={formatMoney(overview.commerce.grossSalesCents, { compact: true })}
@@ -112,7 +112,7 @@ export default async function AdminDashboardPage() {
         />
       </div>
 
-      <div className="mt-4 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard
           label="Approved tutors"
           value={formatNumber(overview.supply.approvedTutors)}
@@ -138,7 +138,7 @@ export default async function AdminDashboardPage() {
         />
       </div>
 
-      <div className="mt-8 grid gap-6 lg:grid-cols-2">
+      <div className="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-2">
         <Card>
           <CardHeader
             title="Applications waiting"
@@ -240,7 +240,7 @@ export default async function AdminDashboardPage() {
           description="Runtime health of the services this deployment depends on."
         />
         <CardBody>
-          <dl className="grid gap-4 sm:grid-cols-3">
+          <dl className="grid grid-cols-1 gap-4 sm:grid-cols-3">
             <SystemRow
               icon={<Database className="size-4" />}
               label="Database"

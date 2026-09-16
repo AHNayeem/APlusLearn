@@ -3,11 +3,17 @@ import { cn } from "@/lib/utils/cn";
 /**
  * Data table. The wrapper scrolls horizontally on small screens so the page
  * itself never overflows (§33).
+ *
+ * The scroller is `relative` so it is a containing block as well as a clipper:
+ * without it, absolutely positioned descendants (every `sr-only` label in a
+ * cell) resolve against the initial containing block, escape the clip at their
+ * static position out in the 860px-wide table, and push the *document* wider
+ * than the viewport — a horizontal scrollbar on the whole page on mobile.
  */
 export function Table({ className, children, ...props }) {
   return (
-    <div className="overflow-hidden rounded-2xl border border-ink-200 bg-white shadow-sm">
-      <div className="overflow-x-auto">
+    <div className="w-full max-w-full overflow-hidden rounded-2xl border border-ink-200 bg-white shadow-sm">
+      <div className="relative w-full overflow-x-auto">
         <table className={cn("w-full min-w-[640px] text-left text-sm", className)} {...props}>
           {children}
         </table>

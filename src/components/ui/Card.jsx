@@ -5,7 +5,11 @@ export function Card({ as: Tag = "div", className, interactive = false, children
   return (
     <Tag
       className={cn(
-        "rounded-2xl border border-ink-200 bg-white shadow-sm",
+        // `min-w-0` so a card never inflates the grid/flex track it sits in:
+        // `truncate` inside sets white-space:nowrap, whose min-content width is
+        // the *whole* untruncated string, and a track sized to min-content would
+        // stretch the page instead of the text ellipsing.
+        "min-w-0 rounded-2xl border border-ink-200 bg-white shadow-sm",
         interactive &&
           "transition-[box-shadow,transform,border-color] duration-200 ease-out hover:-translate-y-0.5 hover:border-ink-300 hover:shadow-lg motion-reduce:hover:translate-y-0",
         className,
@@ -51,7 +55,7 @@ export function StatCard({ label, value, hint, trend, icon, href, className }) {
     <Wrapper
       {...(href ? { href } : {})}
       className={cn(
-        "block rounded-2xl border border-ink-200 bg-white p-5 shadow-sm",
+        "block min-w-0 rounded-2xl border border-ink-200 bg-white p-5 shadow-sm",
         href &&
           "transition-[box-shadow,border-color] duration-200 hover:border-brand-200 hover:shadow-md",
         className,
