@@ -260,6 +260,7 @@ const SettingsSchema = new mongoose.Schema(
     minHourlyRate: { type: Number, default: DEFAULT_SETTINGS.minHourlyRate, min: 0 },
     maxHourlyRate: { type: Number, default: DEFAULT_SETTINGS.maxHourlyRate, min: 1 },
     payoutHoldDays: { type: Number, default: DEFAULT_SETTINGS.payoutHoldDays, min: 0 },
+    autoPayouts: { type: Boolean, default: DEFAULT_SETTINGS.autoPayouts },
     defaultSearchRadiusKm: { type: Number, default: DEFAULT_SETTINGS.defaultSearchRadiusKm, min: 1 },
     autoModerateReviews: { type: Boolean, default: DEFAULT_SETTINGS.autoModerateReviews },
 

@@ -104,7 +104,10 @@ function ReportModal({ open, onClose, review }) {
 
   const { submit, pending, error, fieldErrors } = useSubmit(async () => {
     await api.post(`/api/reviews/${review.id}/report`, { reason });
-    toast.success("Review reported", "Our team will look into it.");
+    toast.success(
+      "Review reported",
+      "A moderator will look into it. The review stays on your profile until they decide.",
+    );
     onClose();
     router.refresh();
   });
@@ -114,7 +117,7 @@ function ReportModal({ open, onClose, review }) {
       open={open}
       onClose={onClose}
       title="Report this review"
-      description="Use this if a review is abusive, false, or breaks our guidelines."
+      description="Use this if a review is abusive, false, or breaks our guidelines. A moderator decides the outcome — the review stays on your profile and in your rating until then."
       footer={
         <>
           <Button variant="ghost" onClick={onClose}>

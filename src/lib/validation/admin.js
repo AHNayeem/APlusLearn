@@ -197,6 +197,7 @@ export const platformSettingsSchema = z
     minHourlyRate: z.coerce.number().int().min(0).max(500).optional(),
     maxHourlyRate: z.coerce.number().int().min(1).max(1000).optional(),
     payoutHoldDays: z.coerce.number().int().min(0).max(60).optional(),
+    autoPayouts: z.boolean().optional(),
     defaultSearchRadiusKm: z.coerce.number().int().min(1).max(500).optional(),
     autoModerateReviews: z.boolean().optional(),
 

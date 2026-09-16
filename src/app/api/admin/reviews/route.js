@@ -13,6 +13,8 @@ export const GET = routeHandler(
     permission: PERMISSIONS.ADMIN_REVIEW_MODERATE,
     querySchema: z.object({
       status: z.enum(Object.values(REVIEW_STATUS)).optional(),
+      /** The moderation queue: reviews with an open report case. */
+      reported: z.enum(["true", "false"]).optional().transform((v) => v === "true"),
       tutorProfileId: objectId.optional(),
       page: z.coerce.number().int().min(1).max(200).default(1),
       pageSize: z.coerce.number().int().min(1).max(50).optional(),

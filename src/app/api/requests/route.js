@@ -26,6 +26,7 @@ export const POST = routeHandler(
   {
     feature: FEATURES.TUTOR_REQUESTS,
     permission: PERMISSIONS.REQUEST_CREATE,
+    verifiedEmail: true,
     bodySchema: createTutorRequestSchema,
   },
 );

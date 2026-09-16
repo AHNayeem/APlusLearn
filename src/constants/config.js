@@ -192,6 +192,9 @@ export const DEFAULT_SETTINGS = {
   /** Days after a completed lesson before funds become payable. */
   payoutHoldDays: 3,
 
+  /** Create payouts automatically when the scheduler runs (§20). */
+  autoPayouts: true,
+
   /** Default radius for in-person distance search, in kilometres. */
   defaultSearchRadiusKm: 25,
 

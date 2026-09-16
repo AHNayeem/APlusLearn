@@ -36,10 +36,13 @@ function section(title) {
 function createClient() {
   const cookies = new Map();
 
-  return async function request(path, { method = "GET", body, form, raw = false } = {}) {
+  return async function request(
+    path,
+    { method = "GET", body, form, raw = false, headers: extraHeaders } = {},
+  ) {
     // `fetch` sets its own multipart Content-Type with the boundary, so a
     // FormData upload must not have one imposed on it.
-    const headers = form ? {} : { "Content-Type": "application/json" };
+    const headers = { ...(form ? {} : { "Content-Type": "application/json" }), ...extraHeaders };
     if (cookies.size) {
       headers.Cookie = [...cookies].map(([k, v]) => `${k}=${v}`).join("; ");
     }
@@ -1020,6 +1023,847 @@ async function main() {
     "platform settings carry no provider credentials",
     !JSON.stringify(adminSettingsPage.payload?.data ?? {}).match(/sk_live|sk_test|whsec|RESEND|api_key/i),
   );
+
+
+  // --- Booking authorization ------------------------------------------------
+  //
+  // The two write paths that move a confirmed lesson: reschedule and no-show.
+  // Both are reachable by anyone holding BOOKING_VIEW — which is every role —
+  // so participation has to be asserted inside the service against the stored
+  // booking. These are the regression tests for that (§8, §42).
+  section("Booking authorization");
+
+  // Book with the tutor QA actually holds a session for, so "the tutor on the
+  // lesson" is a known account rather than whichever profile search ranked
+  // first. Everyone else in this section is a genuine stranger to it.
+  const ownTutor = (await tutor("/api/tutor/profile")).payload?.data?.profile;
+  const ownTutorId = ownTutor?.id;
+  const ownCourseId = ownTutor?.courses?.[0]?.courseId;
+
+  const stranger = createClient();
+  await login(stranger, "nadia.petrov@example.com");
+  const strangerParent = createClient();
+  await login(strangerParent, "david.thompson@example.com");
+  const strangerTutor = createClient();
+  await login(strangerTutor, "michael.ferreira@example.com");
+  const strangerTutorId = (await strangerTutor("/api/tutor/profile")).payload?.data?.profile?.id;
+  check(
+    "the test's 'unrelated tutor' really is unrelated to the lesson",
+    Boolean(strangerTutorId) && String(strangerTutorId) !== String(ownTutorId),
+  );
+
+  /**
+   * One free slot from each of the next few days the tutor works.
+   *
+   * Taking the first N slots outright would return back-to-back times on one
+   * day, and booking one of those legitimately blocks its neighbour through
+   * the tutor's buffer — which would make a conflict look like a bug.
+   */
+  const freeSlots = async (count) => {
+    const res = await parent(
+      `/api/tutors/${ownTutorId}/availability?days=28&durationMinutes=60`,
+    );
+    return (res.payload?.data?.days ?? [])
+      .filter((d) => d.slots.length > 0)
+      .slice(0, count)
+      .map((d) => d.slots[0].startAt);
+  };
+
+  const [slotA, slotB] = await freeSlots(2);
+  check("tutor has two free slots to work with", Boolean(slotA && slotB));
+
+  const authBooking = await parent("/api/bookings", {
+    method: "POST",
+    body: {
+      tutorProfileId: ownTutorId,
+      studentProfileId: studentId,
+      courseId: ownCourseId,
+      mode: "ONLINE",
+      startAt: slotA,
+      durationMinutes: 60,
+      meetingProvider: "ZOOM",
+      studentNotes: "QA — authorization fixture",
+    },
+  });
+  const authBookingId = authBooking.payload?.data?.bookings?.[0]?.id;
+  const authPaymentId = authBooking.payload?.data?.payment?.id;
+  await parent(`/api/payments/${authPaymentId}/capture`, {
+    method: "POST",
+    body: {
+      card: { number: "4242424242424242", name: "QA", expiry: "12/28", cvc: "123" },
+      meetingProvider: "ZOOM",
+    },
+  });
+  const confirmedFixture = await parent(`/api/bookings/${authBookingId}`);
+  check(
+    "fixture lesson is confirmed and belongs to the parent",
+    confirmedFixture.ok && confirmedFixture.payload.data.booking.status === "CONFIRMED",
+    JSON.stringify(confirmedFixture.payload?.error),
+  );
+
+  const reschedulePayload = {
+    method: "POST",
+    body: { startAt: slotB, reason: "QA — attempting to move someone else's lesson." },
+  };
+
+  // --- Reschedule: who may not ---
+  const anonReschedule = await anon(`/api/bookings/${authBookingId}/reschedule`, reschedulePayload);
+  check("anonymous cannot reschedule a lesson", anonReschedule.status === 401);
+
+  const strangerReschedule = await stranger(
+    `/api/bookings/${authBookingId}/reschedule`,
+    reschedulePayload,
+  );
+  check(
+    "an unrelated learner cannot reschedule someone else's lesson",
+    strangerReschedule.status === 403,
+    `status ${strangerReschedule.status}`,
+  );
+
+  const strangerParentReschedule = await strangerParent(
+    `/api/bookings/${authBookingId}/reschedule`,
+    reschedulePayload,
+  );
+  check(
+    "an unrelated parent cannot reschedule someone else's lesson",
+    strangerParentReschedule.status === 403,
+    `status ${strangerParentReschedule.status}`,
+  );
+
+  const strangerTutorReschedule = await strangerTutor(
+    `/api/bookings/${authBookingId}/reschedule`,
+    reschedulePayload,
+  );
+  check(
+    "an unrelated tutor cannot reschedule someone else's lesson",
+    strangerTutorReschedule.status === 403,
+    `status ${strangerTutorReschedule.status}`,
+  );
+
+  // The point of the fix: a refused request must have changed nothing.
+  const untouched = await parent(`/api/bookings/${authBookingId}`);
+  check(
+    "a refused reschedule leaves the lesson exactly where it was",
+    untouched.payload?.data?.booking?.status === "CONFIRMED" &&
+      new Date(untouched.payload.data.booking.startAt).toISOString() ===
+        new Date(slotA).toISOString(),
+    `${untouched.payload?.data?.booking?.startAt} vs ${slotA}`,
+  );
+
+  // --- Reschedule: who may ---
+  const parentReschedule = await parent(`/api/bookings/${authBookingId}/reschedule`, {
+    method: "POST",
+    body: { startAt: slotB, reason: "QA — the person who paid moves their own lesson." },
+  });
+  check(
+    "the purchaser can reschedule their own lesson",
+    parentReschedule.ok,
+    JSON.stringify(parentReschedule.payload?.error),
+  );
+  check(
+    "the lesson actually moved",
+    new Date(parentReschedule.payload?.data?.booking?.startAt).toISOString() ===
+      new Date(slotB).toISOString(),
+  );
+
+  const tutorReschedule = await tutor(`/api/bookings/${authBookingId}/reschedule`, {
+    method: "POST",
+    body: { startAt: slotA, reason: "QA — the tutor on the lesson moves it back." },
+  });
+  check(
+    "the tutor on the lesson can reschedule it",
+    tutorReschedule.ok,
+    JSON.stringify(tutorReschedule.payload?.error),
+  );
+
+  const missingReschedule = await parent("/api/bookings/000000000000000000000000/reschedule", {
+    method: "POST",
+    body: { startAt: slotB, reason: "QA — a lesson that does not exist." },
+  });
+  check("rescheduling a lesson that does not exist is a 404", missingReschedule.status === 404);
+
+  const badIdReschedule = await parent("/api/bookings/not-an-id/reschedule", {
+    method: "POST",
+    body: { startAt: slotB, reason: "QA — malformed id." },
+  });
+  check("a malformed booking id is rejected cleanly", badIdReschedule.status === 422);
+
+  // --- No-show: who may not ---
+  const noShowPayload = {
+    method: "POST",
+    body: { party: "TUTOR", note: "QA — attempting a no-show on a stranger's lesson." },
+  };
+
+  const anonNoShow = await anon(`/api/bookings/${authBookingId}/no-show`, noShowPayload);
+  check("anonymous cannot report a no-show", anonNoShow.status === 401);
+
+  const strangerNoShow = await stranger(`/api/bookings/${authBookingId}/no-show`, noShowPayload);
+  check(
+    "an unrelated learner cannot report a no-show on someone else's lesson",
+    strangerNoShow.status === 403,
+    `status ${strangerNoShow.status}`,
+  );
+
+  const strangerTutorNoShow = await strangerTutor(`/api/bookings/${authBookingId}/no-show`, {
+    method: "POST",
+    body: { party: "STUDENT", note: "QA — attempting a no-show on another tutor's lesson." },
+  });
+  check(
+    "an unrelated tutor cannot report a no-show on someone else's lesson",
+    strangerTutorNoShow.status === 403,
+    `status ${strangerTutorNoShow.status}`,
+  );
+
+  // Being a participant is not enough — you may only report the other side.
+  const wrongDirection = await parent(`/api/bookings/${authBookingId}/no-show`, {
+    method: "POST",
+    body: { party: "STUDENT", note: "QA — the purchaser reporting their own side." },
+  });
+  check(
+    "a participant cannot report the wrong party",
+    wrongDirection.status === 403,
+    `status ${wrongDirection.status}`,
+  );
+
+  const stillConfirmed = await parent(`/api/bookings/${authBookingId}`);
+  check(
+    "no refused no-show changed the lesson's status",
+    stillConfirmed.payload?.data?.booking?.status === "CONFIRMED",
+    stillConfirmed.payload?.data?.booking?.status,
+  );
+  check(
+    "no refused no-show issued a refund",
+    (stillConfirmed.payload?.data?.booking?.paymentId?.refundedCents ?? 0) === 0 &&
+      stillConfirmed.payload?.data?.booking?.paymentId?.status === "PAID",
+    `payment ${stillConfirmed.payload?.data?.booking?.paymentId?.status}`,
+  );
+
+  // A participant on a lesson that has not happened yet gets past the
+  // authorization gate and is stopped by the state rule instead — which is
+  // precisely the distinction the fix draws.
+  const tooEarly = await parent(`/api/bookings/${authBookingId}/no-show`, {
+    method: "POST",
+    body: { party: "TUTOR", note: "QA — reporting a lesson that has not happened yet." },
+  });
+  check(
+    "a participant is refused on timing, not authorization",
+    tooEarly.status === 422 && tooEarly.payload?.error?.code !== "FORBIDDEN",
+    `${tooEarly.status} ${tooEarly.payload?.error?.code}`,
+  );
+
+  // --- No-show on a lesson that has actually finished ---
+  //
+  // Seeded history supplies these; each run consumes one. Re-seed if this
+  // section reports that it has run out.
+  const pastLessons = await parent("/api/bookings?scope=PAST&status=COMPLETED&pageSize=50");
+  const reportable = (pastLessons.payload?.data?.bookings ?? []).find(
+    (b) => b.status === "COMPLETED",
+  );
+
+  if (!reportable) {
+    check(
+      "a completed lesson is available to test the no-show happy path",
+      false,
+      "no COMPLETED past booking left — run `bun run seed` to restore the fixtures",
+    );
+  } else {
+    const earningsBefore = (await tutor("/api/tutor/earnings")).payload?.data?.lifetime?.netCents;
+
+    const strangerOnCompleted = await stranger(`/api/bookings/${reportable.id}/no-show`, {
+      method: "POST",
+      body: { party: "TUTOR", note: "QA — voiding a completed lesson the caller has no part in." },
+    });
+    check(
+      "an unrelated user cannot void a completed lesson",
+      strangerOnCompleted.status === 403,
+      `status ${strangerOnCompleted.status}`,
+    );
+
+    const afterAttack = await admin(`/api/bookings/${reportable.id}`);
+    check(
+      "the completed lesson survived the unauthorized attempt",
+      afterAttack.payload?.data?.booking?.status === "COMPLETED",
+      afterAttack.payload?.data?.booking?.status,
+    );
+    const earningsAfterAttack = (await tutor("/api/tutor/earnings")).payload?.data?.lifetime
+      ?.netCents;
+    check(
+      "tutor earnings are untouched by an unauthorized no-show",
+      earningsAfterAttack === earningsBefore,
+      `${earningsBefore} -> ${earningsAfterAttack}`,
+    );
+
+    const noShowSettings = (await admin("/api/admin/settings")).payload.data.settings;
+    const realNoShow = await parent(`/api/bookings/${reportable.id}/no-show`, {
+      method: "POST",
+      body: { party: "TUTOR", note: "QA — the tutor did not attend this lesson." },
+    });
+    check(
+      "the learner who paid can report a tutor no-show",
+      realNoShow.ok,
+      JSON.stringify(realNoShow.payload?.error),
+    );
+    check(
+      "the no-show applies the configured policy exactly",
+      realNoShow.payload?.data?.booking?.cancellation?.refundPercent ===
+        noShowSettings.tutorNoShowRefundPercent,
+      `got ${realNoShow.payload?.data?.booking?.cancellation?.refundPercent}`,
+    );
+    check(
+      "the lesson is recorded as a tutor no-show",
+      realNoShow.payload?.data?.booking?.status === "NO_SHOW_TUTOR",
+    );
+
+    const repeatNoShow = await parent(`/api/bookings/${reportable.id}/no-show`, {
+      method: "POST",
+      body: { party: "TUTOR", note: "QA — reporting the same no-show a second time." },
+    });
+    check(
+      "a second no-show report cannot refund the same lesson twice",
+      !repeatNoShow.ok && repeatNoShow.payload?.error?.code === "NOT_REPORTABLE",
+      `${repeatNoShow.status} ${repeatNoShow.payload?.error?.code}`,
+    );
+  }
+
+  // Finally: a cancelled lesson cannot be rescheduled back to life.
+  await parent(`/api/bookings/${authBookingId}/cancel`, {
+    method: "POST",
+    body: { reason: "QA — tidying up the authorization fixture." },
+  });
+  const rescheduleCancelled = await parent(`/api/bookings/${authBookingId}/reschedule`, {
+    method: "POST",
+    body: { startAt: slotB, reason: "QA — reviving a cancelled lesson." },
+  });
+  check(
+    "a cancelled lesson cannot be rescheduled",
+    !rescheduleCancelled.ok && rescheduleCancelled.status === 422,
+    `status ${rescheduleCancelled.status}`,
+  );
+
+  // --- Double-booking under concurrency ------------------------------------
+  //
+  // The availability check is a read followed by a write. These fire the same
+  // slot at the server at once and assert the invariant survives it (§18).
+  section("Booking concurrency");
+
+  const [raceSlot, otherDaySlot] = await freeSlots(2);
+  const raceBody = {
+    tutorProfileId: ownTutorId,
+    studentProfileId: studentId,
+    courseId: ownCourseId,
+    mode: "ONLINE",
+    startAt: raceSlot,
+    durationMinutes: 60,
+    meetingProvider: "ZOOM",
+  };
+
+  const race = await Promise.all(
+    Array.from({ length: 5 }, () => parent("/api/bookings", { method: "POST", body: raceBody })),
+  );
+  const winners = race.filter((r) => r.ok);
+  check(
+    "exactly one of five concurrent requests wins the slot",
+    winners.length === 1,
+    `${winners.length} succeeded`,
+  );
+  check(
+    "every loser is refused with a conflict, not an error",
+    race.filter((r) => !r.ok).every((r) => r.status === 409),
+    race.filter((r) => !r.ok).map((r) => r.status).join(","),
+  );
+
+  const heldSlot = await parent(
+    `/api/tutors/${ownTutorId}/availability?days=28&durationMinutes=60`,
+  );
+  const stillOffered = (heldSlot.payload?.data?.days ?? [])
+    .flatMap((d) => d.slots.map((s) => s.startAt))
+    .some((s) => new Date(s).toISOString() === new Date(raceSlot).toISOString());
+  check("the contested slot is no longer offered to anyone else", !stillOffered);
+
+  // The guard must not be over-broad: an unrelated slot still books.
+  const unrelatedSlot = await parent("/api/bookings", {
+    method: "POST",
+    body: { ...raceBody, startAt: otherDaySlot },
+  });
+  check(
+    "a different free slot is still bookable",
+    unrelatedSlot.ok,
+    JSON.stringify(unrelatedSlot.payload?.error),
+  );
+
+  for (const created of [...winners, unrelatedSlot]) {
+    const id = created.payload?.data?.bookings?.[0]?.id;
+    if (id) {
+      await parent(`/api/bookings/${id}/cancel`, {
+        method: "POST",
+        body: { reason: "QA — releasing the concurrency fixture." },
+      });
+    }
+  }
+
+  // --- Scheduled jobs -------------------------------------------------------
+  //
+  // Reminders, badge expiry and payouts only happen because something calls
+  // them. These check that the endpoint exists, is closed to everyone but the
+  // scheduler and an administrator, and that running a job twice is a no-op.
+  section("Scheduled jobs");
+
+  const anonCron = await anon("/api/cron/booking-reminders");
+  check("anonymous cannot run a scheduled job", anonCron.status === 403 || anonCron.status === 401);
+
+  const parentCron = await parent("/api/cron/booking-reminders");
+  check("a parent cannot run a scheduled job", parentCron.status === 403);
+
+  const tutorCron = await tutor("/api/cron/payouts");
+  check("a tutor cannot run the payout job", tutorCron.status === 403);
+
+  const badBearer = await anon("/api/cron/booking-reminders", {
+    method: "POST",
+    headers: { Authorization: "Bearer not-the-cron-secret" },
+  });
+  check(
+    "a wrong scheduler token is refused",
+    badBearer.status === 403 || badBearer.status === 401,
+    `status ${badBearer.status}`,
+  );
+
+  // The scheduler's own route, when the deployment has a secret configured.
+  // Skipped rather than faked when it does not — asserting nothing is better
+  // than asserting something that cannot fail.
+  if (process.env.CRON_SECRET) {
+    const withSecret = await anon("/api/cron/list", {
+      headers: { Authorization: `Bearer ${process.env.CRON_SECRET}` },
+    });
+    check("the scheduler's token is accepted", withSecret.ok, `status ${withSecret.status}`);
+
+    const nearMiss = await anon("/api/cron/list", {
+      headers: { Authorization: `Bearer ${process.env.CRON_SECRET}x` },
+    });
+    check("a token that is close but wrong is refused", nearMiss.status === 403);
+  } else {
+    console.log("    (CRON_SECRET not set — skipping the scheduler-token checks)");
+  }
+
+  const jobList = await admin("/api/cron/list");
+  check(
+    "the job catalogue names every scheduled job",
+    jobList.ok &&
+      ["booking-reminders", "verification-expiry", "payouts", "request-expiry"].every((key) =>
+        jobList.payload.data.jobs.some((j) => j.key === key),
+      ),
+  );
+
+  const unknownJob = await admin("/api/cron/does-not-exist");
+  check("an unknown job name is a 404", unknownJob.status === 404);
+
+  const countReminders = async () => {
+    const res = await parent("/api/notifications?pageSize=50");
+    return (res.payload?.data?.notifications ?? []).filter(
+      (n) => n.type === "BOOKING_REMINDER",
+    ).length;
+  };
+
+  const remindersBefore = await countReminders();
+  const reminderRun1 = await admin("/api/cron/booking-reminders", { method: "POST" });
+  check(
+    "the reminder job runs",
+    reminderRun1.ok && reminderRun1.payload.data.ok,
+    JSON.stringify(reminderRun1.payload?.error ?? reminderRun1.payload?.data),
+  );
+
+  const reminderRun2 = await admin("/api/cron/booking-reminders", { method: "POST" });
+  check(
+    "running the reminder job again sends nothing new",
+    reminderRun2.payload?.data?.result?.sent === 0,
+    `sent ${reminderRun2.payload?.data?.result?.sent}`,
+  );
+
+  const remindersAfter = await countReminders();
+  const firstRunSent = reminderRun1.payload?.data?.result?.sent ?? 0;
+  check(
+    firstRunSent > 0
+      ? "reminders that fell due were actually delivered"
+      : "no reminders were due, and none were invented",
+    firstRunSent > 0 ? remindersAfter > remindersBefore : remindersAfter === remindersBefore,
+    `${remindersBefore} -> ${remindersAfter} (job reported ${firstRunSent})`,
+  );
+
+  const expiryRun = await admin("/api/cron/verification-expiry", { method: "POST" });
+  check(
+    "the verification expiry job runs and reports what it expired",
+    expiryRun.ok && typeof expiryRun.payload.data.result.expired === "number",
+    JSON.stringify(expiryRun.payload?.data),
+  );
+
+  const payoutRun = await admin("/api/cron/payouts", { method: "POST" });
+  check(
+    "the payout job runs and follows the existing eligibility rules",
+    payoutRun.ok && typeof payoutRun.payload.data.result.created === "number",
+    JSON.stringify(payoutRun.payload?.data),
+  );
+  const payoutRunAgain = await admin("/api/cron/payouts", { method: "POST" });
+  check(
+    "running the payout job again pays nobody twice",
+    payoutRunAgain.payload?.data?.result?.created === 0,
+    `created ${payoutRunAgain.payload?.data?.result?.created}`,
+  );
+
+  const allJobs = await admin("/api/cron/all", { method: "POST" });
+  check(
+    "every job can be run in one pass",
+    allJobs.ok && allJobs.payload.data.jobs.length >= 4 && allJobs.payload.data.ok,
+    JSON.stringify(allJobs.payload?.data?.jobs?.filter((j) => !j.ok)),
+  );
+
+  // --- Conversation reports reach a moderator -------------------------------
+  //
+  // §21 asks for a report capability. On a platform used by children, a
+  // report that no administrator ever sees is not one.
+  section("Conversation moderation");
+
+  const reportThread = await parent(`/api/messages/conversations/${conversationId}/actions`, {
+    method: "POST",
+    body: {
+      action: "REPORT",
+      reason: "QA — asked us to move the conversation off the platform.",
+    },
+  });
+  check("a parent can report a conversation", reportThread.ok, JSON.stringify(reportThread.payload?.error));
+  check("reporting opens a case", reportThread.payload?.data?.reportStatus === "OPEN");
+
+  const anonQueue = await anon("/api/admin/conversations");
+  check("anonymous cannot read the moderation queue", anonQueue.status === 401);
+
+  const parentQueue = await parent("/api/admin/conversations");
+  check("a parent cannot read the moderation queue", parentQueue.status === 403);
+
+  const tutorQueue = await tutor("/api/admin/conversations");
+  check("a tutor cannot read the moderation queue", tutorQueue.status === 403);
+
+  const parentThreadRead = await parent(`/api/admin/conversations/${conversationId}`);
+  check(
+    "a parent cannot read a reported thread through the admin route",
+    parentThreadRead.status === 403,
+  );
+
+  const adminQueue = await admin("/api/admin/conversations");
+  check(
+    "the report reaches the admin queue",
+    adminQueue.ok &&
+      adminQueue.payload.data.conversations.some((c) => String(c.id) === String(conversationId)),
+    JSON.stringify(adminQueue.payload?.error),
+  );
+
+  const queued = adminQueue.payload?.data?.conversations?.find(
+    (c) => String(c.id) === String(conversationId),
+  );
+  check(
+    "the queue carries the reporter, the reason and both participants",
+    Boolean(queued?.reportedBy?.firstName && queued?.reportReason && queued?.learnerUserId && queued?.tutorUserId),
+  );
+  check(
+    "the triage queue carries no message bodies of its own",
+    queued?.messages === undefined,
+  );
+
+  const adminThread = await admin(`/api/admin/conversations/${conversationId}`);
+  check(
+    "an administrator can read the thread and its booking context",
+    adminThread.ok &&
+      Array.isArray(adminThread.payload.data.messages) &&
+      Array.isArray(adminThread.payload.data.bookings),
+    JSON.stringify(adminThread.payload?.error),
+  );
+
+  const parentModerate = await parent(`/api/admin/conversations/${conversationId}`, {
+    method: "POST",
+    body: { status: "DISMISSED", note: "QA — a member trying to close their own report." },
+  });
+  check("a member cannot close a moderation case", parentModerate.status === 403);
+
+  const reviewing = await admin(`/api/admin/conversations/${conversationId}`, {
+    method: "POST",
+    body: { status: "REVIEWING", note: "QA — picked up for review." },
+  });
+  check("an administrator can take a case under review", reviewing.ok);
+
+  const dismissed = await admin(`/api/admin/conversations/${conversationId}`, {
+    method: "POST",
+    body: { status: "DISMISSED", note: "QA — nothing in the thread breaks the rules." },
+  });
+  check("an administrator can close a case", dismissed.ok);
+  check(
+    "the decision persists",
+    dismissed.payload?.data?.conversation?.reportStatus === "DISMISSED",
+  );
+  check(
+    "the moderation trail is kept",
+    (dismissed.payload?.data?.conversation?.moderationHistory ?? []).length >= 3,
+    `${(dismissed.payload?.data?.conversation?.moderationHistory ?? []).length} entries`,
+  );
+
+  const afterClose = await admin("/api/admin/conversations");
+  check(
+    "a closed case leaves the outstanding queue",
+    !afterClose.payload.data.conversations.some((c) => String(c.id) === String(conversationId)),
+  );
+
+  // --- Review moderation integrity -----------------------------------------
+  //
+  // A tutor may report a review about themselves, but reporting must not be
+  // the same thing as deciding (§23).
+  section("Review moderation");
+
+  const tutorReviews = await tutor("/api/reviews?pageSize=20");
+  const target = (tutorReviews.payload?.data?.reviews ?? []).find(
+    (r) => r.status === "PUBLISHED" && !["OPEN", "REVIEWING"].includes(r.reportStatus),
+  );
+
+  if (!target) {
+    check("a published review is available to test moderation", false, "no eligible seeded review");
+  } else {
+    const publicBefore = await anon(`/api/tutors/${ownTutorId}`);
+    const ratingBefore = publicBefore.payload?.data?.tutor?.stats;
+
+    const unrelatedReport = await stranger(`/api/reviews/${target.id}/report`, {
+      method: "POST",
+      body: { reason: "QA — a stranger trying to report someone else's review." },
+    });
+    check("an unrelated user cannot report a review", unrelatedReport.status === 403);
+
+    const tutorReport = await tutor(`/api/reviews/${target.id}/report`, {
+      method: "POST",
+      body: { reason: "QA — the reviewed tutor objects to this review." },
+    });
+    check("the reviewed tutor can still report a review", tutorReport.ok);
+    check(
+      "reporting does not hide the review",
+      tutorReport.payload?.data?.stillVisible === true,
+    );
+
+    const publicAfter = await anon(`/api/tutors/${ownTutorId}`);
+    const ratingAfter = publicAfter.payload?.data?.tutor?.stats;
+    check(
+      "a tutor reporting a review cannot move their own public rating",
+      ratingAfter?.ratingCount === ratingBefore?.ratingCount &&
+        ratingAfter?.ratingAverage === ratingBefore?.ratingAverage,
+      `${ratingBefore?.ratingAverage}/${ratingBefore?.ratingCount} -> ${ratingAfter?.ratingAverage}/${ratingAfter?.ratingCount}`,
+    );
+
+    const reviewQueue = await admin("/api/admin/reviews?reported=true");
+    check(
+      "the report reaches the review moderation queue",
+      reviewQueue.ok && reviewQueue.payload.data.reviews.some((r) => String(r.id) === String(target.id)),
+    );
+
+    const tutorModerates = await tutor(`/api/admin/reviews/${target.id}`, {
+      method: "POST",
+      body: { status: "REMOVED", note: "QA — the tutor trying to remove it themselves." },
+    });
+    check("a tutor cannot moderate a review", tutorModerates.status === 403);
+
+    const dismissReport = await admin(`/api/admin/reviews/${target.id}`, {
+      method: "POST",
+      body: { status: "PUBLISHED", note: "QA — critical but factual. Keeping it." },
+    });
+    check("an administrator can rule on the report", dismissReport.ok);
+    check(
+      "dismissing leaves the review published and counted",
+      dismissReport.payload?.data?.review?.status === "PUBLISHED" &&
+        dismissReport.payload?.data?.review?.reportStatus === "DISMISSED",
+    );
+
+    const publicFinal = await anon(`/api/tutors/${ownTutorId}`);
+    check(
+      "the public rating is unchanged throughout",
+      publicFinal.payload?.data?.tutor?.stats?.ratingCount === ratingBefore?.ratingCount,
+    );
+  }
+
+  // --- Email verification ---------------------------------------------------
+  //
+  // Verification existed as a mechanism but functioned as a suggestion. It is
+  // now a gate on the actions that spend money or reach another member (§9).
+  section("Email verification");
+
+  const unverified = createClient();
+  const newEmail = `qa-unverified-${Date.now()}@example.com`;
+  const registered = await unverified("/api/auth/register", {
+    method: "POST",
+    body: {
+      email: newEmail,
+      password: "AplusLearn2024!",
+      confirmPassword: "AplusLearn2024!",
+      firstName: "Quinn",
+      lastName: "Unverified",
+      role: "PARENT",
+      provinceCode: "ON",
+      city: "Toronto",
+      acceptTerms: true,
+    },
+  });
+  check("a new account can register", registered.ok, JSON.stringify(registered.payload?.error));
+
+  if (registered.ok) {
+    const session = await unverified("/api/auth/session");
+    check(
+      "an unverified account can sign in and reach its own account",
+      session.ok,
+      "sign-in must still work, or nobody could ever request a new link",
+    );
+    check(
+      "the account is reported as unverified",
+      session.payload?.data?.user?.emailVerified === false,
+    );
+
+    const unverifiedBooking = await unverified("/api/bookings", {
+      method: "POST",
+      body: {
+        tutorProfileId: ownTutorId,
+        studentProfileId: studentId,
+        courseId: ownCourseId,
+        mode: "ONLINE",
+        startAt: slotB,
+        durationMinutes: 60,
+        meetingProvider: "ZOOM",
+      },
+    });
+    check(
+      "an unverified account cannot book a lesson",
+      unverifiedBooking.status === 403 &&
+        unverifiedBooking.payload?.error?.code === "EMAIL_NOT_VERIFIED",
+      `${unverifiedBooking.status} ${unverifiedBooking.payload?.error?.code}`,
+    );
+
+    const unverifiedMessage = await unverified("/api/messages", {
+      method: "POST",
+      body: { tutorProfileId: ownTutorId, body: "QA — messaging without a confirmed address." },
+    });
+    check(
+      "an unverified account cannot message a tutor",
+      unverifiedMessage.payload?.error?.code === "EMAIL_NOT_VERIFIED",
+      `${unverifiedMessage.status} ${unverifiedMessage.payload?.error?.code}`,
+    );
+
+    const unverifiedRequest = await unverified("/api/requests", {
+      method: "POST",
+      body: {
+        studentProfileId: studentId,
+        courseId: ownCourseId,
+        modes: ["ONLINE"],
+        preferredWindows: ["WEEKDAY_EVENING"],
+        budgetMaxCents: 9000,
+        goal: "QA — posting a request without a confirmed address.",
+      },
+    });
+    check(
+      "an unverified account cannot post a tutor request",
+      unverifiedRequest.payload?.error?.code === "EMAIL_NOT_VERIFIED",
+      `${unverifiedRequest.status} ${unverifiedRequest.payload?.error?.code}`,
+    );
+
+    const unverifiedReview = await unverified("/api/reviews", {
+      method: "POST",
+      body: {
+        bookingId: authBookingId,
+        rating: 5,
+        knowledge: 5,
+        communication: 5,
+        reliability: 5,
+        teaching: 5,
+        body: "QA — reviewing without a confirmed address, which must be refused.",
+      },
+    });
+    check(
+      "an unverified account cannot leave a review",
+      unverifiedReview.payload?.error?.code === "EMAIL_NOT_VERIFIED",
+      `${unverifiedReview.status} ${unverifiedReview.payload?.error?.code}`,
+    );
+
+    const resend = await unverified("/api/auth/resend-verification", {
+      method: "POST",
+      body: { email: newEmail },
+    });
+    check("a new verification link can always be requested", resend.ok);
+  }
+
+  const badToken = await anon("/api/auth/verify-email", {
+    method: "POST",
+    body: { token: "0".repeat(64) },
+  });
+  check(
+    "an invalid, expired or already-used verification token is refused",
+    badToken.status === 410 || badToken.status === 422,
+    `status ${badToken.status}`,
+  );
+
+  // A verified account is unaffected — this is the control for the gate above.
+  const verifiedStillWorks = await parent("/api/bookings/quote", {
+    method: "POST",
+    body: { tutorProfileId: ownTutorId, courseId: ownCourseId, durationMinutes: 60 },
+  });
+  check("a verified account is unaffected by the gate", verifiedStillWorks.ok);
+
+  // --- Tutor search eligibility --------------------------------------------
+  //
+  // `isSearchable` is derived. A profile edit must recompute it, and must
+  // never be a way around approval (§16, §42).
+  section("Tutor search eligibility");
+
+  const editedHeadline = `Experienced Ontario tutor — QA ${Date.now() % 100000}`;
+  const editProfile = await tutor("/api/tutor/profile", {
+    method: "PATCH",
+    body: { headline: editedHeadline },
+  });
+  check("an approved tutor can edit their profile", editProfile.ok, JSON.stringify(editProfile.payload?.error));
+  check(
+    "an approved, complete profile stays searchable after an edit",
+    editProfile.payload?.data?.profile?.isSearchable === true,
+  );
+
+  const stillPublic = await anon(`/api/tutors/${ownTutorId}`);
+  check("and is still reachable on the public profile", stillPublic.ok);
+  check("with the edit applied", stillPublic.payload?.data?.tutor?.headline === editedHeadline);
+
+  const clientSetSearchable = await tutor("/api/tutor/profile", {
+    method: "PATCH",
+    body: { headline: editedHeadline, isSearchable: true, status: "APPROVED" },
+  });
+  check(
+    "a tutor cannot set their own searchability or status",
+    clientSetSearchable.ok,
+    "the whitelist strips them rather than failing",
+  );
+
+  const pendingTutor = createClient();
+  await login(pendingTutor, "james.oconnor@example.com");
+  const pendingBefore = await pendingTutor("/api/tutor/profile");
+  const pendingProfileId = pendingBefore.payload?.data?.profile?.id;
+  check(
+    "the pending tutor starts out unapproved and unlisted",
+    pendingBefore.payload?.data?.profile?.isSearchable === false,
+  );
+
+  const pendingEdit = await pendingTutor("/api/tutor/profile", {
+    method: "PATCH",
+    body: {
+      headline: "Waterloo mathematics and physics tutor — QA edit",
+      isSearchable: true,
+    },
+  });
+  check(
+    "an unapproved tutor can edit their profile",
+    pendingEdit.ok,
+    JSON.stringify(pendingEdit.payload?.error),
+  );
+  check(
+    "editing never grants search visibility to an unapproved profile",
+    pendingEdit.payload?.data?.profile?.isSearchable === false,
+    `isSearchable ${pendingEdit.payload?.data?.profile?.isSearchable}`,
+  );
+
+  const pendingPublic = await anon(`/api/tutors/${pendingProfileId}`);
+  check("and the unapproved profile stays off the public site", pendingPublic.status === 404);
 
   // --- Validation ----------------------------------------------------------
   section("Validation");

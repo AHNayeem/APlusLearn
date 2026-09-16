@@ -1,4 +1,6 @@
 import mongoose from "mongoose";
+import { REPORT_STATUS } from "../constants/index.js";
+import { ModerationEntrySchema } from "./Engagement.js";
 
 /**
  * A conversation is always exactly one learner-side account and one tutor.
@@ -31,14 +33,29 @@ const ConversationSchema = new mongoose.Schema(
     archivedBy: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
     blockedBy: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
 
+    /**
+     * Safeguarding (§21, §35).
+     *
+     * A report on a platform used by minors has to reach a person. These
+     * fields are the case: `reportStatus` is what puts the thread in the
+     * admin queue and what takes it out again, and `moderationHistory` is the
+     * trail of who did what to it.
+     */
+    reportStatus: { type: String, enum: Object.values(REPORT_STATUS), index: true },
     reportedAt: { type: Date },
     reportedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     reportReason: { type: String, trim: true },
+    reportCount: { type: Number, default: 0 },
+    moderationHistory: { type: [ModerationEntrySchema], default: [] },
+    moderatedAt: { type: Date },
+    moderatedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    moderationNote: { type: String, trim: true, maxlength: 600 },
   },
   { timestamps: true },
 );
 
 ConversationSchema.index({ participantIds: 1, lastMessageAt: -1 });
+ConversationSchema.index({ reportStatus: 1, reportedAt: -1 });
 ConversationSchema.index({ learnerUserId: 1, tutorUserId: 1 }, { unique: true });
 
 export const Conversation =

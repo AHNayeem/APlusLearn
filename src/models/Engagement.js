@@ -1,5 +1,25 @@
 import mongoose from "mongoose";
-import { REVIEW_STATUS, NOTIFICATION_TYPES, NOTIFICATION_CHANNELS } from "../constants/index.js";
+import {
+  REVIEW_STATUS,
+  REPORT_STATUS,
+  NOTIFICATION_TYPES,
+  NOTIFICATION_CHANNELS,
+} from "../constants/index.js";
+
+/**
+ * One entry in a moderation trail — who did what to a report, and when.
+ * Shared by reviews and reported conversations so both read the same way.
+ */
+export const ModerationEntrySchema = new mongoose.Schema(
+  {
+    at: { type: Date, default: Date.now },
+    byId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    byRole: { type: String, trim: true },
+    action: { type: String, trim: true },
+    note: { type: String, trim: true, maxlength: 600 },
+  },
+  { _id: false },
+);
 const FavouriteSchema = new mongoose.Schema(
   {
     userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
@@ -69,9 +89,19 @@ const ReviewSchema = new mongoose.Schema(
     tutorReply: { type: String, trim: true, maxlength: 1200 },
     tutorRepliedAt: { type: Date },
 
+    /**
+     * The *report case*, tracked separately from `status` (§23).
+     *
+     * `status` is what the public sees; `reportStatus` is whether a moderator
+     * still has to look at it. Keeping them apart is what stops the reviewed
+     * tutor from hiding a review by objecting to it.
+     */
+    reportStatus: { type: String, enum: Object.values(REPORT_STATUS), index: true },
     reportedAt: { type: Date },
     reportedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    reportedByRole: { type: String, trim: true },
     reportReason: { type: String, trim: true },
+    reportHistory: { type: [ModerationEntrySchema], default: [] },
     moderatedAt: { type: Date },
     moderatedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     moderationNote: { type: String, trim: true },
@@ -81,6 +111,7 @@ const ReviewSchema = new mongoose.Schema(
 
 ReviewSchema.index({ tutorProfileId: 1, status: 1, createdAt: -1 });
 ReviewSchema.index({ status: 1, reportedAt: -1 });
+ReviewSchema.index({ reportStatus: 1, reportedAt: -1 });
 
 export const Review = mongoose.models.Review || mongoose.model("Review", ReviewSchema);
 

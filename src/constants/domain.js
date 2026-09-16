@@ -212,6 +212,30 @@ export const REVIEW_STATUS = {
   REMOVED: "REMOVED",
 };
 
+/**
+ * Lifecycle of a *report* — a user asking a moderator to look at something.
+ *
+ * Deliberately separate from the visibility status of the thing reported:
+ * reporting opens a case, it does not decide the outcome. Only a moderator
+ * changes what the public sees (§21, §23).
+ */
+export const REPORT_STATUS = {
+  OPEN: "OPEN",
+  REVIEWING: "REVIEWING",
+  RESOLVED: "RESOLVED",
+  DISMISSED: "DISMISSED",
+};
+
+export const REPORT_STATUS_LABELS = {
+  OPEN: "Open",
+  REVIEWING: "Under review",
+  RESOLVED: "Resolved",
+  DISMISSED: "Dismissed",
+};
+
+/** Reports a moderator has not finished with. */
+export const ACTIVE_REPORT_STATUSES = [REPORT_STATUS.OPEN, REPORT_STATUS.REVIEWING];
+
 export const DISPUTE_STATUS = {
   OPEN: "OPEN",
   UNDER_REVIEW: "UNDER_REVIEW",
@@ -283,6 +307,19 @@ export const DOCUMENT_STATUS = {
   REJECTED: "REJECTED",
 };
 
+/**
+ * Lesson reminders (§28).
+ *
+ * `key` is what gets written to `Booking.remindersSent`, which is how the
+ * scheduler stays idempotent: a reminder that has already been claimed is
+ * never sent twice, however many times the job runs. Ordered furthest-out
+ * first — the scheduler reads the first entry to size its query window.
+ */
+export const BOOKING_REMINDERS = [
+  { key: "T24H", minutesBefore: 24 * 60, label: "tomorrow" },
+  { key: "T1H", minutesBefore: 60, label: "in about an hour" },
+];
+
 /** Lesson durations we sell, in minutes. */
 export const LESSON_DURATIONS = [30, 45, 60, 90, 120];
 
@@ -342,11 +379,16 @@ export const AUDIT_ACTIONS = {
   VERIFICATION_BADGE_GRANTED: "VERIFICATION_BADGE_GRANTED",
   VERIFICATION_BADGE_REVOKED: "VERIFICATION_BADGE_REVOKED",
   BOOKING_CANCELLED: "BOOKING_CANCELLED",
+  BOOKING_NO_SHOW_REPORTED: "BOOKING_NO_SHOW_REPORTED",
+  BOOKING_RESCHEDULED: "BOOKING_RESCHEDULED",
   PAYMENT_SETTLED: "PAYMENT_SETTLED",
   REFUND_ISSUED: "REFUND_ISSUED",
   PAYOUT_MARKED_PAID: "PAYOUT_MARKED_PAID",
   REVIEW_MODERATED: "REVIEW_MODERATED",
+  CONVERSATION_REPORT_VIEWED: "CONVERSATION_REPORT_VIEWED",
+  CONVERSATION_MODERATED: "CONVERSATION_MODERATED",
   DISPUTE_RESOLVED: "DISPUTE_RESOLVED",
+  SCHEDULED_JOB_RUN: "SCHEDULED_JOB_RUN",
   SETTINGS_UPDATED: "SETTINGS_UPDATED",
   CURRICULUM_UPDATED: "CURRICULUM_UPDATED",
 };

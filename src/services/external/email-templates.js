@@ -247,6 +247,32 @@ export function emailTemplatesFor(brand = DEFAULT_EMAIL_BRAND) {
         cta: { label: "View the lesson", href: `${baseUrl()}/bookings/${booking.id}` },
       }),
 
+    bookingReminder: ({ firstName, booking, whenLabel, isTutor }) =>
+      email(`Reminder — ${booking.courseName} ${whenLabel}`, {
+        preheader: `${booking.dateLabel} at ${booking.timeLabel}`,
+        heading: `Your lesson is ${whenLabel}`,
+        body: [
+          `Hi ${firstName},`,
+          isTutor
+            ? "A quick reminder of your next lesson."
+            : "A quick reminder so nobody misses it.",
+        ],
+        details: [
+          ["Course", `${booking.courseName}${booking.courseCode ? ` (${booking.courseCode})` : ""}`],
+          ["With", booking.tutorName],
+          ["When", `${booking.dateLabel} at ${booking.timeLabel}`],
+          ["Length", booking.durationLabel],
+          ["Type", booking.modeLabel],
+          ["Reference", booking.reference],
+        ],
+        cta: {
+          label: "View the lesson",
+          href: `${baseUrl()}${isTutor ? "/tutor" : ""}/bookings/${booking.id}`,
+        },
+        footnote:
+          "Need to change it? Reschedule or cancel from the lesson page — the cancellation policy on the booking applies.",
+      }),
+
     refundIssued: ({ firstName, amountLabel, reason, reference }) =>
       email(`${amountLabel} refunded`, {
         preheader: "Your refund is on its way.",

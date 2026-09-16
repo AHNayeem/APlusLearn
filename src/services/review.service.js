@@ -3,6 +3,8 @@ import { Types } from "mongoose";
 import { Review, Booking, TutorProfile, User } from "@/models";
 import {
   REVIEW_STATUS,
+  REPORT_STATUS,
+  ACTIVE_REPORT_STATUSES,
   BOOKING_STATUS,
   NOTIFICATION_TYPES,
   AUDIT_ACTIONS,
@@ -10,6 +12,7 @@ import {
   ROLES,
 } from "@/constants";
 import { NotFoundError, AuthorizationError, BusinessRuleError, ConflictError } from "@/lib/api/errors";
+import { requireVerifiedEmail } from "@/lib/auth/assert";
 import { toPlain } from "@/lib/utils/serialize";
 import { publicName } from "@/lib/utils/format";
 import { sanitizeMultiline } from "@/lib/security/sanitize";
@@ -27,6 +30,8 @@ import { recordAudit } from "./audit.service";
  */
 
 export async function createReview(input, actor) {
+  requireVerifiedEmail(actor, "Confirm your email address before leaving a review.");
+
   const booking = await Booking.findById(input.bookingId);
   if (!booking) throw new NotFoundError("That lesson no longer exists.");
 
@@ -87,7 +92,10 @@ export async function createReview(input, actor) {
   return toPlain(review);
 }
 
-export async function listReviews(actor, { page = 1, pageSize, status, tutorProfileId } = {}) {
+export async function listReviews(
+  actor,
+  { page = 1, pageSize, status, reported, tutorProfileId } = {},
+) {
   const size = pageSize ?? PAGE_SIZES.reviews;
   const query = {};
 
@@ -96,6 +104,9 @@ export async function listReviews(actor, { page = 1, pageSize, status, tutorProf
     query.status = { $ne: REVIEW_STATUS.REMOVED };
   } else if (actor.role === ROLES.ADMIN) {
     if (status) query.status = status;
+    // The moderation queue is driven by the report case, not by visibility:
+    // a reported review is still published until somebody rules on it.
+    if (reported) query.reportStatus = { $in: ACTIVE_REPORT_STATUSES };
     if (tutorProfileId) query.tutorProfileId = tutorProfileId;
   } else {
     query.authorId = actor.id;
@@ -148,29 +159,62 @@ export async function replyToReview(reviewId, { reply }, actor) {
   return toPlain(review);
 }
 
+/**
+ * Report a review for moderation (§23).
+ *
+ * Reporting opens a case; it does not decide one. The review stays visible
+ * and keeps counting towards the tutor's average until a moderator rules on
+ * it — otherwise the subject of an unfavourable review could delete it from
+ * the public rating simply by objecting to it, which is the opposite of what
+ * moderation is for. Only an administrator changes what the public sees.
+ */
 export async function reportReview(reviewId, { reason }, actor) {
   const review = await Review.findById(reviewId);
   if (!review) throw new NotFoundError("That review no longer exists.");
 
   // Either party to the review, or an admin, may report it.
-  const allowed =
-    actor.role === ROLES.ADMIN ||
-    String(review.tutorUserId) === String(actor.id) ||
-    String(review.authorId) === String(actor.id);
+  const isTutor = String(review.tutorUserId) === String(actor.id);
+  const isAuthor = String(review.authorId) === String(actor.id);
+  const allowed = actor.role === ROLES.ADMIN || isTutor || isAuthor;
   if (!allowed) throw new AuthorizationError("You cannot report this review.");
 
-  review.status = REVIEW_STATUS.REPORTED;
+  if (ACTIVE_REPORT_STATUSES.includes(review.reportStatus)) {
+    throw new ConflictError("This review is already with our moderation team.");
+  }
+
+  const reporterRole = actor.role === ROLES.ADMIN ? "ADMIN" : isTutor ? "TUTOR" : "AUTHOR";
+
+  review.reportStatus = REPORT_STATUS.OPEN;
   review.reportedAt = new Date();
   review.reportedBy = actor.id;
+  review.reportedByRole = reporterRole;
   review.reportReason = reason;
+  review.reportHistory.push({
+    at: new Date(),
+    byId: actor.id,
+    byRole: reporterRole,
+    action: REPORT_STATUS.OPEN,
+    note: reason,
+  });
+
+  // An administrator reporting a review *is* a moderator acting, so they may
+  // take it out of the public average immediately. Nobody else can.
+  if (actor.role === ROLES.ADMIN) {
+    review.status = REVIEW_STATUS.REPORTED;
+  }
+
   await review.save();
+  if (actor.role === ROLES.ADMIN) await refreshTutorStats(review.tutorProfileId);
 
-  // Reported reviews leave the public average until moderated.
-  await refreshTutorStats(review.tutorProfileId);
-
-  return { reported: true };
+  return {
+    reported: true,
+    reportStatus: review.reportStatus,
+    /** The review stays public while the case is open — say so plainly. */
+    stillVisible: review.status !== REVIEW_STATUS.REPORTED,
+  };
 }
 
+/** A moderator's ruling — the only thing that changes a review's visibility. */
 export async function moderateReview(reviewId, { status, note }, admin) {
   const review = await Review.findById(reviewId);
   if (!review) throw new NotFoundError("That review no longer exists.");
@@ -179,6 +223,20 @@ export async function moderateReview(reviewId, { status, note }, admin) {
   review.moderatedAt = new Date();
   review.moderatedBy = admin.id;
   review.moderationNote = note;
+
+  // Removing upholds the report; keeping it published dismisses it.
+  if (review.reportStatus) {
+    review.reportStatus =
+      status === REVIEW_STATUS.REMOVED ? REPORT_STATUS.RESOLVED : REPORT_STATUS.DISMISSED;
+    review.reportHistory.push({
+      at: new Date(),
+      byId: admin.id,
+      byRole: "ADMIN",
+      action: review.reportStatus,
+      note,
+    });
+  }
+
   await review.save();
 
   await refreshTutorStats(review.tutorProfileId);
@@ -188,7 +246,7 @@ export async function moderateReview(reviewId, { status, note }, admin) {
     action: AUDIT_ACTIONS.REVIEW_MODERATED,
     entityType: "Review",
     entityId: review._id,
-    metadata: { status, note },
+    metadata: { status, reportStatus: review.reportStatus, note },
   });
 
   return toPlain(review);

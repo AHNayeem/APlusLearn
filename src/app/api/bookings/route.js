@@ -17,5 +17,9 @@ export const GET = routeHandler(
  */
 export const POST = routeHandler(
   async ({ user, body }) => created(await createBooking(body, user)),
-  { permission: PERMISSIONS.BOOKING_CREATE, bodySchema: createBookingSchema },
+  {
+    permission: PERMISSIONS.BOOKING_CREATE,
+    verifiedEmail: true,
+    bodySchema: createBookingSchema,
+  },
 );

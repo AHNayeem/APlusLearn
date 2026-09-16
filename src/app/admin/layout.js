@@ -29,6 +29,8 @@ export default async function AdminLayout({ children }) {
       badges={{
         pendingApplications: counts.pendingApplications,
         openDisputes: counts.openDisputes,
+        reportedReviews: counts.reportedReviews,
+        reportedConversations: counts.reportedConversations,
       }}
     >
       {children}

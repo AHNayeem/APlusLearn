@@ -54,7 +54,7 @@ sitting in the admin review queue.
 | `npm run lint` | ESLint, including the React Compiler rules |
 | `npm run seed` | Wipe and reseed the database |
 | `npm run seed:keep` | Add missing seed data without wiping |
-| `npm run qa` | End-to-end API test suite against a running dev server |
+| `npm run qa` | End-to-end API test suite against a running dev server (226 assertions) |
 | `npm run test:integrations` | Provider adapter tests — no network, no third party |
 
 `npm run qa` exercises the full parent, tutor and admin journeys over real
@@ -228,6 +228,37 @@ deliveries.
 
 Setup, credentials, webhook endpoints and external dashboard configuration:
 **[`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md)**.
+
+---
+
+## Scheduled jobs
+
+Lesson reminders, verification badge expiry, tutor payouts and tutor-request
+expiry only happen because something calls them. They are reached through one
+authenticated endpoint, so no queue or worker process is needed:
+
+| Job | Path | Suggested schedule |
+|---|---|---|
+| Lesson reminders | `/api/cron/booking-reminders` | every 15 minutes |
+| Verification expiry | `/api/cron/verification-expiry` | daily |
+| Tutor payouts | `/api/cron/payouts` | daily |
+| Tutor request expiry | `/api/cron/request-expiry` | daily |
+| All of the above | `/api/cron/all` | daily |
+
+Authenticate with `Authorization: Bearer $CRON_SECRET`; a signed-in
+administrator can also run a job by hand. **Leaving `CRON_SECRET` unset closes
+the token route rather than opening it** — but it also means nothing is
+scheduled, so set it on any deployment you expect to behave.
+
+Every job is idempotent: running one twice, or catching up after an outage,
+produces the same result as running it once. Pick any scheduler —
+[`vercel.json`](vercel.json) declares the Vercel Cron entries, and a crontab,
+Kubernetes CronJob or CI workflow issuing the same request works identically.
+
+```bash
+# What is registered, and how often each one wants to run
+curl -H "Authorization: Bearer $CRON_SECRET" http://localhost:3000/api/cron/list
+```
 
 **Test cards** (development payment provider): `4242 4242 4242 4242` succeeds;
 any number ending `0002` exercises the declined-card path. Under Stripe the

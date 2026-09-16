@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { LESSON_MODES, REVIEW_STATUS } from "@/constants";
+import { LESSON_MODES, REVIEW_STATUS, REPORT_STATUS } from "@/constants";
 import { objectId, cents, rating, isoDate, provinceCode, postalCode } from "./common";
 
 export const sendMessageSchema = z.object({
@@ -20,6 +20,22 @@ export const sendMessageSchema = z.object({
 
 export const reportConversationSchema = z.object({
   reason: z.string().trim().min(10, "Tell us what happened.").max(600),
+});
+
+/** A moderator's ruling on a reported conversation (§21). */
+export const moderateConversationSchema = z.object({
+  status: z.enum([
+    REPORT_STATUS.REVIEWING,
+    REPORT_STATUS.RESOLVED,
+    REPORT_STATUS.DISMISSED,
+  ]),
+  note: z.string().trim().max(600).optional(),
+});
+
+export const reportedConversationQuerySchema = z.object({
+  status: z.enum(Object.values(REPORT_STATUS)).optional(),
+  page: z.coerce.number().int().min(1).max(200).default(1),
+  pageSize: z.coerce.number().int().min(1).max(50).default(20),
 });
 
 export const createReviewSchema = z.object({

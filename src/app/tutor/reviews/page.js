@@ -1,7 +1,7 @@
 import { Star } from "lucide-react";
 import { connectToDatabase } from "@/lib/db/connect";
 import { enforceRole } from "@/lib/auth/guards";
-import { ROLES, REVIEW_STATUS } from "@/constants";
+import { ROLES, REVIEW_STATUS, REPORT_STATUS } from "@/constants";
 import { listReviews, ratingBreakdown } from "@/services/review.service";
 import { getTutorProfileByUserId } from "@/services/tutor.service";
 import {
@@ -109,8 +109,10 @@ export default async function TutorReviewsPage() {
                       )}
                     </div>
 
-                    {review.status === REVIEW_STATUS.REPORTED && (
-                      <Badge tone="warning">Under review</Badge>
+                    {(review.reportStatus === REPORT_STATUS.OPEN ||
+                      review.reportStatus === REPORT_STATUS.REVIEWING ||
+                      review.status === REVIEW_STATUS.REPORTED) && (
+                      <Badge tone="warning">With moderation</Badge>
                     )}
                   </div>
 

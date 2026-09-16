@@ -19,6 +19,7 @@ export const POST = routeHandler(
   },
   {
     permission: PERMISSIONS.BOOKING_CREATE,
+    verifiedEmail: true,
     paramsSchema: z.object({ id: objectId }),
     bodySchema: z.object({
       card: z.object({

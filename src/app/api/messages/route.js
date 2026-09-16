@@ -8,6 +8,7 @@ export const POST = routeHandler(
   {
     feature: FEATURES.MESSAGING,
     permission: PERMISSIONS.MESSAGE_SEND,
+    verifiedEmail: true,
     bodySchema: sendMessageSchema,
   },
 );

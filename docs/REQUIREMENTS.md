@@ -12,7 +12,7 @@ Every numbered section of `docs/Project.md`, mapped to what implements it.
 
 Verified on a clean database: `npm run seed` → `npx eslint src scripts` (clean)
 → `npm run build` (passes) → `npm run test:integrations` (111/111) →
-`npm run qa` (133/133).
+`npm run qa` (226/226).
 
 ---
 
@@ -57,7 +57,8 @@ Verified on a clean database: `npm run seed` → `npx eslint src scripts` (clean
 
 | Requirement | Implementation | Status |
 |---|---|---|
-| Ownership verified server-side | `requireOwnership`, `requireParticipant` in `src/lib/auth/guards.js` | Implemented |
+| Ownership verified server-side | `requireOwnership`, `requireParticipant`, `requireVerifiedEmail` in `src/lib/auth/assert.js` — pure, record-level, no session or database, so a service can depend on them without pulling the request runtime in behind it. `guards.js` re-exports them alongside the session-resolving `require*`/`enforce*` families | Implemented |
+| Booking writes assert participation | `requireBookingRole()` in `booking.service.js` fronts cancel, reschedule and no-show; `actorRoleFor()` returns `null` for a non-participant rather than defaulting them to "STUDENT". QA asserts an unrelated learner, parent and tutor are each refused on both endpoints, and that a refused call changes nothing | Implemented |
 | Client-supplied identity never trusted | Actor comes from the session cookie only; QA asserts injected `price`/`status` are ignored | Implemented |
 | Parent scoped to own data | `listStudents`, `listBookings` etc. filter by `ownerId`/`purchaserId` | Implemented |
 | Tutor scoped to own data | Tutor services filter by `userId`/`tutorUserId` | Implemented |
@@ -68,6 +69,7 @@ Verified on a clean database: `npm run seed` → `npx eslint src scripts` (clean
 |---|---|---|
 | Email/password | `src/services/auth.service.js`, bcrypt cost 12 | Implemented |
 | Email verification | `AuthToken` + `/verify-email`; SHA-256 hashed, single-use, 24h | Implemented |
+| Email verification is enforced | `requireVerifiedEmail()` — declared as `verifiedEmail: true` in the route pipeline and re-asserted in `createBooking`, `capturePayment`, `sendMessage`, `createReview` and `createTutorRequest`, so a second route onto the same action is not a way round it. Signing in is deliberately not gated; `VerifyEmailBanner` tells the person what is blocked and resends the link | Implemented |
 | Forgot / reset password | `/forgot-password`, `/reset-password`; 1h expiry, bumps `tokenVersion` | Implemented |
 | Google / Apple sign-in | `OpenIdOAuthProvider` — ID token verified against the provider's JWKS (issuer, audience, expiry) with a single-use nonce from `/api/auth/oauth/nonce` | Awaiting credentials |
 | OAuth account safety | Email linking requires a provider-verified address; one identity maps to one account; role and protected fields are never changed by a sign-in | Implemented |
@@ -132,6 +134,8 @@ Verified on a clean database: `npm run seed` → `npx eslint src scripts` (clean
 | Assign & remove badges | `mutateBadge()`, `/api/admin/tutors/[id]/badges` | Implemented |
 | Not searchable before approval | `isSearchable` derived, never client-set; verified by approving the seeded pending tutor | Implemented |
 | Documents kept private | Stored outside `public/`, `select:false` key, admin-only audited route | Implemented |
+| Badge expiry | `expireStaleVerifications()`, run by the `verification-expiry` scheduled job (§48). Expiring a badge takes it off the public profile and tells the tutor to re-verify | Implemented |
+| Search eligibility re-derived on every write | `deriveSearchable()` — the single rule (approved **and** complete), applied by `reviewApplication()`, `setTutorSearchable()` and `updateTutorProfile()`. QA asserts a profile edit never grants search visibility to an unapproved tutor | Implemented |
 
 ## 17. Tutor onboarding
 
@@ -187,7 +191,9 @@ Verified on a clean database: `npm run seed` → `npx eslint src scripts` (clean
 | Parent/Student ↔ Tutor | `Conversation` (unique pair) + `Message` | Implemented |
 | Timestamps, booking context, unread state | `ConversationView`, per-user `unreadCounts` | Implemented |
 | Notifications | `notify()` on every message | Implemented |
-| Report & block | `/api/messages/conversations/[id]/actions` | Implemented |
+| Block | `/api/messages/conversations/[id]/actions` | Implemented |
+| Report | `/api/messages/conversations/[id]/actions` opens a case (`Conversation.reportStatus`) that reaches administrators | Implemented |
+| Reports reach a moderator | `/admin/moderation` queue and `/admin/moderation/[id]`, behind `ADMIN_MESSAGE_MODERATE`: reporter, participants, reason, timestamp, booking context, status and history. Opening a thread writes a `CONVERSATION_REPORT_VIEWED` audit entry; a decision writes `CONVERSATION_MODERATED` | Implemented |
 | Ready for attachments & realtime | `Message.attachments` schema present, unused in MVP | Phase 2 |
 
 ## 22. Tutor requests & matching
@@ -208,6 +214,7 @@ Verified on a clean database: `npm run seed` → `npx eslint src scripts` (clean
 | 1–5 stars + 4 sub-scores | `Review` model, `ReviewModal` | Implemented |
 | Only completed bookings | `canReview()`; QA asserts an incomplete lesson is rejected | Implemented |
 | Admin moderation & reporting | `/admin/reviews`, `reportReview()`, `moderateReview()` | Implemented |
+| Reporting cannot suppress a review | `Review.reportStatus` is the case; `Review.status` is the visibility. `reportReview()` opens the case and leaves the review published and counted, so the reviewed tutor cannot take an unfavourable review out of their own average. Only `moderateReview()` — administrators only — changes visibility | Implemented |
 
 ## 24. Dashboards
 
@@ -231,7 +238,7 @@ Verified on a clean database: `npm run seed` → `npx eslint src scripts` (clean
 | Student / tutor cancellation | `cancelBooking()` resolves the actor's policy | Implemented |
 | Configurable window | `Settings.freeCancellationWindowHours` | Implemented |
 | Full / partial refund | `resolveCancellation()`; QA asserts the refund matches the policy for the actual notice given | Implemented |
-| No-show handling | `reportNoShow()`, `resolveNoShow()` | Implemented |
+| No-show handling | `reportNoShow()`, `resolveNoShow()` — authorized against the stored participants, and only ever against the opposite party. A lesson whose outcome is already settled is refused (`NOT_REPORTABLE`), so the same refund cannot be issued twice, and every report is audited | Implemented |
 | Dispute & admin review | `/admin/disputes/[id]` with refund adjudication | Implemented |
 | Abuse tracking, warnings, suspension | `assessCancellationAbuse()` + admin suspend | Implemented |
 | Rules centralised | All paths resolve through `src/lib/booking/policy.js` | Implemented |
@@ -312,6 +319,7 @@ taking a page down.
 | Requirement | Implementation | Status |
 |---|---|---|
 | All 10 notification types | `NOTIFICATION_TYPES` | Implemented |
+| Lesson reminders | `sendBookingReminders()` emits `BOOKING_REMINDER` to both parties 24 hours and 1 hour before a confirmed lesson, driven by the `booking-reminders` scheduled job (§48). Each reminder is claimed on `Booking.remindersSent` with a conditional update before it is sent, so repeat runs cannot duplicate one | Implemented |
 | Unread count, centre, read/unread | `/notifications`, `unreadNotificationCount()` | Implemented |
 | Preferences | Per-channel toggles in Settings, beneath the platform-level switches in §26b | Implemented |
 | Email / SMS / push ready | `NOTIFICATION_CHANNELS` + `deliveredChannels`; email wired through Resend, SMS/push declared | Partial — SMS/push are Phase 2 |
@@ -511,13 +519,42 @@ configuration each one needs.
 Apple additionally requires a paid Developer Program membership to create the
 Services ID that `APPLE_CLIENT_ID` refers to.
 
+## 48. Scheduled jobs
+
+Some behaviour only happens because something calls it on a schedule. The jobs
+live in `src/services/scheduler.service.js` and are reached through one
+authenticated endpoint, so the platform stays a single Next.js application with
+no queue or worker process.
+
+| Job | Endpoint | Suggested schedule | What it does |
+|---|---|---|---|
+| Lesson reminders | `/api/cron/booking-reminders` | `*/15 * * * *` | Emits `BOOKING_REMINDER` 24h and 1h before a confirmed lesson (§28) |
+| Verification expiry | `/api/cron/verification-expiry` | `0 3 * * *` | Expires lapsed badges and takes them off the public profile (§16) |
+| Tutor payouts | `/api/cron/payouts` | `0 4 * * *` | Creates payouts for earnings past the hold period (§20) |
+| Tutor request expiry | `/api/cron/request-expiry` | `0 5 * * *` | Closes tutor requests past their expiry date (§22) |
+| All of them | `/api/cron/all` | — | One pass, for a single cron entry |
+
+| Requirement | Implementation | Status |
+|---|---|---|
+| Authenticated | `Authorization: Bearer $CRON_SECRET`, compared in constant time, or a signed-in administrator. An unset `CRON_SECRET` closes the bearer route rather than opening it | Implemented |
+| Idempotent | Every job recomputes what is due from stored state and claims the work atomically before acting: reminders via a conditional `$addToSet` on `Booking.remindersSent`, payouts via the existing `payoutId` claim. QA asserts a second run of each sends and pays nothing | Implemented |
+| Independent | One job failing is reported, not propagated — `/api/cron/all` still runs the rest | Implemented |
+| Deployment-agnostic | `vercel.json` declares the Vercel entries; crontab, Kubernetes CronJob or a CI workflow reach the same endpoint | Implemented |
+| Audited | A run that changed something, or failed, writes `SCHEDULED_JOB_RUN`; a quiet sweep does not, so the trail stays readable | Implemented |
+
+---
+
 ### Requires production infrastructure
 
 1. **Rate limiting is in-process.** Adequate for a single instance; a
    multi-instance deployment should move the store to Redis. The call
    signature is designed not to change.
-2. **Payouts are created manually by an administrator.** The logic is complete
-   and idempotent; production would call `createPayout()` from a scheduled job.
+2. **Scheduled jobs need something to call them.** The jobs themselves are
+   built and idempotent (§48); what the deployment supplies is a scheduler and
+   a `CRON_SECRET`. `vercel.json` declares the entries for Vercel; any cron,
+   CronJob or workflow that can issue an authenticated HTTP request works
+   equally well. Without one, reminders are not sent, badges do not expire and
+   payouts stay administrator-initiated.
 3. **Webhook delivery needs a public URL.** Locally, use
    `stripe listen --forward-to localhost:3000/api/webhooks/payments`.
 

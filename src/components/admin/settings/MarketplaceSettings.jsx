@@ -31,11 +31,13 @@ const MARKETPLACE_KEYS = [
   "payoutHoldDays",
   "defaultSearchRadiusKm",
   "autoModerateReviews",
+  "autoPayouts",
 ];
 
-/** Every field here but the moderation switch is a number. */
+/** Everything here but the two switches is a number. */
+const SWITCH_KEYS = ["autoModerateReviews", "autoPayouts"];
 const COERCE = Object.fromEntries(
-  MARKETPLACE_KEYS.filter((key) => key !== "autoModerateReviews").map((key) => [key, toNumber]),
+  MARKETPLACE_KEYS.filter((key) => !SWITCH_KEYS.includes(key)).map((key) => [key, toNumber]),
 );
 
 export function MarketplaceSettings({ settings }) {
@@ -330,6 +332,15 @@ export function MarketplaceSettings({ settings }) {
               className="max-w-32"
             />
           </Field>
+
+          <div className="rounded-xl border border-ink-200 p-4">
+            <Switch
+              label="Create payouts automatically"
+              description="When on, the scheduled job settles every tutor whose earnings have cleared the hold period. When off, payouts wait for an administrator."
+              checked={s.form.autoPayouts}
+              onChange={s.set("autoPayouts")}
+            />
+          </div>
 
           <div className="rounded-xl border border-ink-200 p-4">
             <Switch

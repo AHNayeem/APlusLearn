@@ -39,6 +39,19 @@ export class AuthorizationError extends AppError {
   }
 }
 
+/**
+ * Signed in, but the email address behind the account has never been proved.
+ *
+ * Distinct from AuthorizationError so the UI can offer "resend the link"
+ * rather than a dead end — the person is not forbidden, only unconfirmed.
+ */
+export class EmailNotVerifiedError extends AppError {
+  constructor(message = "Confirm your email address to continue.") {
+    super(message, { status: 403, code: "EMAIL_NOT_VERIFIED" });
+    this.name = "EmailNotVerifiedError";
+  }
+}
+
 export class NotFoundError extends AppError {
   constructor(message = "We couldn't find what you were looking for.") {
     super(message, { status: 404, code: "NOT_FOUND" });

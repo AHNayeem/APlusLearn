@@ -1,6 +1,7 @@
 import { enforceRole } from "@/lib/auth/guards";
 import { navForRole, ROLES } from "@/constants";
 import { DashboardShell } from "@/components/layout/DashboardShell";
+import { VerifyEmailBanner } from "@/components/auth/VerifyEmailBanner";
 import { getAppConfig } from "@/services/settings.service";
 import { unreadNotificationCount } from "@/services/notification.service";
 import { unreadMessageCount } from "@/services/message.service";
@@ -30,6 +31,7 @@ export default async function TutorLayout({ children }) {
       }}
       badges={{ unreadNotifications, unreadMessages }}
     >
+      {!user.emailVerifiedAt && <VerifyEmailBanner email={user.email} />}
       {children}
     </DashboardShell>
   );

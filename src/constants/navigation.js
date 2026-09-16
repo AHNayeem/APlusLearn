@@ -153,7 +153,8 @@ export const ADMIN_NAV = [
   { href: "/admin/payments", label: "Payments", icon: "CreditCard" },
   { href: "/admin/payouts", label: "Payouts", icon: "Banknote" },
   { href: "/admin/disputes", label: "Disputes", icon: "ShieldAlert", badge: "openDisputes" },
-  { href: "/admin/reviews", label: "Reviews", icon: "Star" },
+  { href: "/admin/reviews", label: "Reviews", icon: "Star", badge: "reportedReviews" },
+  { href: "/admin/moderation", label: "Reported chats", icon: "MessageSquareWarning", badge: "reportedConversations" },
   { href: "/admin/settings", label: "Settings", icon: "Settings" },
 ];
 

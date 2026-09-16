@@ -344,6 +344,54 @@ export async function listPayouts(actor, { page = 1, pageSize, status, tutorUser
   return { items: toPlain(items), total, page, pageSize: size };
 }
 
+/**
+ * Create every payout that is due, for every tutor who can receive one (§20).
+ *
+ * This is the scheduled counterpart to an administrator pressing the button,
+ * and it deliberately reuses `createPayout` rather than reimplementing
+ * eligibility: hold period, unclaimed-booking check and the double-pay claim
+ * are all defined once. Repeat runs are harmless — `createPayout` stamps
+ * `payoutId` onto the bookings it settles, so a second run finds nothing
+ * payable and skips the tutor.
+ *
+ * @param {object} [options]
+ * @param {object} [options.actor]  Who to attribute the audit entry to.
+ */
+export async function runScheduledPayouts({ actor } = {}) {
+  const settings = await getSettings();
+  if (settings.autoPayouts === false) {
+    return { skipped: "AUTO_PAYOUTS_DISABLED", created: 0, amountCents: 0, tutors: 0 };
+  }
+
+  const pending = await pendingPayoutSummary();
+  const eligible = pending.filter((row) => row.payoutsEnabled);
+
+  const system = actor ?? { id: null, role: ROLES.ADMIN };
+  let created = 0;
+  let amountCents = 0;
+  const failures = [];
+
+  for (const row of eligible) {
+    try {
+      const payout = await createPayout(row.tutorUserId, system);
+      created += 1;
+      amountCents += payout.amountCents ?? 0;
+    } catch (error) {
+      // One tutor's payout failing — an account that lost its provider state
+      // between the summary and the write — must not stop the rest of the run.
+      failures.push({ tutorUserId: row.tutorUserId, reason: error.code ?? error.message });
+    }
+  }
+
+  return {
+    tutors: eligible.length,
+    awaitingPayoutSetup: pending.length - eligible.length,
+    created,
+    amountCents,
+    failures,
+  };
+}
+
 /** Admin view: who is owed money right now. */
 export async function pendingPayoutSummary() {
   const settings = await getSettings();

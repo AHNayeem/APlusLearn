@@ -547,9 +547,19 @@ export async function updateTutorProfile(userId, patch) {
   ];
   profile.minHourlyRateCents = Math.min(...rates);
 
+  // Search eligibility is derived, never carried over. An edit that strips
+  // the profile back below the bar has to take it out of search on the same
+  // write, and an edit can never put an unapproved profile into search (§16,
+  // §42) — approval is checked from the stored status, not from the patch.
+  const wasSearchable = profile.isSearchable;
+  profile.isSearchable = deriveSearchable(profile);
+  const searchableChanged = wasSearchable !== profile.isSearchable;
+
   await profile.save();
 
-  if (update.courses) await refreshCourseTutorCounts();
+  // Course facet counts are drawn from searchable tutors, so they have to be
+  // rebuilt when either the course list or search eligibility moved.
+  if (update.courses || searchableChanged) await refreshCourseTutorCounts();
 
   // Personal fields that live on the user record.
   const userPatch = compact({
@@ -586,7 +596,7 @@ export async function reviewApplication(applicationId, { decision, message, gran
 
   if (decision === TUTOR_STATUS.APPROVED) {
     profile.approvedAt = new Date();
-    profile.isSearchable = isProfileComplete(profile);
+    profile.isSearchable = deriveSearchable(profile);
     profile.rejectionReason = undefined;
     profile.infoRequestedMessage = undefined;
 
@@ -664,6 +674,18 @@ export async function reviewApplication(applicationId, { decision, message, gran
   });
 
   return toPlain(application);
+}
+
+/**
+ * The one rule that decides whether a tutor appears in search (§16, §42).
+ *
+ * Two conditions, both read from the stored record: an administrator has
+ * approved the profile, and the profile still carries everything a parent
+ * needs. Every write that can affect either must run this — approval,
+ * administrative suspension, and any profile edit.
+ */
+export function deriveSearchable(profile) {
+  return profile.status === TUTOR_STATUS.APPROVED && isProfileComplete(profile);
 }
 
 /** A profile must carry everything a parent needs before it can be listed. */

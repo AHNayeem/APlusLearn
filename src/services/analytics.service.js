@@ -7,6 +7,7 @@ import {
   Payment,
   Review,
   Dispute,
+  Conversation,
   StudentProfile,
   VerificationRecord,
 } from "@/models";
@@ -17,6 +18,7 @@ import {
   BOOKING_STATUS,
   DISPUTE_STATUS,
   LESSON_MODES,
+  ACTIVE_REPORT_STATUSES,
 } from "@/constants";
 import { toPlain } from "@/lib/utils/serialize";
 
@@ -57,7 +59,7 @@ export async function marketplaceOverview({ days = 30 } = {}) {
     Dispute.countDocuments({
       status: { $in: [DISPUTE_STATUS.OPEN, DISPUTE_STATUS.UNDER_REVIEW] },
     }),
-    Review.countDocuments({ status: "REPORTED" }),
+    Review.countDocuments({ reportStatus: { $in: ACTIVE_REPORT_STATUSES } }),
   ]);
 
   return {
@@ -231,17 +233,29 @@ export async function marketplaceBreakdowns({ days = 30, limit = 8 } = {}) {
 
 /** Counters the admin sidebar shows as badges. */
 export async function adminQueueCounts() {
-  const [pendingApplications, openDisputes, reportedReviews, pendingVerifications] =
-    await Promise.all([
-      TutorApplication.countDocuments({ status: TUTOR_STATUS.PENDING_REVIEW }),
-      Dispute.countDocuments({
-        status: { $in: [DISPUTE_STATUS.OPEN, DISPUTE_STATUS.UNDER_REVIEW] },
-      }),
-      Review.countDocuments({ status: "REPORTED" }),
-      VerificationRecord.countDocuments({ status: "PENDING" }),
-    ]);
+  const [
+    pendingApplications,
+    openDisputes,
+    reportedReviews,
+    pendingVerifications,
+    reportedConversations,
+  ] = await Promise.all([
+    TutorApplication.countDocuments({ status: TUTOR_STATUS.PENDING_REVIEW }),
+    Dispute.countDocuments({
+      status: { $in: [DISPUTE_STATUS.OPEN, DISPUTE_STATUS.UNDER_REVIEW] },
+    }),
+    Review.countDocuments({ reportStatus: { $in: ACTIVE_REPORT_STATUSES } }),
+    VerificationRecord.countDocuments({ status: "PENDING" }),
+    Conversation.countDocuments({ reportStatus: { $in: ACTIVE_REPORT_STATUSES } }),
+  ]);
 
-  return { pendingApplications, openDisputes, reportedReviews, pendingVerifications };
+  return {
+    pendingApplications,
+    openDisputes,
+    reportedReviews,
+    pendingVerifications,
+    reportedConversations,
+  };
 }
 
 /** Recent activity feed for the admin overview. */

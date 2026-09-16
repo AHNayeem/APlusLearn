@@ -6,6 +6,18 @@ import { homeForRole } from "@/constants/navigation";
 import { getCurrentUser } from "./current-user";
 
 /**
+ * The record-level assertions live in `assert.js`, which has no dependency on
+ * the request runtime, and are re-exported here so this module stays the one
+ * place a caller has to know about.
+ */
+export {
+  requireOwnership,
+  requireOwnershipOrAdmin,
+  requireParticipant,
+  requireVerifiedEmail,
+} from "./assert";
+
+/**
  * Server-side guards (§10).
  *
  * The `require*` family throws typed errors and is used by API routes and
@@ -34,34 +46,6 @@ export async function requirePermission(permission) {
     throw new AuthorizationError("You do not have permission to do that.");
   }
   return user;
-}
-
-/**
- * Ownership check. `ownerId` comes from the *database record*, never from the
- * request body — the caller must load the resource first (§8, §42).
- */
-export function requireOwnership(user, ownerId, message) {
-  const mine = String(user.id ?? user._id);
-  if (String(ownerId) !== mine) {
-    throw new AuthorizationError(message ?? "You do not have access to this.");
-  }
-  return true;
-}
-
-/** Ownership that an administrator may override. */
-export function requireOwnershipOrAdmin(user, ownerId, message) {
-  if (user.role === "ADMIN") return true;
-  return requireOwnership(user, ownerId, message);
-}
-
-/** Any of several allowed owners (e.g. both sides of a booking). */
-export function requireParticipant(user, participantIds = [], message) {
-  if (user.role === "ADMIN") return true;
-  const mine = String(user.id ?? user._id);
-  if (!participantIds.some((id) => String(id) === mine)) {
-    throw new AuthorizationError(message ?? "You do not have access to this.");
-  }
-  return true;
 }
 
 // ---------------------------------------------------------------------------

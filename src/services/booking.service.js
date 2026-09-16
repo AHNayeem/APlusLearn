@@ -16,6 +16,7 @@ import {
   LESSON_MODES,
   MEETING_PROVIDERS,
   RECURRENCE,
+  BOOKING_REMINDERS,
   NOTIFICATION_TYPES,
   NOTIFICATION_CHANNELS,
   AUDIT_ACTIONS,
@@ -29,6 +30,7 @@ import {
   AuthorizationError,
   ConflictError,
 } from "@/lib/api/errors";
+import { requireParticipant, requireVerifiedEmail } from "@/lib/auth/assert";
 import { toPlain } from "@/lib/utils/serialize";
 import { publicReference } from "@/lib/auth/tokens";
 import { addDays, addMinutes } from "@/lib/utils/time";
@@ -101,6 +103,10 @@ function assertTutorTeachesCourse(tutor, courseId) {
  * calendar indefinitely.
  */
 export async function createBooking(input, actor) {
+  // Enforced here rather than only in the route pipeline, so every path into
+  // booking — API, server action, admin tool — obeys the same rule (§9).
+  requireVerifiedEmail(actor, "Confirm your email address before booking a lesson.");
+
   const settings = await getSettings();
 
   const [tutor, student, course] = await Promise.all([
@@ -230,6 +236,11 @@ export async function createBooking(input, actor) {
     created.push(booking);
   }
 
+  // The validation above is a read followed by a write, so two requests for
+  // the same slot can both pass it. This closes that window before any money
+  // is taken (§18, §42).
+  await settleSlotRace(created, tutor);
+
   // One payment covers the whole series.
   const payment = await createPaymentForBooking({
     bookings: created,
@@ -248,6 +259,53 @@ export async function createBooking(input, actor) {
     total: calculateSeriesTotal(price, created.length),
     meetingProvider: input.meetingProvider,
   };
+}
+
+/**
+ * Find any stored booking that overlaps one of these lessons (§18).
+ *
+ * The windows are tested one occurrence at a time, never as a single envelope
+ * — a weekly series legitimately leaves the days in between free, and an
+ * envelope test would refuse a booking sitting in one of those gaps.
+ */
+function overlapQuery(lessons, tutorProfileId, excludeIds = []) {
+  return {
+    tutorProfileId,
+    ...(excludeIds.length ? { _id: { $nin: excludeIds } } : {}),
+    status: { $in: BLOCKING_BOOKING_STATUSES },
+    $or: lessons.map((l) => ({ startAt: { $lt: l.endAt }, endAt: { $gt: l.startAt } })),
+  };
+}
+
+/**
+ * Decide a double-booking race, without a transaction.
+ *
+ * MongoDB cannot express "no overlapping time range" as a unique index, and
+ * the platform is expected to run against a standalone server as readily as a
+ * replica set, so the guarantee is made by writing first and reading back:
+ * whichever request inserts second is certain to see the first. When both see
+ * each other, the same tie-break runs on both sides — the lowest booking id
+ * wins — so exactly one survives and the other is withdrawn before a payment
+ * exists for it. Reschedules settle against the same rule.
+ */
+async function settleSlotRace(created, tutor) {
+  const ids = created.map((b) => b._id);
+  const conflicts = await Booking.find(overlapQuery(created, tutor._id, ids))
+    .select("_id startAt")
+    .lean();
+  if (!conflicts.length) return;
+
+  const ourEarliest = ids.map(String).sort()[0];
+  const lost = conflicts.filter((c) => String(c._id) < ourEarliest);
+  if (!lost.length) return;
+
+  // We were second. Withdraw cleanly — nothing has been charged yet.
+  await Booking.deleteMany({ _id: { $in: ids } });
+  throw new ConflictError(
+    created.length > 1
+      ? "Someone booked one of those times while you were checking out. Please pick another slot."
+      : `${formatDate(lost[0].startAt, { weekday: "short" })} at ${formatTime(lost[0].startAt, tutor.timeZone)} was booked moments ago. Please pick another time.`,
+  );
 }
 
 /** Start instants for a one-off or recurring series. */
@@ -509,10 +567,30 @@ export async function getBooking(id, actor) {
   return plain;
 }
 
+/**
+ * The actor's role *in this booking*, derived from the stored record (§8).
+ *
+ * Fails closed: somebody who is neither participant nor administrator gets
+ * `null`, never a participant role. Defaulting a stranger to "STUDENT" would
+ * hand them every right the person who paid has.
+ */
 function actorRoleFor(booking, actor) {
   if (actor.role === ROLES.ADMIN) return "ADMIN";
   if (String(booking.tutorUserId) === String(actor.id)) return "TUTOR";
-  return "STUDENT";
+  if (String(booking.purchaserId) === String(actor.id)) return "STUDENT";
+  return null;
+}
+
+/**
+ * Resolve the actor's role and refuse anyone who is not a party to the
+ * booking. Every mutating booking operation starts here, so participation is
+ * asserted against the loaded record before any state is touched (§42).
+ */
+function requireBookingRole(booking, actor, message) {
+  requireParticipant(actor, [booking.purchaserId, booking.tutorUserId], message);
+  const role = actorRoleFor(booking, actor);
+  if (!role) throw new AuthorizationError(message ?? "You do not have access to this lesson.");
+  return role;
 }
 
 // --- Cancellation (§26) ----------------------------------------------------
@@ -521,14 +599,7 @@ export async function cancelBooking(id, { reason, cancelSeries }, actor) {
   const booking = await Booking.findById(id);
   if (!booking) throw new NotFoundError("That lesson no longer exists.");
 
-  const role = actorRoleFor(booking, actor);
-  if (
-    role === "STUDENT" &&
-    String(booking.purchaserId) !== String(actor.id) &&
-    actor.role !== ROLES.ADMIN
-  ) {
-    throw new AuthorizationError("You can only cancel your own lessons.");
-  }
+  const role = requireBookingRole(booking, actor, "You can only cancel your own lessons.");
   if (!canCancel(booking, role)) {
     throw new BusinessRuleError("This lesson can no longer be cancelled.", "NOT_CANCELLABLE");
   }
@@ -695,6 +766,9 @@ async function notifyCancellation(bookings, role, refundCents) {
 
 // --- Completion and no-shows ----------------------------------------------
 
+/** A no-show can only be recorded against a lesson whose outcome is still open. */
+const NO_SHOW_REPORTABLE_STATUSES = [BOOKING_STATUS.CONFIRMED, BOOKING_STATUS.COMPLETED];
+
 export async function completeBooking(id, { outcome, tutorNotes }, actor) {
   const booking = await Booking.findById(id);
   if (!booking) throw new NotFoundError("That lesson no longer exists.");
@@ -760,12 +834,25 @@ export async function completeBooking(id, { outcome, tutorNotes }, actor) {
   return toPlain(booking);
 }
 
-/** A student reporting that the tutor did not attend (§26). */
+/**
+ * Reporting that the other party did not attend (§26).
+ *
+ * This reverses money — it can refund the learner in full and strip the
+ * lesson out of the tutor's payout eligibility — so it is authorized against
+ * the stored participants, and only ever against the *opposite* party: a
+ * learner reports the tutor, a tutor reports the learner. An administrator
+ * may record either, which is the documented adjudication path.
+ */
 export async function reportNoShow(id, { party, note }, actor) {
   const booking = await Booking.findById(id);
   if (!booking) throw new NotFoundError("That lesson no longer exists.");
 
-  const role = actorRoleFor(booking, actor);
+  const role = requireBookingRole(
+    booking,
+    actor,
+    "You can only report a no-show on your own lesson.",
+  );
+
   if (party === "TUTOR" && role !== "STUDENT" && role !== "ADMIN") {
     throw new AuthorizationError("Only the student can report a tutor no-show.");
   }
@@ -774,6 +861,14 @@ export async function reportNoShow(id, { party, note }, actor) {
   }
   if (new Date(booking.endAt) > new Date()) {
     throw new BusinessRuleError("You can report a no-show once the lesson has finished.");
+  }
+  // A lesson that is already cancelled, already reported or under dispute has
+  // had its outcome decided; re-reporting it would refund it a second time.
+  if (!NO_SHOW_REPORTABLE_STATUSES.includes(booking.status)) {
+    throw new BusinessRuleError(
+      "This lesson is no longer open to a no-show report.",
+      "NOT_REPORTABLE",
+    );
   }
 
   const settings = await getSettings();
@@ -811,6 +906,15 @@ export async function reportNoShow(id, { party, note }, actor) {
     entityId: booking._id,
   });
 
+  // A no-show reverses a settled lesson, so who asked for it is recorded.
+  await recordAudit({
+    actor,
+    action: AUDIT_ACTIONS.BOOKING_NO_SHOW_REPORTED,
+    entityType: "Booking",
+    entityId: booking._id,
+    metadata: { party, role, refundCents: refund.refundCents, note },
+  });
+
   return toPlain(booking);
 }
 
@@ -820,7 +924,8 @@ export async function rescheduleBooking(id, { startAt, durationMinutes, reason }
   const booking = await Booking.findById(id);
   if (!booking) throw new NotFoundError("That lesson no longer exists.");
 
-  const role = actorRoleFor(booking, actor);
+  const role = requireBookingRole(booking, actor, "You can only reschedule your own lessons.");
+
   if (booking.status !== BOOKING_STATUS.CONFIRMED) {
     throw new BusinessRuleError("Only a confirmed lesson can be rescheduled.");
   }
@@ -850,6 +955,16 @@ export async function rescheduleBooking(id, { startAt, durationMinutes, reason }
   });
   if (!check.bookable) throw new ConflictError(check.reason);
 
+  // Everything needed to put the lesson back if it loses the slot below.
+  // Captured before any of it is touched, the price included.
+  const previousLabel = `${formatDate(booking.startAt, { weekday: "long", timeZone: booking.timeZone })} at ${formatTime(booking.startAt, booking.timeZone)}`;
+  const previous = {
+    startAt: booking.startAt,
+    endAt: booking.endAt,
+    durationMinutes: booking.durationMinutes,
+    price: booking.price.toObject ? booking.price.toObject() : booking.price,
+  };
+
   // The price is re-derived if the length changed — never carried over blindly.
   if (duration !== booking.durationMinutes) {
     booking.price = calculateLessonPrice({
@@ -859,11 +974,26 @@ export async function rescheduleBooking(id, { startAt, durationMinutes, reason }
     });
   }
 
-  const previousLabel = `${formatDate(booking.startAt, { weekday: "long", timeZone: booking.timeZone })} at ${formatTime(booking.startAt, booking.timeZone)}`;
-
   booking.startAt = new Date(startAt);
   booking.endAt = addMinutes(new Date(startAt), duration);
   booking.durationMinutes = duration;
+
+  // Claim the new slot before anything irreversible happens. Same rule as
+  // booking creation: write, read back, lowest id wins the contested slot.
+  await booking.save();
+  const raced = await Booking.findOne(
+    overlapQuery([booking], booking.tutorProfileId, [booking._id]),
+  )
+    .select("_id startAt")
+    .lean();
+
+  if (raced && String(raced._id) < String(booking._id)) {
+    Object.assign(booking, previous);
+    await booking.save();
+    throw new ConflictError(
+      `${formatDate(raced.startAt, { weekday: "short" })} at ${formatTime(raced.startAt, booking.timeZone)} was booked moments ago. Please pick another time.`,
+    );
+  }
 
   // Move the existing room rather than issuing a new link, so a join link
   // already in someone's calendar keeps working (§27).
@@ -884,11 +1014,18 @@ export async function rescheduleBooking(id, { startAt, durationMinutes, reason }
       // A lesson confirmed while the provider was down gets its room now.
       booking.meeting = await createMeetingFor(booking);
     }
+    await booking.save();
   }
 
-  await booking.save();
-
   await refreshNextAvailable(booking.tutorProfileId);
+
+  await recordAudit({
+    actor,
+    action: AUDIT_ACTIONS.BOOKING_RESCHEDULED,
+    entityType: "Booking",
+    entityId: booking._id,
+    metadata: { role, from: previous.startAt, to: booking.startAt, reason },
+  });
 
   const otherParty = role === "TUTOR" ? booking.purchaserId : booking.tutorUserId;
   const recipient = await User.findById(otherParty).select("firstName").lean();
@@ -911,6 +1048,109 @@ export async function rescheduleBooking(id, { startAt, durationMinutes, reason }
   });
 
   return toPlain(booking);
+}
+
+// --- Reminders (§28) -------------------------------------------------------
+
+/**
+ * Send the lesson reminders that have fallen due.
+ *
+ * Run by the scheduler, and safe to run as often as it likes: each reminder
+ * is *claimed* with a conditional update before anything is sent, so a job
+ * that runs twice — or twice concurrently — cannot produce two reminders for
+ * the same lesson. `Booking.remindersSent` is the claim ledger.
+ *
+ * @param {object}  [options]
+ * @param {Date}    [options.now]    Injected in tests for determinism.
+ * @param {number}  [options.limit]  Cap on bookings examined per run.
+ */
+export async function sendBookingReminders({ now = new Date(), limit = 500 } = {}) {
+  const widest = Math.max(...BOOKING_REMINDERS.map((r) => r.minutesBefore));
+
+  const due = await Booking.find({
+    status: BOOKING_STATUS.CONFIRMED,
+    startAt: { $gt: now, $lte: addMinutes(now, widest) },
+  })
+    .sort({ startAt: 1 })
+    .limit(limit)
+    .lean();
+
+  let sent = 0;
+  const skipped = [];
+
+  for (const booking of due) {
+    for (const reminder of BOOKING_REMINDERS) {
+      const dueAt = addMinutes(new Date(booking.startAt), -reminder.minutesBefore);
+      if (now < dueAt) continue;
+
+      // Claim first. The filter is the whole guarantee: whichever run wins
+      // the update is the only one that goes on to notify.
+      const claim = await Booking.updateOne(
+        {
+          _id: booking._id,
+          status: BOOKING_STATUS.CONFIRMED,
+          remindersSent: { $ne: reminder.key },
+        },
+        { $addToSet: { remindersSent: reminder.key } },
+      );
+      if (claim.modifiedCount !== 1) {
+        skipped.push({ bookingId: String(booking._id), reminder: reminder.key });
+        continue;
+      }
+
+      await notifyBookingReminder(booking, reminder);
+      sent += 1;
+    }
+  }
+
+  return { examined: due.length, sent, alreadySent: skipped.length };
+}
+
+async function notifyBookingReminder(booking, reminder) {
+  const [purchaser, tutorUser] = await Promise.all([
+    User.findById(booking.purchaserId).select("firstName").lean(),
+    User.findById(booking.tutorUserId).select("firstName lastName").lean(),
+  ]);
+
+  const tutorName = publicName(tutorUser?.firstName ?? "", tutorUser?.lastName ?? "");
+  const whenLabel = `${formatDate(booking.startAt, { weekday: "long", timeZone: booking.timeZone })} at ${formatTime(booking.startAt, booking.timeZone)}`;
+  const templates = await brandedEmailTemplates();
+
+  const recipients = [
+    {
+      userId: booking.purchaserId,
+      firstName: purchaser?.firstName ?? "there",
+      href: `/bookings/${booking._id}`,
+      otherName: tutorName,
+      isTutor: false,
+    },
+    {
+      userId: booking.tutorUserId,
+      firstName: tutorUser?.firstName ?? "there",
+      href: `/tutor/bookings/${booking._id}`,
+      otherName: "your student",
+      isTutor: true,
+    },
+  ];
+
+  for (const recipient of recipients) {
+    await notify({
+      userId: recipient.userId,
+      type: NOTIFICATION_TYPES.BOOKING_REMINDER,
+      title: `Your ${booking.courseName} lesson is ${reminder.label}`,
+      body: `${whenLabel}. ${booking.mode === LESSON_MODES.ONLINE ? "The joining link is on the lesson page." : "Check the location on the lesson page."}`,
+      href: recipient.href,
+      entityType: "Booking",
+      entityId: booking._id,
+      channels: [NOTIFICATION_CHANNELS.IN_APP, NOTIFICATION_CHANNELS.EMAIL],
+      email: templates.bookingReminder({
+        firstName: recipient.firstName,
+        booking: bookingEmailPayload(booking, recipient.otherName),
+        whenLabel: reminder.label,
+        isTutor: recipient.isTutor,
+      }),
+    });
+  }
 }
 
 /** Dashboard summary counters (§24). */

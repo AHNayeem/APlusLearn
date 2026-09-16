@@ -2,7 +2,7 @@ import Link from "next/link";
 import { Star, Flag } from "lucide-react";
 import { connectToDatabase } from "@/lib/db/connect";
 import { enforceRole } from "@/lib/auth/guards";
-import { ROLES, REVIEW_STATUS } from "@/constants";
+import { ROLES, REVIEW_STATUS, REPORT_STATUS_LABELS } from "@/constants";
 import { listReviews } from "@/services/review.service";
 import {
   Alert, Badge, Card, CardBody, EmptyState, LinkTabs, Pagination, Rating,
@@ -15,7 +15,7 @@ export const metadata = { title: "Reviews" };
 export const dynamic = "force-dynamic";
 
 const TABS = [
-  { value: REVIEW_STATUS.REPORTED, label: "Reported" },
+  { value: "reported", label: "Reported" },
   { value: REVIEW_STATUS.PUBLISHED, label: "Published" },
   { value: REVIEW_STATUS.REMOVED, label: "Removed" },
   { value: "", label: "All" },
@@ -25,9 +25,11 @@ export default async function AdminReviewsPage({ searchParams }) {
   const user = await enforceRole(ROLES.ADMIN, "/admin/reviews");
   await connectToDatabase();
 
-  const { status = REVIEW_STATUS.REPORTED, page = "1" } = await searchParams;
+  const { status = "reported", page = "1" } = await searchParams;
+  const reported = status === "reported";
   const { items, total, pageSize } = await listReviews(user, {
-    status: status || undefined,
+    status: reported ? undefined : status || undefined,
+    reported,
     page: Number(page),
   });
 
@@ -46,10 +48,11 @@ export default async function AdminReviewsPage({ searchParams }) {
         }))}
       />
 
-      {status === REVIEW_STATUS.REPORTED && items.length > 0 && (
-        <Alert tone="warning" title="Reported reviews are hidden from ratings" className="mt-6">
-          While a review is reported it doesn&rsquo;t count towards the tutor&rsquo;s average.
-          Resolve these promptly so ratings stay accurate.
+      {reported && items.length > 0 && (
+        <Alert tone="warning" title="Reported reviews stay public until you rule on them" className="mt-6">
+          A report opens a case; it does not hide the review. That is deliberate — otherwise a
+          tutor could remove an unfavourable review from their own rating simply by objecting to
+          it. Keep it published to dismiss the report, or remove it to uphold it.
         </Alert>
       )}
 
@@ -57,13 +60,9 @@ export default async function AdminReviewsPage({ searchParams }) {
         {items.length === 0 ? (
           <EmptyState
             icon={<Star className="size-7" />}
-            title={
-              status === REVIEW_STATUS.REPORTED ? "No reported reviews" : "No reviews here"
-            }
+            title={reported ? "No reported reviews" : "No reviews here"}
             description={
-              status === REVIEW_STATUS.REPORTED
-                ? "Nothing waiting on moderation."
-                : "Try a different status filter."
+              reported ? "Nothing waiting on moderation." : "Try a different status filter."
             }
           />
         ) : (
@@ -129,8 +128,16 @@ export default async function AdminReviewsPage({ searchParams }) {
                       <p className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-warning-700">
                         <Flag className="size-3" />
                         Reported {formatRelative(review.reportedAt)}
+                        {review.reportedByRole ? ` by the ${review.reportedByRole.toLowerCase()}` : ""}
+                        {review.reportStatus ? ` · ${REPORT_STATUS_LABELS[review.reportStatus]}` : ""}
                       </p>
                       <p className="mt-1 text-sm text-ink-700">{review.reportReason}</p>
+                      {review.reportedByRole === "TUTOR" && (
+                        <p className="mt-2 text-xs text-warning-700">
+                          Reported by the tutor it is about. It is still counting towards their
+                          rating, as it should until you decide.
+                        </p>
+                      )}
                     </div>
                   )}
 
@@ -143,7 +150,7 @@ export default async function AdminReviewsPage({ searchParams }) {
                     </div>
                   )}
 
-                  {review.status === REVIEW_STATUS.REPORTED && (
+                  {(reported || review.status === REVIEW_STATUS.REPORTED) && (
                     <div className="mt-4 border-t border-ink-100 pt-4">
                       <ReviewModeration review={review} />
                     </div>

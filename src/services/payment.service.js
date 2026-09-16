@@ -11,6 +11,7 @@ import {
   ROLES,
 } from "@/constants";
 import { NotFoundError, BusinessRuleError, AuthorizationError } from "@/lib/api/errors";
+import { requireVerifiedEmail } from "@/lib/auth/assert";
 import { toPlain } from "@/lib/utils/serialize";
 import { formatMoney } from "@/lib/utils/format";
 import { getPaymentProvider } from "./external/payment-provider";
@@ -169,6 +170,8 @@ export async function checkoutUrlFor(paymentId, actor) {
  * claiming success.
  */
 export async function capturePayment(paymentId, { card }, actor) {
+  requireVerifiedEmail(actor, "Confirm your email address before paying for a lesson.");
+
   const provider = getPaymentProvider();
   if (provider.hostedCheckout) {
     throw new BusinessRuleError(

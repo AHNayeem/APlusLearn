@@ -17,6 +17,7 @@ export const GET = routeHandler(
       page: z.coerce.number().int().min(1).max(200).default(1),
       pageSize: z.coerce.number().int().min(1).max(50).optional(),
       status: z.enum(Object.values(REVIEW_STATUS)).optional(),
+      reported: z.enum(["true", "false"]).optional().transform((v) => v === "true"),
       tutorProfileId: objectId.optional(),
     }),
   },
@@ -28,6 +29,7 @@ export const POST = routeHandler(
   {
     feature: FEATURES.REVIEWS,
     permission: PERMISSIONS.REVIEW_CREATE,
+    verifiedEmail: true,
     bodySchema: createReviewSchema,
   },
 );
