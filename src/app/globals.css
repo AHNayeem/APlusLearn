@@ -58,6 +58,13 @@
   --color-ink-900: #0f172a;
   --color-ink-950: #020617;
 
+  /* Mist — the homepage hero's ground. The hero is a photograph bleached back
+     to a blue-grey ghost under a white wash, and everything drawn on top is
+     mixed from these plus the brand and accent scales: cool white for the
+     ground, amber for the one warm note. No third hue. */
+  --color-mist: #f4f7fd;
+  --color-mist-deep: #e8eef9;
+
   /* Semantic */
   --color-success-50: #f0fdf4;
   --color-success-100: #dcfce7;
@@ -122,6 +129,14 @@
   --animate-scale-in: scale-in 0.22s var(--ease-out-quint) both;
   --animate-shimmer: shimmer 1.6s linear infinite;
   --animate-pop: pop 0.35s var(--ease-out-quint) both;
+
+  /* Hero ambience — all long, slow and low-amplitude: the background should
+     read as alive without ever competing with the search box in front of it. */
+  --animate-grid-pan: grid-pan 22s linear infinite;
+  --animate-drift-a: drift-a 20s var(--ease-in-out-quart) infinite;
+  --animate-drift-b: drift-b 26s var(--ease-in-out-quart) infinite;
+  --animate-halo: halo 2.6s cubic-bezier(0, 0, 0.2, 1) infinite;
+  --animate-sheen: sheen 5s var(--ease-in-out-quart) infinite;
 }
 
 @keyframes fade-up {
@@ -144,6 +159,30 @@
   0%   { transform: scale(0.8); opacity: 0; }
   60%  { transform: scale(1.04); }
   100% { transform: scale(1); opacity: 1; }
+}
+
+/* One grid cell of travel, so the loop is seamless. */
+@keyframes grid-pan {
+  from { background-position: 0 0; }
+  to   { background-position: 72px 72px; }
+}
+@keyframes drift-a {
+  0%, 100% { transform: translate3d(-3%, -2%, 0) scale(1); }
+  50%      { transform: translate3d(5%, 4%, 0) scale(1.14); }
+}
+@keyframes drift-b {
+  0%, 100% { transform: translate3d(4%, 3%, 0) scale(1.1); }
+  50%      { transform: translate3d(-5%, -3%, 0) scale(1); }
+}
+/* The expanding ring behind a live status dot. */
+@keyframes halo {
+  0%        { transform: scale(1); opacity: 0.6; }
+  70%, 100% { transform: scale(2.6); opacity: 0; }
+}
+/* A highlight that sweeps a pill, then waits — a glint, not a loading bar. */
+@keyframes sheen {
+  0%        { transform: translateX(-150%) skewX(-20deg); }
+  45%, 100% { transform: translateX(450%) skewX(-20deg); }
 }
 
 /* --------------------------------------------------------------------------
@@ -228,6 +267,19 @@
   border: 1px solid var(--color-ink-200);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-sm);
+}
+
+/**
+ * The hero's perspective grid. Drawn with two gradients rather than an image so
+ * it stays crisp at any density, and masked at the call site so it dissolves
+ * before it reaches the headline.
+ */
+@utility hero-grid {
+  background-image:
+    linear-gradient(to right, rgb(15 23 42 / 0.055) 1px, transparent 1px),
+    linear-gradient(to bottom, rgb(15 23 42 / 0.055) 1px, transparent 1px);
+  background-size: 72px 72px;
+  animation: var(--animate-grid-pan);
 }
 
 /* Skeleton shimmer */

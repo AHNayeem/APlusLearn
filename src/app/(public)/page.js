@@ -2,7 +2,7 @@ import { connectToDatabase } from "@/lib/db/connect";
 import {
   listProvinces, listGrades, listSubjects, popularCourses,
 } from "@/services/curriculum.service";
-import { marketplaceStats } from "@/services/search.service";
+import { featuredTutors, marketplaceStats } from "@/services/search.service";
 import { getSettings } from "@/services/settings.service";
 import { Review, TutorProfile } from "@/models";
 import { REVIEW_STATUS } from "@/constants";
@@ -29,7 +29,7 @@ export const revalidate = 3600;
 export default async function HomePage() {
   await connectToDatabase();
 
-  const [provinces, grades, subjects, courses, stats, settings, reviews, ratingAgg] =
+  const [provinces, grades, subjects, courses, stats, settings, reviews, ratingAgg, topTutors] =
     await Promise.all([
       listProvinces({ activeOnly: false }),
       listGrades({ provinceCode: "ON" }),
@@ -44,8 +44,17 @@ export default async function HomePage() {
         .lean(),
       TutorProfile.aggregate([
         { $match: { isSearchable: true, "stats.ratingCount": { $gt: 0 } } },
-        { $group: { _id: null, average: { $avg: "$stats.ratingAverage" } } },
+        {
+          $group: {
+            _id: null,
+            average: { $avg: "$stats.ratingAverage" },
+            reviews: { $sum: "$stats.ratingCount" },
+          },
+        },
       ]),
+      // The hero's avatar stack. Same ordering as the "Top rated" section
+      // below, so the faces at the top of the page are the faces you meet.
+      featuredTutors({ limit: 4 }),
     ]);
 
   const testimonials = toPlain(reviews).map((review) => ({
@@ -65,7 +74,12 @@ export default async function HomePage() {
         grades={grades}
         subjects={subjects}
         popularCourses={courses}
-        stats={{ ...stats, averageRating: ratingAgg[0]?.average ?? 0 }}
+        topTutors={topTutors}
+        stats={{
+          ...stats,
+          averageRating: ratingAgg[0]?.average ?? 0,
+          reviewCount: ratingAgg[0]?.reviews ?? 0,
+        }}
       />
       <HowItWorks />
       <PopularSubjects subjects={subjects} />

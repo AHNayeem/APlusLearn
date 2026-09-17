@@ -1,11 +1,13 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Search, MapPin, Loader2, GraduationCap, BookOpen } from "lucide-react";
+import {
+  Search, MapPin, Loader2, GraduationCap, BookOpen, Map, Layers, Video, ChevronDown,
+  ArrowRight, CornerDownLeft,
+} from "lucide-react";
 import { cn } from "@/lib/utils/cn";
 import { api, qs } from "@/lib/api/client";
-import { Button, Select } from "@/components/ui";
 import { LESSON_MODES } from "@/constants";
 
 /**
@@ -13,6 +15,12 @@ import { LESSON_MODES } from "@/constants";
  *
  * Searching does not require an account: this builds a URL and navigates to
  * /find-a-tutor, which is a public, server-rendered page.
+ *
+ * Presented as one console rather than six controls — a glass panel holding a
+ * query line, a hairline-divided row of refinements, and the submit. The
+ * refinements deliberately show their label *and* their current value at rest,
+ * because on a hero the visitor needs to see what the search is already
+ * scoped to before they decide whether to change it.
  */
 export function HeroSearch({ provinces = [], grades = [], subjects = [], className }) {
   const router = useRouter();
@@ -44,12 +52,22 @@ export function HeroSearch({ provinces = [], grades = [], subjects = [], classNa
     <form
       onSubmit={submit}
       className={cn(
-        "rounded-2xl border border-ink-200/80 bg-white/95 p-3 shadow-xl backdrop-blur-sm sm:p-4",
+        "relative rounded-3xl border border-white/10 bg-white/[0.06] p-2.5 sm:p-3",
+        "backdrop-blur-2xl",
+        // Two shadows doing different jobs: the inset hairline is the glass
+        // edge catching light, the cast shadow lifts the console off the grid.
+        "shadow-[inset_0_1px_0_0_rgb(255_255_255/0.12),0_40px_90px_-30px_rgb(2_6_23/0.95)]",
         className,
       )}
       role="search"
       aria-label="Find a tutor"
     >
+      {/* A faint bloom bleeding out from under the panel. */}
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute -inset-x-8 -bottom-8 -z-10 h-24 rounded-full bg-brand-500/25 blur-3xl"
+      />
+
       <CourseAutocomplete
         value={query}
         onChange={setQuery}
@@ -57,13 +75,14 @@ export function HeroSearch({ provinces = [], grades = [], subjects = [], classNa
         onPick={(item) => router.push(item.href)}
       />
 
-      <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-        <label className="sr-only" htmlFor="hero-province">Province</label>
-        <Select
-          id="hero-province"
+      {/* gap-px over a light background paints the hairlines between cells, so
+          the four refinements read as one instrument. */}
+      <div className="mt-2.5 grid grid-cols-2 gap-px overflow-hidden rounded-2xl bg-white/10 lg:grid-cols-4">
+        <ConsoleSelect
+          icon={Map}
+          label="Province"
           value={province}
           onChange={(e) => setProvince(e.target.value)}
-          className="h-11"
         >
           {provinces.map((p) => (
             <option key={p.code} value={p.code} disabled={!p.isActive}>
@@ -71,14 +90,13 @@ export function HeroSearch({ provinces = [], grades = [], subjects = [], classNa
               {p.isActive ? "" : " — coming soon"}
             </option>
           ))}
-        </Select>
+        </ConsoleSelect>
 
-        <label className="sr-only" htmlFor="hero-grade">Grade</label>
-        <Select
-          id="hero-grade"
+        <ConsoleSelect
+          icon={GraduationCap}
+          label="Grade"
           value={grade}
           onChange={(e) => setGrade(e.target.value)}
-          className="h-11"
         >
           <option value="">Any grade</option>
           {grades.map((g) => (
@@ -86,14 +104,13 @@ export function HeroSearch({ provinces = [], grades = [], subjects = [], classNa
               {g.name}
             </option>
           ))}
-        </Select>
+        </ConsoleSelect>
 
-        <label className="sr-only" htmlFor="hero-subject">Subject</label>
-        <Select
-          id="hero-subject"
+        <ConsoleSelect
+          icon={Layers}
+          label="Subject"
           value={subject}
           onChange={(e) => setSubject(e.target.value)}
-          className="h-11"
         >
           <option value="">Any subject</option>
           {subjects.map((s) => (
@@ -101,55 +118,154 @@ export function HeroSearch({ provinces = [], grades = [], subjects = [], classNa
               {s.name}
             </option>
           ))}
-        </Select>
+        </ConsoleSelect>
 
-        <label className="sr-only" htmlFor="hero-mode">Lesson type</label>
-        <Select
-          id="hero-mode"
+        <ConsoleSelect
+          icon={Video}
+          label="Lesson type"
           value={mode}
           onChange={(e) => setMode(e.target.value)}
-          className="h-11"
         >
           <option value="ANY">Online or in person</option>
           <option value={LESSON_MODES.ONLINE}>Online only</option>
           <option value={LESSON_MODES.IN_PERSON}>In person only</option>
-        </Select>
+        </ConsoleSelect>
       </div>
 
-      <div className="mt-2 flex flex-col gap-2 sm:flex-row">
-        <div className="relative flex-1">
-          <MapPin className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-ink-400" />
-          <label className="sr-only" htmlFor="hero-location">City or postal code</label>
-          <input
-            id="hero-location"
-            value={location}
-            onChange={(e) => setLocation(e.target.value)}
-            placeholder="City or postal code (for in-person lessons)"
-            autoComplete="postal-code"
-            className={cn(
-              "h-11 w-full rounded-xl border-0 bg-white pl-10 pr-3 text-sm text-ink-800",
-              "shadow-xs ring-1 ring-inset ring-ink-200 placeholder:text-ink-400",
-              "focus:ring-2 focus:ring-inset focus:ring-brand-500 focus:outline-none",
-            )}
-          />
-        </div>
-        <Button type="submit" size="lg" className="h-11 sm:px-8" iconLeft={<Search className="size-4" />}>
-          Search tutors
-        </Button>
+      <div className="mt-2.5 flex flex-col gap-2.5 sm:flex-row">
+        <ConsoleInput
+          icon={MapPin}
+          label="Where"
+          value={location}
+          onChange={(e) => setLocation(e.target.value)}
+          placeholder="City or postal code"
+          autoComplete="postal-code"
+        />
+        <SubmitButton />
       </div>
 
-      <p className="mt-3 px-1 text-xs text-ink-500">
+      <p className="mt-3 px-1.5 pb-0.5 text-center text-xs text-white/45 sm:text-left">
         No account needed to search. Try a course code like{" "}
         <button
           type="button"
           onClick={() => setQuery("MHF4U")}
-          className="font-semibold text-brand-600 hover:underline"
+          className="font-semibold text-brand-200 underline-offset-2 transition-colors hover:text-white hover:underline"
         >
           MHF4U
         </button>{" "}
         or a subject name.
       </p>
     </form>
+  );
+}
+
+/** The accent in the whole hero — one gradient, on the one thing to press. */
+function SubmitButton() {
+  return (
+    <button
+      type="submit"
+      className={cn(
+        "group relative inline-flex h-[3.75rem] w-full shrink-0 items-center justify-center gap-2.5 sm:w-auto",
+        "overflow-hidden rounded-2xl px-7 text-[15px] font-bold text-white",
+        "bg-gradient-to-r from-brand-400 via-brand-500 to-brand-700",
+        "shadow-[0_14px_34px_-12px_rgb(51_102_242/0.9),inset_0_1px_0_0_rgb(255_255_255/0.25)]",
+        "transition-[transform,box-shadow] duration-200 ease-out",
+        "hover:-translate-y-0.5 hover:shadow-[0_20px_44px_-12px_rgb(51_102_242/1),inset_0_1px_0_0_rgb(255_255_255/0.3)]",
+        "active:translate-y-0 active:scale-[0.99]",
+        "motion-reduce:hover:translate-y-0",
+        "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-400",
+      )}
+    >
+      {/* Highlight sweep on hover, clipped by the button's own radius. */}
+      <span
+        aria-hidden="true"
+        className={cn(
+          "pointer-events-none absolute inset-y-0 -left-full w-1/2 -skew-x-12",
+          "bg-gradient-to-r from-transparent via-white/25 to-transparent",
+          "transition-transform duration-700 ease-out group-hover:translate-x-[400%]",
+        )}
+      />
+      <Search className="size-[1.1rem]" aria-hidden="true" />
+      Search tutors
+      <ArrowRight
+        className="size-4 transition-transform duration-200 ease-out group-hover:translate-x-1 motion-reduce:group-hover:translate-x-0"
+        aria-hidden="true"
+      />
+    </button>
+  );
+}
+
+/** One cell of the refinement row: icon, standing label, live value. */
+function ConsoleSelect({ icon: Icon, label, children, ...props }) {
+  const id = useId();
+
+  return (
+    <div
+      className={cn(
+        "group relative flex items-center gap-2.5 bg-night-soft/85 px-3 py-2.5 sm:gap-3 sm:px-4",
+        "transition-colors duration-200 hover:bg-white/[0.07]",
+        "focus-within:bg-white/[0.09]",
+      )}
+    >
+      <Icon className="hidden size-4 shrink-0 text-brand-300 min-[420px]:block" aria-hidden="true" />
+      <span className="min-w-0 flex-1">
+        <label
+          htmlFor={id}
+          className="block text-[10px] font-bold uppercase tracking-[0.14em] text-white/40"
+        >
+          {label}
+        </label>
+        <select
+          id={id}
+          className={cn(
+            "-ml-0.5 w-full cursor-pointer appearance-none truncate rounded bg-transparent",
+            "pl-0.5 pr-1 text-sm font-semibold text-white outline-none",
+            // Gives the native option list a dark popup to match the console.
+            "[color-scheme:dark]",
+          )}
+          {...props}
+        >
+          {children}
+        </select>
+      </span>
+      <ChevronDown
+        className="size-4 shrink-0 text-white/35 transition-colors group-hover:text-white/70"
+        aria-hidden="true"
+      />
+    </div>
+  );
+}
+
+/** Same cell shape as a refinement, but free text and its own rounded card. */
+function ConsoleInput({ icon: Icon, label, className, ...props }) {
+  const id = useId();
+
+  return (
+    <div
+      className={cn(
+        "flex flex-1 items-center gap-3 rounded-2xl border border-white/10 bg-night-soft/85 px-4 py-2",
+        "transition-colors duration-200 focus-within:border-white/25 focus-within:bg-white/[0.09]",
+        className,
+      )}
+    >
+      <Icon className="size-4 shrink-0 text-brand-300" aria-hidden="true" />
+      <span className="min-w-0 flex-1">
+        <label
+          htmlFor={id}
+          className="block text-[10px] font-bold uppercase tracking-[0.14em] text-white/40"
+        >
+          {label}
+        </label>
+        <input
+          id={id}
+          className={cn(
+            "w-full bg-transparent text-sm font-semibold text-white outline-none",
+            "placeholder:font-normal placeholder:text-white/35",
+          )}
+          {...props}
+        />
+      </span>
+    </div>
   );
 }
 
@@ -225,7 +341,10 @@ function CourseAutocomplete({ value, onChange, province, onPick }) {
 
   return (
     <div ref={containerRef} className="relative">
-      <Search className="pointer-events-none absolute left-4 top-1/2 size-5 -translate-y-1/2 text-ink-400" />
+      <Search
+        className="pointer-events-none absolute left-5 top-1/2 size-5 -translate-y-1/2 text-brand-300"
+        aria-hidden="true"
+      />
       <label className="sr-only" htmlFor="hero-course">Course, course code or subject</label>
       <input
         id="hero-course"
@@ -236,7 +355,7 @@ function CourseAutocomplete({ value, onChange, province, onPick }) {
         }}
         onFocus={() => setDismissed(false)}
         onKeyDown={onKeyDown}
-        placeholder="Course name or code — e.g. Advanced Functions or MHF4U"
+        placeholder="Course name or code, e.g. MHF4U"
         autoComplete="off"
         role="combobox"
         aria-expanded={open}
@@ -244,13 +363,28 @@ function CourseAutocomplete({ value, onChange, province, onPick }) {
         aria-autocomplete="list"
         aria-activedescendant={highlighted >= 0 ? `hero-course-${highlighted}` : undefined}
         className={cn(
-          "h-14 w-full rounded-xl border-0 bg-white pl-12 pr-11 text-base font-medium text-ink-900",
-          "shadow-xs ring-1 ring-inset ring-ink-200 placeholder:font-normal placeholder:text-ink-400",
-          "focus:ring-2 focus:ring-inset focus:ring-brand-500 focus:outline-none",
+          "h-[3.75rem] w-full rounded-2xl border border-white/10 bg-night-soft/85 pl-14 pr-5 sm:pr-24",
+          "text-base font-semibold text-white outline-none",
+          "placeholder:font-normal placeholder:text-white/40",
+          "transition-colors duration-200",
+          "hover:border-white/20 focus:border-brand-400/60 focus:bg-white/[0.09]",
+          "focus:ring-4 focus:ring-brand-500/15",
         )}
       />
+
+      {/* Return-key affordance — it disappears the moment there is a spinner
+          or the field is empty, so it never competes for the same corner. */}
+      {!loading && value.trim().length > 0 && (
+        <kbd
+          aria-hidden="true"
+          className="pointer-events-none absolute right-4 top-1/2 hidden -translate-y-1/2 items-center gap-1 rounded-md border border-white/15 bg-white/[0.08] px-2 py-1 text-[10px] font-semibold text-white/50 sm:flex"
+        >
+          <CornerDownLeft className="size-3" />
+          Enter
+        </kbd>
+      )}
       {loading && (
-        <Loader2 className="absolute right-4 top-1/2 size-4 -translate-y-1/2 animate-spin text-ink-400" />
+        <Loader2 className="absolute right-5 top-1/2 size-4 -translate-y-1/2 animate-spin text-brand-300" />
       )}
 
       {open && (
@@ -258,7 +392,13 @@ function CourseAutocomplete({ value, onChange, province, onPick }) {
           id="hero-course-results"
           role="listbox"
           aria-label="Search suggestions"
-          className="absolute inset-x-0 top-full z-30 mt-2 max-h-80 overflow-y-auto rounded-xl border border-ink-200 bg-white p-1.5 shadow-xl"
+          className={cn(
+            "absolute inset-x-0 top-full z-30 mt-2 max-h-80 overflow-y-auto rounded-2xl p-1.5",
+            // Opaque, not glass: the list sits over the console's own controls
+            // and anything showing through reads as a rendering fault.
+            "border border-white/10 bg-night-soft",
+            "shadow-[0_30px_60px_-20px_rgb(2_6_23/0.95)]",
+          )}
         >
           {results.map((item, index) => (
             <li key={`${item.type}-${item.id}`}>
@@ -273,14 +413,16 @@ function CourseAutocomplete({ value, onChange, province, onPick }) {
                   setDismissed(true);
                 }}
                 className={cn(
-                  "flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors",
-                  index === highlighted ? "bg-brand-50" : "hover:bg-ink-50",
+                  "flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition-colors",
+                  index === highlighted ? "bg-white/10" : "hover:bg-white/[0.06]",
                 )}
               >
                 <span
                   className={cn(
-                    "flex size-8 shrink-0 items-center justify-center rounded-lg",
-                    item.type === "COURSE" ? "bg-brand-100 text-brand-600" : "bg-accent-100 text-accent-700",
+                    "flex size-8 shrink-0 items-center justify-center rounded-lg ring-1 ring-inset",
+                    item.type === "COURSE"
+                      ? "bg-brand-500/15 text-brand-200 ring-brand-400/25"
+                      : "bg-accent-500/15 text-accent-300 ring-accent-400/25",
                   )}
                 >
                   {item.type === "COURSE" ? (
@@ -290,10 +432,10 @@ function CourseAutocomplete({ value, onChange, province, onPick }) {
                   )}
                 </span>
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate text-sm font-semibold text-ink-900">
+                  <span className="block truncate text-sm font-semibold text-white">
                     {item.label}
                   </span>
-                  <span className="block truncate text-xs text-ink-500">{item.sublabel}</span>
+                  <span className="block truncate text-xs text-white/45">{item.sublabel}</span>
                 </span>
               </button>
             </li>

@@ -218,15 +218,20 @@ export async function featuredTutors({ limit = 6, courseId, subjectSlug, provinc
 
 /** Marketplace supply counts used across public pages. */
 export async function marketplaceStats() {
-  const [tutors, cities, subjects] = await Promise.all([
+  const [tutors, cities, subjects, courses] = await Promise.all([
     TutorProfile.countDocuments({ isSearchable: true }),
     TutorProfile.distinct("city", { isSearchable: true }),
     TutorProfile.distinct("subjectSlugs", { isSearchable: true }),
+    // Catalogue breadth, not tutor coverage — this is the number the hero
+    // quotes as "courses covered", and it is what makes course-code search
+    // worth attempting in the first place.
+    Course.countDocuments({ isActive: true }),
   ]);
 
   return {
     tutorCount: tutors,
     cityCount: cities.filter(Boolean).length,
     subjectCount: subjects.filter(Boolean).length,
+    courseCount: courses,
   };
 }
