@@ -97,7 +97,18 @@ export default async function RootLayout({ children }) {
   const themeCss = buildThemeCss(theme);
 
   return (
-    <html lang="en-CA" className={`${jakarta.variable} h-full`}>
+    /*
+      `suppressHydrationWarning` covers this element's own attributes only —
+      children are still hydration-checked. It is here because dev tooling
+      (the Next.js element locator, browser extensions) writes attributes such
+      as `data-locator-target` onto <html> before React hydrates, which the
+      server HTML cannot have rendered.
+    */
+    <html
+      lang="en-CA"
+      className={`${jakarta.variable} h-full`}
+      suppressHydrationWarning
+    >
       <body className="flex min-h-full flex-col antialiased">
         {/*
           Hoisted into <head> by React, which de-duplicates it by `href` and
