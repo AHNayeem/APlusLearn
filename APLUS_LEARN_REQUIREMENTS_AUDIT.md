@@ -611,7 +611,7 @@ Ordered by dependency and business impact. **No changes were made; this is a che
    `checkout.session.expired` and `payment_intent.payment_failed` handlers release slots
    immediately. Correct the two false comments. *First, because it corrupts availability
    continuously and every booking made before the fix may already have leaked slots.*
-2. **Replace filesystem storage with an object store.** Implement `S3StorageProvider` behind the
+2. **Replace filesystem storage with an object store.** Implement an object-storage provider behind the
    existing interface and return it from `getStorageProvider()`. *Unblocks tutor verification,
    which gates searchability, which gates the entire marketplace.*
 3. **Move rate limiting to a shared store.** The call signature is already designed for it.
@@ -751,12 +751,12 @@ the slot is still free, and when it is not, audits it as needing a refund and lo
 
 ### R33 / S2 — Verification document storage was non-functional on the deployment target — **BROKEN → FIXED**
 
-`S3StorageProvider` implements the existing `StorageProvider` interface. It speaks the S3 API
-directly — SigV4 signed with `node:crypto` over `fetch` — so it runs unchanged against Amazon
-S3, Cloudflare R2, Backblaze B2, DigitalOcean Spaces and MinIO. The signing is verified
+`ObjectStorageProvider` implements the existing `StorageProvider` interface. It speaks the S3 API
+directly, against **MinIO**, — SigV4 signed with `node:crypto` over `fetch` — and equally unchanged against Amazon
+S3, Cloudflare R2, Backblaze B2 and DigitalOcean Spaces. The signing is verified
 against **AWS's own published test vector**, byte for byte.
 
-No SDK was added. Three operations did not justify tens of megabytes in the server bundle;
+No SDK was added. Four operations did not justify tens of megabytes in the server bundle;
 this is the same trade `lib/images/inspect.js` already makes.
 
 Privacy is structural rather than configured:
@@ -764,8 +764,11 @@ Privacy is structural rather than configured:
 - **No method returns a URL.** Both scopes are fetched server-side and streamed through a
   route that has already authorised the caller, so there is no signed link to leak, expire
   badly or forward. This is stricter than the signed-URL approach the brief permitted.
-- No ACL is set, so objects inherit the bucket's private default. `AES256` at rest is
-  requested.
+- **There is no presigned-URL code path at all.** A signed link is a bearer token for a
+  file that can be forwarded, logged by a proxy and used after its session ended.
+- No ACL is set, so objects inherit the bucket's private default. Per-object `AES256` is
+  available through `STORAGE_SSE` but off by default, because MinIO refuses it without a
+  KMS; MinIO deployments encrypt at the bucket or volume level.
 - Keys are UUIDs under a scope prefix; a stored key that tries to escape its scope is
   flattened by `safeKey`, not followed.
 

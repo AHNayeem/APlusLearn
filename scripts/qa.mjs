@@ -878,6 +878,33 @@ async function main() {
       servedLogo.headers.get("x-content-type-options") === "nosniff",
   );
 
+  check("the bytes served are the bytes that were stored",
+    Buffer.compare(
+      Buffer.from(await servedLogo.clone().arrayBuffer()),
+      Buffer.from(pngBytes(240, 64)),
+    ) === 0);
+
+  // --- Replacement: the new file is served, and the old object is discarded.
+  //
+  // This is the only path that deletes from the store during normal use, so
+  // it is worth asserting rather than assuming: an accumulating bucket of
+  // orphaned logos is a slow leak, and a *failed* delete must not take the
+  // settings write down with it.
+  const replacementLogo = new FormData();
+  replacementLogo.append("file", new Blob([pngBytes(320, 80)], { type: "image/png" }), "logo-v2.png");
+  const replaced = await adminUpload("/api/admin/settings/branding?asset=logo", replacementLogo);
+  check("a logo can be replaced", replaced.ok, JSON.stringify(replaced.payload?.error ?? {}));
+  check("the replacement gets its own storage key, so the URL version changes",
+    replaced.payload?.data?.settings?.branding?.logo?.width === 320);
+
+  const servedReplacement = await anon("/api/branding/logo", { raw: true });
+  check("the replacement is what gets served, not the original",
+    servedReplacement.status === 200 &&
+      Buffer.compare(
+        Buffer.from(await servedReplacement.arrayBuffer()),
+        Buffer.from(pngBytes(320, 80)),
+      ) === 0);
+
   const bogusAsset = await anon("/api/branding/../../package.json", { raw: true });
   check("an unknown branding asset is refused", bogusAsset.status === 404 || bogusAsset.status === 422);
 

@@ -115,15 +115,23 @@ export const INTEGRATIONS = {
     // then loses it, which breaks verification and mishandles the document.
     fakeAllowedInProduction: false,
     providers: {
-      s3: {
-        label: "S3-compatible object storage",
-        required: ["S3_BUCKET", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY"],
+      minio: {
+        // MinIO is what this platform deploys against; the adapter speaks the
+        // S3 API, so the same selector serves S3, R2, B2 and Spaces.
+        label: "MinIO (S3-compatible object storage)",
+        required: [
+          "STORAGE_ENDPOINT",
+          "STORAGE_BUCKET",
+          "STORAGE_ACCESS_KEY",
+          "STORAGE_SECRET_KEY",
+        ],
         optional: [
-          "S3_REGION",
-          "S3_ENDPOINT",
-          "S3_PREFIX",
-          "S3_FORCE_PATH_STYLE",
-          "S3_SESSION_TOKEN",
+          "STORAGE_REGION",
+          "STORAGE_PREFIX",
+          "STORAGE_FORCE_PATH_STYLE",
+          "STORAGE_SESSION_TOKEN",
+          "STORAGE_SSE",
+          "STORAGE_TIMEOUT_MS",
         ],
       },
     },

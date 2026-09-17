@@ -10,6 +10,8 @@
     "lint": "eslint",
     "seed": "node --env-file=.env.local scripts/seed.js",
     "seed:keep": "node --env-file=.env.local scripts/seed.js --keep",
+    "storage:check": "node --env-file=.env.local --import ./scripts/lib/register-loader.mjs scripts/storage.mjs check",
+    "storage:migrate": "node --env-file=.env.local --import ./scripts/lib/register-loader.mjs scripts/storage.mjs migrate",
     "qa": "node scripts/qa.mjs",
     "test:integrations": "node --env-file=.env.local --import ./scripts/lib/register-loader.mjs scripts/integration-tests.mjs"
   },

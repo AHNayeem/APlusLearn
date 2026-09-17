@@ -54,6 +54,8 @@ sitting in the admin review queue.
 | `npm run lint` | ESLint, including the React Compiler rules |
 | `npm run seed` | Wipe and reseed the database |
 | `npm run seed:keep` | Add missing seed data without wiping |
+| `npm run storage:check` | Prove the MinIO credentials open the bucket (`--roundtrip` also writes, reads and deletes) |
+| `npm run storage:migrate` | Copy `.storage/**` into the MinIO bucket (`--dry-run` to preview) |
 | `npm run qa` | End-to-end API test suite against a running dev server (226 assertions) |
 | `npm run test:integrations` | Provider adapter tests — no network, no third party |
 
@@ -208,7 +210,7 @@ configuration rather than code.
 | OAuth | Local identity (non-production only) | **Google / Apple** — verified ID tokens | `OAUTH_PROVIDER` |
 | Geocoding | Bundled Canadian city & FSA table | **Google Geocoding API** | `GEOCODING_PROVIDER` |
 | Meetings | Deterministic room links | **Zoom** — Server-to-Server OAuth | `MEETING_PROVIDER` |
-| Document storage | Private local directory | *(interface only)* | — |
+| File storage | Private local directory under `.storage/` | **MinIO** — S3-compatible object storage | `STORAGE_PROVIDER` |
 
 ```
 APP_ENV=development   auto-detect: whatever has credentials is used,
@@ -219,10 +221,11 @@ APP_ENV=production    nothing is auto-detected. Every selector must name a
                       stops the server starting.
 ```
 
-`PAYMENT_PROVIDER=development` and `EMAIL_PROVIDER=development` are refused
-outright once `APP_ENV=production`: there is no configuration in which a
-production deployment takes fake money or silently swallows a password-reset
-email. Which mode each integration is running in is shown at
+`PAYMENT_PROVIDER`, `EMAIL_PROVIDER` and `STORAGE_PROVIDER` all refuse
+`development` once `APP_ENV=production`: there is no configuration in which a
+production deployment takes fake money, silently swallows a password-reset
+email, or accepts a tutor's identity document onto a disk that will not exist
+on the next request. Which mode each integration is running in is shown at
 **Admin → Platform settings → Integrations**, alongside recent webhook
 deliveries.
 
@@ -263,6 +266,70 @@ curl -H "Authorization: Bearer $CRON_SECRET" http://localhost:3000/api/cron/list
 **Test cards** (development payment provider): `4242 4242 4242 4242` succeeds;
 any number ending `0002` exercises the declined-card path. Under Stripe the
 card is entered on Stripe's own page — use their test cards instead.
+
+---
+
+## Running the real integrations locally
+
+The application is fully functional with no third-party credentials. These
+steps are for exercising the two integrations that handle money and
+identity documents against their actual services.
+
+### MinIO file storage
+
+```bash
+# 1. .env.local — the S3 API root, not the MinIO console
+STORAGE_PROVIDER="minio"
+STORAGE_ENDPOINT="https://minio.example.com"
+STORAGE_BUCKET="aplus-learn"
+STORAGE_ACCESS_KEY="…"
+STORAGE_SECRET_KEY="…"
+STORAGE_PREFIX="dev"          # optional; keeps environments apart in one bucket
+# STORAGE_SSE                 leave unset: MinIO refuses per-object SSE without a KMS
+
+# 2. Prove it before trusting it with anything
+bun run storage:check --roundtrip
+
+# 3. If you already have files under .storage/, copy them across.
+#    `storageKey` in the database is the object's filename, so nothing in
+#    Mongo changes and nothing local is deleted.
+bun run storage:migrate --dry-run
+bun run storage:migrate
+
+# 4. Restart, then exercise it through the UI:
+#    Tutor → Verification → upload a PDF
+#    Admin → Verification → open that document (streamed, never linked)
+#    Admin → Platform settings → Branding → upload and replace a logo
+```
+
+The bucket must be private. Nothing in the application hands out an object
+URL, and there is no presigned-URL path — bytes are streamed through routes
+that have already authorised the caller.
+
+### Stripe test mode
+
+```bash
+# 1. .env.local — test keys only; the key's prefix decides the mode, not APP_ENV
+PAYMENT_PROVIDER="stripe"
+STRIPE_SECRET_KEY="sk_test_…"
+
+# 2. Forward Stripe's webhooks to the dev server. Copy the whsec_… it prints
+#    into STRIPE_WEBHOOK_SECRET and restart.
+stripe listen --forward-to localhost:3000/api/webhooks/payments
+
+# 3. Book a lesson as a parent. Checkout is hosted by Stripe:
+#    4242 4242 4242 4242   succeeds
+#    4000 0000 0000 0002   declined
+#    4000 0025 0000 3155   requires 3-D Secure
+```
+
+**Without a webhook secret a hosted payment cannot be confirmed at all.** The
+browser returning from Stripe lands on a page that polls and waits; only the
+verified webhook settles the payment and confirms the lesson. That is
+deliberate — a browser saying "it worked" is not evidence that it did.
+
+No publishable key is needed: the purchaser is redirected to Stripe's own
+page, so no Stripe code runs in the browser.
 
 ---
 

@@ -6,6 +6,7 @@ import {
 import { connectToDatabase, databaseStatus } from "@/lib/db/connect";
 import { enforceRole } from "@/lib/auth/guards";
 import { ROLES, TUTOR_STATUS } from "@/constants";
+import { integrationStatus } from "@/lib/config/env";
 import { marketplaceOverview, adminQueueCounts, recentActivity } from "@/services/analytics.service";
 import { pendingPayoutSummary } from "@/services/payout.service";
 import {
@@ -30,6 +31,13 @@ export default async function AdminDashboardPage() {
   ]);
 
   const payableTotal = pendingPayouts.reduce((sum, p) => sum + p.amountCents, 0);
+
+  // The three integrations whose failure stops the marketplace working:
+  // money in, mail out, and a durable home for identity documents. The full
+  // list is on Admin → Platform settings → Integrations.
+  const integrations = integrationStatus().filter((i) =>
+    ["payment", "email", "storage"].includes(i.key),
+  );
 
   return (
     <DashboardPage>
@@ -247,16 +255,24 @@ export default async function AdminDashboardPage() {
               ok={db.connected}
               value={db.connected ? `${db.name} @ ${db.host}` : db.error}
             />
-            <SystemRow
-              label="Payment provider"
-              ok
-              value={process.env.STRIPE_SECRET_KEY ? "Stripe" : "Development (mock)"}
-            />
-            <SystemRow
-              label="Email provider"
-              ok
-              value={process.env.RESEND_API_KEY ? "Resend" : "Development (console)"}
-            />
+            {/*
+              Read through `integrationStatus()` rather than sniffed from env
+              vars: the selector decides which provider is live, so a key that
+              happens to be present does not mean it is the one in use, and a
+              misconfigured integration must show as broken rather than green.
+            */}
+            {integrations.map((integration) => (
+              <SystemRow
+                key={integration.key}
+                label={integration.label}
+                ok={integration.ok}
+                value={
+                  integration.ok
+                    ? `${integration.providerLabel}${integration.mode === "development" ? " (mock)" : ""}`
+                    : integration.error
+                }
+              />
+            ))}
           </dl>
         </CardBody>
       </Card>

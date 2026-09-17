@@ -1,9 +1,9 @@
 import "server-only";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, writeFile, readFile, unlink } from "node:fs/promises";
+import { mkdir, writeFile, readFile, unlink, stat } from "node:fs/promises";
 import path from "node:path";
-import { requireIntegration, DEVELOPMENT } from "@/lib/config/env";
-import { S3Client, storageError } from "./s3-storage";
+import { requireIntegration } from "@/lib/config/env";
+import { ObjectStoreClient } from "./object-storage";
 
 /**
  * Private file storage (§16, §35, §26).
@@ -25,9 +25,10 @@ import { S3Client, storageError } from "./s3-storage";
  *
  * Two implementations, chosen by `lib/config/env` from `STORAGE_PROVIDER`:
  *
- *   LocalStorageProvider — development. Writes under `.storage/`.
- *   S3StorageProvider    — any real deployment. Speaks S3 directly, so it
- *                          runs against S3, R2, B2, Spaces or MinIO.
+ *   LocalStorageProvider   — development. Writes under `.storage/`.
+ *   ObjectStorageProvider  — any real deployment. Speaks the S3 API directly,
+ *                            against MinIO (and equally against S3, R2, B2 or
+ *                            Spaces — only the endpoint changes).
  *
  * The local provider is refused when `APP_ENV=production`: a serverless
  * filesystem does not survive the request that wrote to it, so a production
@@ -58,7 +59,9 @@ function safeKey(storageKey) {
  *   put({ buffer, fileName, contentType, extension, scope })
  *       → { storageKey, contentType, sizeBytes, checksum }
  *   get({ storageKey, scope })     → Buffer
+ *   head({ storageKey, scope })    → { sizeBytes, contentType, … } | null
  *   remove({ storageKey, scope })  → { removed: boolean }
+ *   verify()                       → { ok, provider, detail }
  *
  * `storageKey` is generated here and is opaque to the caller. It is never
  * derived from the uploader's filename, never guessable from anything the
@@ -67,6 +70,12 @@ function safeKey(storageKey) {
  * through a route that has already decided the caller may have the bytes —
  * an admin for a verification document, anyone for a branding asset the
  * settings document points at.
+ *
+ * There is deliberately no presigned-URL operation. A signed link is a
+ * bearer token for a file that can be forwarded, logged by a proxy and used
+ * after the session that minted it has gone; streaming the bytes through a
+ * route that has already authorised the caller is strictly stronger, and it
+ * is the model every consumer of this interface is written against.
  */
 export class StorageProvider {
   get name() {
@@ -78,7 +87,14 @@ export class StorageProvider {
   async get() {
     throw new Error("not implemented");
   }
+  async head() {
+    throw new Error("not implemented");
+  }
   async remove() {
+    throw new Error("not implemented");
+  }
+  /** Prove the store is reachable and writable enough to serve a request. */
+  async verify() {
     throw new Error("not implemented");
   }
 }
@@ -111,25 +127,43 @@ export class LocalStorageProvider extends StorageProvider {
     return readFile(path.join(scopedDir(scope), safeKey(storageKey)));
   }
 
+  async head({ storageKey, scope = STORAGE_SCOPES.DOCUMENTS }) {
+    const info = await stat(path.join(scopedDir(scope), safeKey(storageKey))).catch(() => null);
+    if (!info) return null;
+    return {
+      key: safeKey(storageKey),
+      sizeBytes: info.size,
+      contentType: null,
+      lastModified: info.mtime.toUTCString(),
+      etag: null,
+    };
+  }
+
   async remove({ storageKey, scope = STORAGE_SCOPES.DOCUMENTS }) {
     await unlink(path.join(scopedDir(scope), safeKey(storageKey))).catch(() => {});
     return { removed: true };
+  }
+
+  async verify() {
+    await mkdir(scopedDir(STORAGE_SCOPES.DOCUMENTS), { recursive: true });
+    return { ok: true, provider: this.name, detail: ".storage/ is writable" };
   }
 }
 
 /**
  * Object storage, for any deployment whose filesystem is not durable (§16, §38).
  *
- * This is the provider a real deployment runs on. A serverless host gives each
- * invocation its own ephemeral disk, so the local provider above loses a
- * tutor's identity paperwork somewhere between the upload and the
- * administrator opening it — which is a broken verification workflow and a
- * poor way to treat identity documents besides.
+ * This is the provider a real deployment runs on, and it is MinIO that this
+ * platform deploys against. A serverless host gives each invocation its own
+ * ephemeral disk, so the local provider above loses a tutor's identity
+ * paperwork somewhere between the upload and the administrator opening it —
+ * which is a broken verification workflow and a poor way to treat identity
+ * documents besides.
  *
  * Privacy is by construction rather than by configuration:
  *
  *   - the bucket is never required to be public, and nothing here sets an
- *     ACL, so it inherits the account's private default;
+ *     ACL, so it inherits the store's private default;
  *   - no method returns a URL. Bytes are fetched server-side and streamed
  *     through a route that has already authorised the caller, so there is no
  *     signed link to leak, expire badly, or forward;
@@ -140,15 +174,16 @@ export class LocalStorageProvider extends StorageProvider {
  * reach this module — it is `server-only`, and the factory is called from
  * services that are too.
  */
-export class S3StorageProvider extends StorageProvider {
-  constructor({ prefix = "", ...options } = {}) {
+export class ObjectStorageProvider extends StorageProvider {
+  constructor({ prefix = "", label = "MINIO", ...options } = {}) {
     super();
-    this.client = new S3Client(options);
+    this.client = new ObjectStoreClient(options);
     this.prefix = prefix.replace(/^\/+|\/+$/g, "");
+    this.label = label;
   }
 
   get name() {
-    return "S3";
+    return this.label;
   }
 
   /** `<prefix>/<scope>/<uuid>.<ext>` — the scope is ours, never the caller's. */
@@ -176,6 +211,10 @@ export class S3StorageProvider extends StorageProvider {
     return this.client.getObject(this.objectKey(storageKey, scope));
   }
 
+  async head({ storageKey, scope = STORAGE_SCOPES.DOCUMENTS }) {
+    return this.client.headObject(this.objectKey(storageKey, scope));
+  }
+
   async remove({ storageKey, scope = STORAGE_SCOPES.DOCUMENTS }) {
     // A delete that fails must not fail the settings write that triggered it;
     // the caller has already stopped pointing at this object.
@@ -186,6 +225,20 @@ export class S3StorageProvider extends StorageProvider {
       if (error.status === 404) return { removed: false };
       throw error;
     }
+  }
+
+  /**
+   * Reachability, credentials and bucket, without touching an object. A
+   * misconfigured store should be visible on the admin integrations panel
+   * before a tutor discovers it by failing to upload their police check.
+   */
+  async verify() {
+    await this.client.headBucket();
+    return {
+      ok: true,
+      provider: this.name,
+      detail: `bucket "${this.client.bucket}" is reachable`,
+    };
   }
 }
 
@@ -206,17 +259,22 @@ export function getStorageProvider() {
   if (cached?.key === name) return cached.provider;
 
   const provider =
-    name === "s3"
-      ? new S3StorageProvider({
-          bucket: process.env.S3_BUCKET,
-          region: process.env.S3_REGION || "us-east-1",
-          accessKeyId: process.env.S3_ACCESS_KEY_ID,
-          secretAccessKey: process.env.S3_SECRET_ACCESS_KEY,
-          sessionToken: process.env.S3_SESSION_TOKEN || undefined,
-          endpoint: process.env.S3_ENDPOINT || undefined,
-          // Path style works everywhere; virtual-hosted style is opt-in.
-          forcePathStyle: process.env.S3_FORCE_PATH_STYLE !== "false",
-          prefix: process.env.S3_PREFIX || "",
+    name === "minio"
+      ? new ObjectStorageProvider({
+          label: "MINIO",
+          bucket: process.env.STORAGE_BUCKET,
+          region: process.env.STORAGE_REGION || "us-east-1",
+          accessKeyId: process.env.STORAGE_ACCESS_KEY,
+          secretAccessKey: process.env.STORAGE_SECRET_KEY,
+          sessionToken: process.env.STORAGE_SESSION_TOKEN || undefined,
+          endpoint: process.env.STORAGE_ENDPOINT || undefined,
+          // Path style is what MinIO serves, and works everywhere;
+          // virtual-hosted style is opt-in for buckets that require it.
+          forcePathStyle: process.env.STORAGE_FORCE_PATH_STYLE !== "false",
+          prefix: process.env.STORAGE_PREFIX || "",
+          // Off unless asked for: MinIO refuses per-object SSE without a KMS.
+          serverSideEncryption: process.env.STORAGE_SSE || null,
+          timeoutMs: Number(process.env.STORAGE_TIMEOUT_MS) || undefined,
         })
       : new LocalStorageProvider();
 
@@ -228,5 +286,3 @@ export function getStorageProvider() {
 export function resetStorageProvider() {
   cached = null;
 }
-
-export { storageError, DEVELOPMENT };

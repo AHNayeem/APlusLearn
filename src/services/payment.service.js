@@ -294,6 +294,40 @@ export async function refundPayment(paymentId, { amountCents, reason, issuedBy }
 }
 
 /**
+ * Ask the provider what actually happened to a payment (§20, §38).
+ *
+ * The webhook is how a hosted payment is *normally* confirmed, but a webhook
+ * can be lost — an endpoint that was down, a forwarder that was not running,
+ * a signing secret rotated mid-flight. Left unreconciled that becomes the
+ * worst outcome this application has: the purchaser is charged, no event
+ * arrives, and the expiry sweep releases the lesson they paid for.
+ *
+ * So before anything destructive happens to an unpaid booking, the provider
+ * is asked directly. That is still the backend as the source of truth — it is
+ * the provider's own API answering, not a browser — and it is the only other
+ * authority besides the webhook.
+ *
+ * @returns {Promise<{ status: string, amountCents?: number, paymentIntentId?: string }|null>}
+ *   `null` when there is nothing to ask about: the development provider
+ *   settles in-app and has no remote state, and a payment with no session
+ *   opened yet has no provider object to name.
+ */
+export async function providerPaymentStatus(payment) {
+  const provider = getPaymentProvider();
+
+  // Only a provider that confirms by webhook has remote state worth reading.
+  // The development provider does not, and must never be consulted here.
+  if (!provider.confirmsByWebhook) return null;
+  if (payment.provider !== provider.name) return null;
+  if (!payment.providerPaymentIntentId && !payment.providerCheckoutId) return null;
+
+  return provider.getPaymentStatus({
+    paymentIntentId: payment.providerPaymentIntentId ?? undefined,
+    checkoutId: payment.providerCheckoutId ?? undefined,
+  });
+}
+
+/**
  * Mark a payment settled from a verified provider event (§20, §38).
  *
  * The only caller is `webhook.service`, after it has proved the event came

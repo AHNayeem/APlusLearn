@@ -180,7 +180,9 @@ Verified on a clean database: `npm run seed` → `npx eslint src scripts` (clean
 | Stripe Connect | `StripePaymentProvider` — hosted Checkout for the charge, Connect Express with separate charges and transfers for payouts | Awaiting credentials |
 | Card never touches this application | Hosted Checkout; `capturePayment()` is refused outright under Stripe, so the deployment stays outside PCI scope | Implemented |
 | Booking confirmed only by a verified webhook | `/api/webhooks/payments` → `webhook.service.js`; the browser's return page polls and confirms nothing | Implemented |
-| Webhook idempotency | Unique `(provider, eventId)` index on `WebhookEvent`; replays are acknowledged and dropped | Implemented |
+| Webhook idempotency | Unique `(provider, eventId)` index on `WebhookEvent`; a replay of a *processed* event is acknowledged and dropped | Implemented |
+| Webhook retryability | A delivery that failed, or whose process died holding the claim, is reprocessed when the provider redelivers — idempotency must not swallow the recovery mechanism. Safe because every handler asserts state rather than transitions it | Implemented |
+| A lost webhook cannot destroy a paid lesson | Before releasing any hold, `expireStaleBookings()` asks the provider's API directly (`providerPaymentStatus()`); paid ⇒ settled and confirmed, unpaid ⇒ released, unanswerable ⇒ **hold kept** and retried | Implemented |
 | Webhook amount validation | An event whose amount disagrees with the priced total is refused | Implemented |
 | Payment idempotency | Idempotency keys on checkout, refund and transfer creation | Implemented |
 | Student payment, commission, tutor amount | `lib/booking/pricing.js`; QA asserts commission + earnings = subtotal exactly | Implemented |
@@ -420,7 +422,7 @@ and webhook endpoints.
 | Auth providers | `DevOAuthProvider` | `OpenIdOAuthProvider` — Google and Apple ID tokens | Awaiting credentials |
 | Geocoding | `LocalTableGeocodingProvider` | `GoogleGeocodingProvider`, country-filtered, coarsened, with table fallback | Awaiting credentials |
 | Video meetings | `MockMeetingProvider` | `ZoomMeetingProvider`, `GoogleMeetProvider`, `MicrosoftTeamsMeetingProvider` — create / move / tear down; several may be live at once | Awaiting credentials |
-| File storage | `LocalStorageProvider` | `S3StorageProvider` — SigV4 over `fetch`; S3, R2, B2, Spaces, MinIO | Awaiting credentials |
+| File storage | `LocalStorageProvider` | `ObjectStorageProvider` — **MinIO**; SigV4 over `fetch`, also S3, R2, B2, Spaces | Awaiting credentials |
 | Calendar | — | `CalendarProvider` interface declared | Phase 2 |
 | Configuration-driven selection | `src/lib/config/env.js`; `APP_ENV` + one `*_PROVIDER` per integration | — | Implemented |
 | Production never silently fakes | `PAYMENT_PROVIDER`/`EMAIL_PROVIDER`/`STORAGE_PROVIDER=development` refused under `APP_ENV=production`; a named provider without credentials stops the boot | — | Implemented |
@@ -496,7 +498,9 @@ so it is safe to run in CI.
 |---|---|
 | Configuration | Auto-detection in development; production refuses a development payment or email provider, refuses a named provider with missing secrets, and never guesses; the status report contains no secret values |
 | Payments | The server-priced amount is what is charged; idempotency keys on checkout, refund and transfer; a raw card is refused; refund carries the policy outcome; Connect accounts start unpayable and are set to manual payouts; only masked bank details come back |
-| Webhooks | A wrong secret is rejected; an hour-old signature is rejected; a duplicate delivery changes nothing and is counted as a retry; a mismatched amount is refused and leaves the payment unsettled; a late failure cannot un-pay a settled payment; only card brand and last4 are stored; a dashboard refund reconciles once; unknown events are acknowledged |
+| Webhooks | A wrong secret is rejected; an hour-old signature is rejected; a duplicate of a processed event changes nothing; a *failed* delivery is reprocessed on redelivery and settles once the cause is gone; a claim abandoned by a dead process is reclaimed while a live one is not; a mismatched amount is refused and leaves the payment unsettled; a late failure cannot un-pay a settled payment; only card brand and last4 are stored; a dashboard refund reconciles once through either `charge.refunded` or `refund.*`; a pending refund is not counted as money returned; unknown events are acknowledged |
+| Reconciliation | A payment paid at the provider whose webhook never arrived is settled by the sweep rather than released; an unreachable provider keeps the hold; a provider amount that disagrees with the priced total settles nothing |
+| Storage | SigV4 reproduces AWS's published vector; upload/read/head/replace/delete round-trip; the uploader's filename never becomes a key; scopes cannot read each other; a traversal key is flattened; no URL is ever returned; no per-object SSE by default; credentials are redacted from provider errors; bad credentials, missing objects, unreachable hosts and timeouts are each named distinctly |
 | Email | Key travels in a header not a URL; both HTML and text parts are sent; delivery is idempotent; a provider rejection surfaces its reason; an outage does not throw into the calling service; all 13 templates render; template input is HTML-escaped; a security notice carries no token |
 | OAuth | A valid token verifies; wrong audience, wrong issuer, tampered signature and a mismatched nonce are all rejected; Apple's string booleans and one-time name are handled; an unconfigured provider refuses rather than trusting |
 | Geocoding | A rooftop coordinate is coarsened before it leaves the module; an unknown location, a rejected key and a network failure all degrade to `null`; an outage falls back to the bundled table; distance maths is correct and symmetric |

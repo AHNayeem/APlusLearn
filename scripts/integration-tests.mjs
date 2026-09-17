@@ -3,7 +3,7 @@
  *
  * These exercise the production provider adapters — Stripe, Resend, Google
  * and Apple ID tokens, Google geocoding, Zoom, Google Meet, Microsoft Teams
- * and S3-compatible object storage — without touching a single third-party
+ * and MinIO object storage — without touching a single third-party
  * service. `fetch` is stubbed per test, OAuth tokens are signed
  * with a key pair generated in-process, and Stripe webhook signatures are
  * computed with the real signing scheme.
@@ -495,6 +495,98 @@ async function webhookTests() {
   check("a webhook that could not be processed is recorded as FAILED, so it is retried",
     Boolean(failedRecord));
 
+  // --- a FAILED delivery must actually be RETRYABLE
+  //
+  // The provider answers a 500 by redelivering, which is the recovery
+  // mechanism. If the idempotency guard swallowed that redelivery as a
+  // duplicate, a one-minute outage would wedge the event forever and the
+  // payment would never settle.
+  const tamperedEvent = {
+    id: failedRecord.eventId,
+    type: "checkout.session.completed",
+    livemode: false,
+    data: {
+      object: {
+        id: `cs_${randomUUID().replace(/-/g, "").slice(0, 16)}`,
+        payment_status: "paid",
+        amount_total: 100,
+        payment_intent: unpaid.providerPaymentIntentId,
+        metadata: { paymentId: String(unpaid._id) },
+      },
+    },
+  };
+
+  const retriedWhileBroken = await throws(() => deliver(tamperedEvent));
+  check("redelivering a FAILED event re-attempts it rather than dropping it as a duplicate",
+    retriedWhileBroken.threw && /does not match/i.test(retriedWhileBroken.error.message),
+    retriedWhileBroken.error?.message);
+
+  const retryRecord = await WebhookEvent.findOne({ eventId: failedRecord.eventId }).lean();
+  check("the retry is counted on the same record, not a second one",
+    retryRecord.attempts === 2 && retryRecord.status === "FAILED", JSON.stringify(retryRecord));
+
+  // Now make the cause go away — as fixing a transient fault would — and let
+  // the provider redeliver once more.
+  await Payment.updateOne(
+    { _id: unpaid._id },
+    { $set: { subtotalCents: 100, commissionCents: 15, tutorEarningsCents: 85, totalCents: 100 } },
+  );
+  const recovered = await deliver(tamperedEvent);
+  check("once the cause is gone, the redelivered event finally settles the payment",
+    recovered.handled === true && !recovered.duplicate, JSON.stringify(recovered));
+  check("and the payment is PAID",
+    (await Payment.findById(unpaid._id).lean()).status === "PAID");
+
+  const settledRecord = await WebhookEvent.findOne({ eventId: failedRecord.eventId }).lean();
+  check("the event record ends PROCESSED after the successful retry",
+    settledRecord.status === "PROCESSED" && settledRecord.attempts === 3,
+    JSON.stringify(settledRecord));
+
+  const afterSuccess = await deliver(tamperedEvent);
+  check("a PROCESSED event redelivered again IS dropped as a duplicate",
+    afterSuccess.duplicate === true, JSON.stringify(afterSuccess));
+
+  // --- a claim abandoned mid-flight must not wedge the event either
+  //
+  // If the process is killed, redeployed or scaled away while a handler is
+  // running, the row stays in PROCESSING. A live delivery must still be
+  // dropped as a duplicate, but a stale claim has to be reclaimable or the
+  // event is lost for good.
+  const orphanEvent = {
+    id: `evt_${randomUUID().replace(/-/g, "").slice(0, 16)}`,
+    type: "checkout.session.completed",
+    livemode: false,
+    data: {
+      object: {
+        id: `cs_${randomUUID().replace(/-/g, "").slice(0, 16)}`,
+        payment_status: "paid",
+        amount_total: 100,
+        payment_intent: unpaid.providerPaymentIntentId,
+        metadata: { paymentId: String(unpaid._id) },
+      },
+    },
+  };
+  await WebhookEvent.create({
+    provider: "STRIPE",
+    eventId: orphanEvent.id,
+    type: orphanEvent.type,
+    status: "PROCESSING",
+  });
+
+  const concurrent = await deliver(orphanEvent);
+  check("a delivery arriving while another is genuinely in flight is dropped",
+    concurrent.duplicate === true, JSON.stringify(concurrent));
+
+  // Age the claim past the point where anyone could still be working on it.
+  await WebhookEvent.updateOne(
+    { eventId: orphanEvent.id },
+    { $set: { updatedAt: new Date(Date.now() - 10 * 60 * 1000) } },
+    { timestamps: false },
+  );
+  const reclaimed = await deliver(orphanEvent);
+  check("but a claim abandoned by a dead process IS reclaimed on redelivery",
+    reclaimed.duplicate !== true, JSON.stringify(reclaimed));
+
   await Payment.deleteOne({ _id: unpaid._id });
 
   // --- a late failure must not un-pay a settled payment
@@ -557,6 +649,72 @@ async function webhookTests() {
   const stillOnce = await Payment.findById(payment._id).lean();
   check("the same refund arriving again does not double-count",
     stillOnce.refundedCents === 3000 && stillOnce.refunds.length === 1);
+
+  // --- the modern shape of the same thing
+  //
+  // From Stripe's 2022-11-15 API version `charge.refunded` no longer arrives
+  // with its `refunds` list expanded, so the individual refund — and the id
+  // this application dedupes on — only appears on the `refund.*` events.
+  const unexpanded = await deliver({
+    id: `evt_${randomUUID().replace(/-/g, "").slice(0, 16)}`,
+    type: "charge.refunded",
+    livemode: false,
+    data: {
+      object: {
+        id: "ch_test_1",
+        payment_intent: payment.providerPaymentIntentId,
+        amount_refunded: 4500,
+        metadata: { paymentId: String(payment._id) },
+      },
+    },
+  });
+  check("an unexpanded charge.refunded is deferred to refund.* rather than silently ignored",
+    unexpanded.handled === false && /refund\.\*/.test(unexpanded.result ?? ""),
+    JSON.stringify(unexpanded));
+
+  const refundCreated = {
+    id: `evt_${randomUUID().replace(/-/g, "").slice(0, 16)}`,
+    type: "refund.created",
+    livemode: false,
+    data: {
+      object: {
+        id: "re_dash_2",
+        amount: 1500,
+        status: "succeeded",
+        payment_intent: payment.providerPaymentIntentId,
+        metadata: { policy: "Goodwill, agreed by support" },
+      },
+    },
+  };
+  await deliver(refundCreated);
+  const viaRefundEvent = await Payment.findById(payment._id).lean();
+  check("a dashboard refund delivered as refund.created IS reconciled",
+    viaRefundEvent.refundedCents === 4500 && viaRefundEvent.refunds.length === 2,
+    `${viaRefundEvent.refundedCents} / ${viaRefundEvent.refunds.length}`);
+  check("and the operator's own reason is kept, not Stripe's coarse enum",
+    viaRefundEvent.refunds.at(-1).reason === "Goodwill, agreed by support");
+
+  await deliver({ ...refundCreated, id: `evt_${randomUUID().replace(/-/g, "").slice(0, 16)}`, type: "refund.updated" });
+  const refundStillOnce = await Payment.findById(payment._id).lean();
+  check("the same refund seen again through refund.updated does not double-count",
+    refundStillOnce.refundedCents === 4500 && refundStillOnce.refunds.length === 2);
+
+  const pendingRefund = await deliver({
+    id: `evt_${randomUUID().replace(/-/g, "").slice(0, 16)}`,
+    type: "refund.created",
+    livemode: false,
+    data: {
+      object: {
+        id: "re_pending_1",
+        amount: 500,
+        status: "pending",
+        payment_intent: payment.providerPaymentIntentId,
+      },
+    },
+  });
+  check("a refund that has not succeeded yet is NOT counted as money returned",
+    pendingRefund.handled === false &&
+      (await Payment.findById(payment._id).lean()).refundedCents === 4500);
 
   // --- unknown events are acknowledged, not retried forever
   const unknown = await deliver({
@@ -1373,16 +1531,20 @@ async function meetingSelectionTests() {
 
 // --- 8. Storage ------------------------------------------------------------
 
-/** A `fetch` stand-in that also serves bytes back, which S3 GET needs. */
+/** A `fetch` stand-in that also serves bytes and headers back, which GET/HEAD need. */
 function stubBinaryFetch(handler) {
   const calls = [];
   const impl = async (url, options = {}) => {
     calls.push({ url: String(url), options });
     const result = await handler(String(url), options, calls.length - 1);
     const body = result.body ?? Buffer.alloc(0);
+    const headers = new Map(
+      Object.entries(result.headers ?? {}).map(([k, v]) => [k.toLowerCase(), String(v)]),
+    );
     return {
       ok: result.status ? result.status < 400 : true,
       status: result.status ?? 200,
+      headers: { get: (name) => headers.get(String(name).toLowerCase()) ?? null },
       arrayBuffer: async () => body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength),
       text: async () => result.text ?? "",
       json: async () => ({}),
@@ -1393,13 +1555,19 @@ function stubBinaryFetch(handler) {
 }
 
 async function storageTests() {
-  section("File storage — object storage, selection and privacy");
+  section("File storage — MinIO, selection and privacy");
 
-  const { S3StorageProvider, LocalStorageProvider, STORAGE_SCOPES, getStorageProvider, resetStorageProvider } =
-    await import("@/services/external/storage-provider");
-  const { signRequest } = await import("@/services/external/s3-storage");
+  const {
+    ObjectStorageProvider,
+    LocalStorageProvider,
+    STORAGE_SCOPES,
+    getStorageProvider,
+    resetStorageProvider,
+  } = await import("@/services/external/storage-provider");
+  const { signRequest } = await import("@/services/external/object-storage");
 
-  // --- SigV4 against AWS's own published test vector.
+  // --- SigV4 against AWS's own published test vector. MinIO implements the
+  //     same scheme, so reproducing AWS's vector proves the signer outright.
   const signed = signRequest({
     method: "GET",
     host: "examplebucket.s3.amazonaws.com",
@@ -1418,18 +1586,36 @@ async function storageTests() {
     signed.headers["x-amz-content-sha256"] ===
       "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
 
-  // --- round trip through the provider
+  // --- round trip through the provider, against a MinIO-shaped endpoint
   const stored = new Map();
   const fetchImpl = stubBinaryFetch((url, options) => {
     const key = new URL(url).pathname;
     if (options.method === "PUT") {
-      stored.set(key, Buffer.from(options.body));
-      return { status: 200 };
+      stored.set(key, {
+        body: Buffer.from(options.body),
+        contentType: options.headers["content-type"] ?? null,
+      });
+      return { status: 200, headers: { etag: '"abc123"' } };
     }
     if (options.method === "GET") {
       return stored.has(key)
-        ? { status: 200, body: stored.get(key) }
+        ? { status: 200, body: stored.get(key).body }
         : { status: 404, text: "<Error><Code>NoSuchKey</Code></Error>" };
+    }
+    if (options.method === "HEAD") {
+      if (key.endsWith("/")) return { status: 200 }; // HeadBucket
+      const hit = stored.get(key);
+      return hit
+        ? {
+            status: 200,
+            headers: {
+              "content-length": String(hit.body.length),
+              "content-type": hit.contentType,
+              etag: '"abc123"',
+              "last-modified": "Mon, 17 Sep 2026 00:00:00 GMT",
+            },
+          }
+        : { status: 404 };
     }
     if (options.method === "DELETE") {
       return { status: stored.delete(key) ? 204 : 404 };
@@ -1437,27 +1623,28 @@ async function storageTests() {
     return { status: 405 };
   });
 
-  const s3 = new S3StorageProvider({
+  const minio = new ObjectStorageProvider({
     bucket: "aplus-documents",
-    region: "ca-central-1",
-    accessKeyId: "AKIATEST",
-    secretAccessKey: "secret",
+    region: "us-east-1",
+    accessKeyId: "minioadmin",
+    secretAccessKey: "miniosecret",
+    endpoint: "https://wfss001.example.invalid",
     prefix: "prod",
     fetchImpl,
   });
 
   const pdf = Buffer.from("%PDF-1.4 a tutor's teaching certificate");
-  const put = await s3.put({
+  const put = await minio.put({
     buffer: pdf,
     fileName: "../../etc/passwd; DROP TABLE.pdf",
     contentType: "application/pdf",
     extension: ".pdf",
   });
 
-  check("an upload round-trips through the object store",
-    Buffer.compare(await s3.get({ storageKey: put.storageKey }), pdf) === 0);
+  check("an upload round-trips through MinIO",
+    Buffer.compare(await minio.get({ storageKey: put.storageKey }), pdf) === 0);
   check("the same bytes always produce the same checksum",
-    put.checksum === (await s3.put({ buffer: pdf, extension: ".pdf" })).checksum);
+    put.checksum === (await minio.put({ buffer: pdf, extension: ".pdf" })).checksum);
   check("the recorded size is the real byte length", put.sizeBytes === pdf.length);
 
   check("the uploader's filename is NOT trusted — the key is generated",
@@ -1466,24 +1653,47 @@ async function storageTests() {
     !put.storageKey.includes("passwd") && !put.storageKey.includes("..") && !put.storageKey.includes("/"));
 
   const putCall = fetchImpl.calls.find((c) => c.options.method === "PUT");
+  check("requests are addressed path-style, the way MinIO serves them",
+    putCall.url.startsWith("https://wfss001.example.invalid/aplus-documents/"), putCall.url);
   check("documents land under a scoped, prefixed path",
     putCall.url.includes("/aplus-documents/prod/documents/"), putCall.url);
   check("nothing is written into public/ — the object store has no web root",
     !putCall.url.includes("/public/"));
   check("no ACL is set, so the object inherits the bucket's private default",
     !Object.keys(putCall.options.headers).some((h) => h.toLowerCase().includes("acl")));
-  check("at-rest encryption is requested",
-    putCall.options.headers["x-amz-server-side-encryption"] === "AES256");
+  check("no per-object SSE header is sent by default — MinIO refuses it without a KMS",
+    !("x-amz-server-side-encryption" in putCall.options.headers));
   check("the request is signed and carries no credentials in the URL",
     putCall.options.headers.Authorization.startsWith("AWS4-HMAC-SHA256") &&
-      !putCall.url.includes("secret") &&
+      !putCall.url.includes("miniosecret") &&
       !putCall.url.includes("X-Amz-Signature"));
 
   check("the provider returns NO url — there is no object link to leak",
     !("url" in put) && !JSON.stringify(put).includes("http"));
 
+  // --- SSE stays available for stores that implement it
+  const encrypting = new ObjectStorageProvider({
+    bucket: "b", accessKeyId: "k", secretAccessKey: "s",
+    serverSideEncryption: "AES256",
+    fetchImpl: stubBinaryFetch(() => ({ status: 200 })),
+  });
+  await encrypting.put({ buffer: Buffer.from("x"), extension: ".pdf" });
+  check("at-rest encryption is requested when STORAGE_SSE names an algorithm",
+    encrypting.client.fetch.calls.at(-1).options.headers["x-amz-server-side-encryption"] === "AES256");
+
+  // --- metadata without transferring the bytes
+  const meta = await minio.head({ storageKey: put.storageKey });
+  check("metadata comes back from a HEAD, without the bytes",
+    meta.sizeBytes === pdf.length && meta.contentType === "application/pdf", JSON.stringify(meta));
+  check("HEAD on a missing object answers null rather than throwing",
+    (await minio.head({ storageKey: "does-not-exist.pdf" })) === null);
+
+  // --- the connection probe the admin panel and `storage check` use
+  check("a bucket probe proves reachability without reading an object",
+    (await minio.verify()).ok === true);
+
   // --- traversal through the *stored* key
-  const traversal = await throws(() => s3.get({ storageKey: "../../../branding/logo.png" }));
+  const traversal = await throws(() => minio.get({ storageKey: "../../../branding/logo.png" }));
   const traversalCall = fetchImpl.calls.at(-1);
   check("a storage key that tries to escape its scope is flattened, not followed",
     traversalCall.url.includes("/prod/documents/logo.png") && !traversalCall.url.includes(".."),
@@ -1491,7 +1701,7 @@ async function storageTests() {
   check("and it resolves to nothing rather than another scope's object", traversal.threw);
 
   // --- scopes are separate
-  const branding = await s3.put({
+  const branding = await minio.put({
     buffer: Buffer.from("PNG"),
     scope: STORAGE_SCOPES.BRANDING,
     contentType: "image/png",
@@ -1500,25 +1710,99 @@ async function storageTests() {
   check("branding uses the same provider, in its own scope",
     fetchImpl.calls.at(-1).url.includes("/prod/branding/"));
   check("a documents key cannot be read through the branding scope",
-    (await throws(() => s3.get({ storageKey: put.storageKey, scope: STORAGE_SCOPES.BRANDING }))).threw);
-  check("branding removal works through the same interface",
-    (await s3.remove({ storageKey: branding.storageKey, scope: STORAGE_SCOPES.BRANDING })).removed === true);
-  check("removing something already gone is not an error",
-    (await s3.remove({ storageKey: branding.storageKey, scope: STORAGE_SCOPES.BRANDING })).removed === false);
+    (await throws(() => minio.get({ storageKey: put.storageKey, scope: STORAGE_SCOPES.BRANDING }))).threw);
 
-  // --- provider failure surfaces safely
-  const broken = new S3StorageProvider({
-    bucket: "b", accessKeyId: "k", secretAccessKey: "s",
-    fetchImpl: stubBinaryFetch(() => ({ status: 500, text: "<Error>InternalError: node i-0abc in vpc-123</Error>" })),
+  // --- replacement is put-then-remove, which is what branding.service does
+  const replacement = await minio.put({
+    buffer: Buffer.from("PNG2"),
+    scope: STORAGE_SCOPES.BRANDING,
+    contentType: "image/png",
+    extension: ".png",
+  });
+  check("a replacement gets its own key rather than overwriting the old one",
+    replacement.storageKey !== branding.storageKey);
+  check("branding removal works through the same interface",
+    (await minio.remove({ storageKey: branding.storageKey, scope: STORAGE_SCOPES.BRANDING })).removed === true);
+  check("the replaced object is gone and the replacement is still readable",
+    (await minio.head({ storageKey: branding.storageKey, scope: STORAGE_SCOPES.BRANDING })) === null &&
+      Buffer.compare(
+        await minio.get({ storageKey: replacement.storageKey, scope: STORAGE_SCOPES.BRANDING }),
+        Buffer.from("PNG2"),
+      ) === 0);
+  check("removing something already gone is not an error",
+    (await minio.remove({ storageKey: branding.storageKey, scope: STORAGE_SCOPES.BRANDING })).removed === false);
+
+  // --- failure modes surface usefully and safely
+  const broken = new ObjectStorageProvider({
+    bucket: "b", accessKeyId: "AKIAEXPOSED", secretAccessKey: "s3cr3t",
+    fetchImpl: stubBinaryFetch(() => ({
+      status: 500,
+      text: "<Error>InternalError: node i-0abc in vpc-123, key AKIAEXPOSED</Error>",
+    })),
   });
   const failure = await throws(() => broken.get({ storageKey: "x.pdf" }));
   check("a provider failure throws a tagged storage error",
     failure.threw && failure.error.code === "STORAGE_PROVIDER_ERROR", failure.error?.message);
   check("the error message names no bucket internals to the caller",
     !failure.error.message.includes("vpc-123"), failure.error.message);
+  check("and the credential is redacted out of the detail kept for the log",
+    !String(failure.error.detail).includes("AKIAEXPOSED"), failure.error.detail);
+
+  const denied = new ObjectStorageProvider({
+    bucket: "b", accessKeyId: "k", secretAccessKey: "s",
+    fetchImpl: stubBinaryFetch(() => ({ status: 403, text: "<Error><Code>AccessDenied</Code></Error>" })),
+  });
+  const deniedResult = await throws(() => denied.verify());
+  check("bad credentials are reported as bad credentials, not as a missing file",
+    deniedResult.threw && /credentials are wrong or lack permission/.test(deniedResult.error.message),
+    deniedResult.error?.message);
+
+  const unimplemented = new ObjectStorageProvider({
+    bucket: "b", accessKeyId: "k", secretAccessKey: "s",
+    serverSideEncryption: "AES256",
+    fetchImpl: stubBinaryFetch(() => ({ status: 501, text: "<Error><Code>NotImplemented</Code></Error>" })),
+  });
+  const sseFailure = await throws(() => unimplemented.put({ buffer: Buffer.from("x"), extension: ".pdf" }));
+  check("a store that cannot encrypt per object says so, and names the setting",
+    sseFailure.threw && /STORAGE_SSE/.test(sseFailure.error.message), sseFailure.error?.message);
+
+  const unreachable = new ObjectStorageProvider({
+    bucket: "b", accessKeyId: "k", secretAccessKey: "s",
+    endpoint: "https://storage.invalid",
+    fetchImpl: async () => {
+      const error = new Error("getaddrinfo ENOTFOUND");
+      error.code = "ENOTFOUND";
+      throw error;
+    },
+  });
+  const network = await throws(() => unreachable.verify());
+  check("a network failure is tagged as a storage error rather than escaping raw",
+    network.threw && network.error.code === "STORAGE_PROVIDER_ERROR" && network.error.status === 502,
+    network.error?.message);
+
+  const slow = new ObjectStorageProvider({
+    bucket: "b", accessKeyId: "k", secretAccessKey: "s",
+    timeoutMs: 30,
+    // A store that never answers. The fallback timer is deliberately ref'd:
+    // `AbortSignal.timeout()` uses an unref'd one, which is right inside a
+    // live server but would let this script exit before the test resolved.
+    fetchImpl: (url, options) =>
+      new Promise((resolve, reject) => {
+        const fallback = setTimeout(() => resolve({ ok: true, status: 200 }), 3000);
+        options.signal?.addEventListener("abort", () => {
+          clearTimeout(fallback);
+          const error = new Error("aborted");
+          error.name = "TimeoutError";
+          reject(error);
+        });
+      }),
+  });
+  const timedOut = await throws(() => slow.verify());
+  check("a store that stops answering times out instead of holding the request open",
+    timedOut.threw && timedOut.error.status === 504, timedOut.error?.message);
 
   check("a provider built without credentials refuses to exist",
-    (await throws(() => new S3StorageProvider({ bucket: "b" }))).threw);
+    (await throws(() => new ObjectStorageProvider({ bucket: "b" }))).threw);
 
   // --- selection
   const withEnv = async (vars, fn) => {
@@ -1537,47 +1821,149 @@ async function storageTests() {
     }
   };
 
-  const S3_ENV = {
-    S3_BUCKET: "aplus-prod",
-    S3_ACCESS_KEY_ID: "AKIA",
-    S3_SECRET_ACCESS_KEY: "secret",
-    S3_REGION: "ca-central-1",
+  const MINIO_ENV = {
+    STORAGE_ENDPOINT: "https://wfss001.example.invalid",
+    STORAGE_BUCKET: "aplus-learn",
+    STORAGE_ACCESS_KEY: "minioadmin",
+    STORAGE_SECRET_KEY: "miniosecret",
+    STORAGE_REGION: "us-east-1",
   };
-  const NO_S3 = Object.fromEntries(Object.keys(S3_ENV).map((k) => [k, undefined]));
+  const NO_MINIO = Object.fromEntries(Object.keys(MINIO_ENV).map((k) => [k, undefined]));
 
-  await withEnv({ APP_ENV: "development", STORAGE_PROVIDER: undefined, ...NO_S3 }, () => {
+  await withEnv({ APP_ENV: "development", STORAGE_PROVIDER: undefined, ...NO_MINIO }, () => {
     check("development still works with no credentials at all",
       getStorageProvider() instanceof LocalStorageProvider);
   });
 
-  await withEnv({ APP_ENV: "development", STORAGE_PROVIDER: undefined, ...S3_ENV }, () => {
-    check("development auto-detects object storage once a bucket is configured",
-      getStorageProvider() instanceof S3StorageProvider);
+  await withEnv({ APP_ENV: "development", STORAGE_PROVIDER: undefined, ...MINIO_ENV }, () => {
+    check("development auto-detects MinIO once an endpoint and bucket are configured",
+      getStorageProvider() instanceof ObjectStorageProvider);
   });
 
-  await withEnv({ APP_ENV: "production", STORAGE_PROVIDER: "s3", ...S3_ENV }, () => {
-    check("production selects the object-storage provider",
-      getStorageProvider() instanceof S3StorageProvider);
+  await withEnv({ APP_ENV: "production", STORAGE_PROVIDER: "minio", ...MINIO_ENV }, () => {
+    const provider = getStorageProvider();
+    check("production selects MinIO and reports itself as such",
+      provider instanceof ObjectStorageProvider && provider.name === "MINIO");
+    check("the configured endpoint is the one requests go to",
+      provider.client.base.host === "wfss001.example.invalid");
+    check("path-style addressing is the default", provider.client.forcePathStyle === true);
   });
 
-  await withEnv({ APP_ENV: "production", STORAGE_PROVIDER: "development", ...NO_S3 }, () => {
+  await withEnv({ APP_ENV: "production", STORAGE_PROVIDER: "development", ...NO_MINIO }, () => {
     const failed = await$throws(() => getStorageProvider());
     check("production REFUSES the local filesystem — the R33 deployment break cannot recur",
       failed.threw && failed.error.code === "PROVIDER_MISCONFIGURED", failed.error?.message);
   });
 
-  await withEnv({ APP_ENV: "production", STORAGE_PROVIDER: undefined, ...NO_S3 }, () => {
+  await withEnv({ APP_ENV: "production", STORAGE_PROVIDER: undefined, ...NO_MINIO }, () => {
     const failed = await$throws(() => getStorageProvider());
     check("production never silently guesses a storage provider",
       failed.threw && failed.error.code === "PROVIDER_MISCONFIGURED");
   });
 
-  await withEnv({ APP_ENV: "production", STORAGE_PROVIDER: "s3", ...NO_S3 }, () => {
+  await withEnv({ APP_ENV: "production", STORAGE_PROVIDER: "minio", ...NO_MINIO }, () => {
     const failed = await$throws(() => getStorageProvider());
-    check("naming object storage without its bucket is a hard failure",
-      failed.threw && /S3_BUCKET/.test(failed.error.message), failed.error?.message);
+    check("naming MinIO without its bucket and endpoint is a hard failure",
+      failed.threw && /STORAGE_BUCKET/.test(failed.error.message), failed.error?.message);
   });
+
+  await withEnv({ APP_ENV: "production", STORAGE_PROVIDER: "s3", ...MINIO_ENV }, () => {
+    const failed = await$throws(() => getStorageProvider());
+    check("the retired `s3` selector is rejected by name rather than silently ignored",
+      failed.threw && /not a provider this build knows/.test(failed.error.message),
+      failed.error?.message);
+  });
+
+  await liveStorageTests();
 }
+
+/**
+ * The same provider, against the real MinIO server.
+ *
+ * Skipped unless STORAGE_* credentials are present, so the suite still runs
+ * offline; when they are, this is the only part of the storage story a stub
+ * cannot prove — that MinIO accepts exactly what this adapter sends it.
+ *
+ * Everything it writes, it deletes.
+ */
+async function liveStorageTests() {
+  section("File storage — live MinIO round trip");
+
+  if (!process.env.STORAGE_ENDPOINT || !process.env.STORAGE_BUCKET || !process.env.STORAGE_ACCESS_KEY) {
+    return skip("live MinIO round trip", "STORAGE_* credentials are not set");
+  }
+
+  const { ObjectStorageProvider, STORAGE_SCOPES } = await import(
+    "@/services/external/storage-provider"
+  );
+
+  const provider = new ObjectStorageProvider({
+    bucket: process.env.STORAGE_BUCKET,
+    region: process.env.STORAGE_REGION || "us-east-1",
+    accessKeyId: process.env.STORAGE_ACCESS_KEY,
+    secretAccessKey: process.env.STORAGE_SECRET_KEY,
+    sessionToken: process.env.STORAGE_SESSION_TOKEN || undefined,
+    endpoint: process.env.STORAGE_ENDPOINT,
+    prefix: process.env.STORAGE_PREFIX || "",
+    forcePathStyle: process.env.STORAGE_FORCE_PATH_STYLE !== "false",
+    serverSideEncryption: process.env.STORAGE_SSE || null,
+  });
+
+  try {
+    await provider.verify();
+    check("the bucket is reachable with the configured credentials", true);
+  } catch (error) {
+    check("the bucket is reachable with the configured credentials", false, error.message);
+    return;
+  }
+
+  const bytes = Buffer.from(`%PDF-1.4 live storage check ${randomUUID()}`);
+  let stored;
+
+  try {
+    stored = await provider.put({
+      buffer: bytes,
+      fileName: "live-check.pdf",
+      contentType: "application/pdf",
+      extension: ".pdf",
+    });
+    check("a verification document uploads to the real bucket", true);
+  } catch (error) {
+    check("a verification document uploads to the real bucket", false, error.message);
+    return;
+  }
+
+  try {
+    const readBack = await provider.get({ storageKey: stored.storageKey });
+    check("the same bytes come back, byte for byte", Buffer.compare(readBack, bytes) === 0);
+
+    const meta = await provider.head({ storageKey: stored.storageKey });
+    check("MinIO reports the size and content type we stored",
+      meta?.sizeBytes === bytes.length && meta?.contentType === "application/pdf",
+      JSON.stringify(meta));
+
+    const missing = await provider.head({ storageKey: `${randomUUID()}.pdf` });
+    check("a key that was never written reads as absent", missing === null);
+
+    const branding = await provider.put({
+      buffer: Buffer.from("\x89PNG\r\n\x1a\n live branding check"),
+      scope: STORAGE_SCOPES.BRANDING,
+      contentType: "image/png",
+      extension: ".png",
+    });
+    check("branding lands in its own scope and is separately readable",
+      (await provider.head({ storageKey: branding.storageKey, scope: STORAGE_SCOPES.BRANDING }))?.sizeBytes > 0);
+    check("a branding key is not reachable through the documents scope",
+      (await provider.head({ storageKey: branding.storageKey })) === null);
+
+    await provider.remove({ storageKey: branding.storageKey, scope: STORAGE_SCOPES.BRANDING });
+    check("deletion removes the object from the bucket",
+      (await provider.head({ storageKey: branding.storageKey, scope: STORAGE_SCOPES.BRANDING })) === null);
+  } finally {
+    await provider.remove({ storageKey: stored.storageKey }).catch(() => {});
+  }
+}
+
 
 // --- 9. The unpaid booking hold (R41) --------------------------------------
 
@@ -1802,6 +2188,95 @@ async function bookingHoldTests() {
       id: `evt_${randomUUID().replace(/-/g, "").slice(0, 16)}`,
       type, livemode: false, data: { object },
     });
+
+    // --- 7b. a payment that succeeded at Stripe but whose webhook was LOST
+    //
+    // The worst outcome this application has: the purchaser is charged, no
+    // event ever arrives, and the sweep releases the lesson they paid for.
+    // So the sweep asks the provider directly before doing anything
+    // irreversible. `readProviderStatus` is the injected seam standing in for
+    // that call — in production it is the Stripe API answering, never a
+    // browser.
+    const lostWebhook = await makeHold({
+      ageMinutes: CHECKOUT_HOLD.minutes + CHECKOUT_HOLD.graceMinutes + 5,
+    });
+    check("the lost-webhook booking looks exactly like an abandoned one",
+      shouldReleaseHold({ booking: lostWebhook.booking, payment: lostWebhook.payment }).expire === true);
+
+    const reconciled = await expireStaleBookings({
+      readProviderStatus: async (payment) => ({
+        paymentIntentId: payment.providerPaymentIntentId,
+        status: "PAID",
+        amountCents: payment.totalCents,
+      }),
+    });
+    check("a payment that is PAID at the provider is settled by the sweep, not released",
+      (await Payment.findById(lostWebhook.payment._id).lean()).status === "PAID",
+      JSON.stringify(reconciled));
+    check("its lesson is CONFIRMED rather than EXPIRED",
+      (await statusOf(lostWebhook.booking._id)) === BOOKING_STATUS.CONFIRMED);
+    check("and the slot stays blocked, because the lesson is real",
+      await slotIsBlocked(lostWebhook.booking.startAt));
+    check("the catch-up is audited as a reconciliation, distinguishable from a webhook",
+      Boolean(await AuditLog.findOne({
+        action: "PAYMENT_SETTLED",
+        entityId: lostWebhook.payment._id,
+        "metadata.source": "reconciliation",
+      })));
+
+    const reSweep = await expireStaleBookings({
+      readProviderStatus: async (payment) => ({
+        paymentIntentId: payment.providerPaymentIntentId,
+        status: "PAID",
+        amountCents: payment.totalCents,
+      }),
+    });
+    check("running the sweep again confirms nothing twice",
+      (await AuditLog.countDocuments({
+        action: "PAYMENT_SETTLED",
+        entityId: lostWebhook.payment._id,
+      })) === 1, JSON.stringify(reSweep));
+
+    // --- 7c. the provider cannot be reached
+    //
+    // A slot held ten minutes too long is recoverable. A paid lesson deleted
+    // because we guessed is not. So an unanswerable provider means the hold
+    // stays.
+    const unknowable = await makeHold({
+      ageMinutes: CHECKOUT_HOLD.minutes + CHECKOUT_HOLD.graceMinutes + 5,
+    });
+    const blindSweep = await expireStaleBookings({
+      readProviderStatus: async () => {
+        throw new Error("Stripe is unreachable");
+      },
+    });
+    check("a booking is NOT released while the provider cannot be asked",
+      (await statusOf(unknowable.booking._id)) === BOOKING_STATUS.PENDING_PAYMENT,
+      JSON.stringify(blindSweep));
+    check("the sweep reports it as held rather than expired", blindSweep.expired === 0);
+
+    // ...and is released on the next run, once the provider answers.
+    await expireStaleBookings({
+      readProviderStatus: async () => ({ status: "REQUIRES_PAYMENT" }),
+    });
+    check("once the provider confirms it was never paid, the slot IS released",
+      (await statusOf(unknowable.booking._id)) === BOOKING_STATUS.EXPIRED);
+
+    // --- 7d. a provider that reports a DIFFERENT amount is never settled
+    const mismatched = await makeHold({
+      ageMinutes: CHECKOUT_HOLD.minutes + CHECKOUT_HOLD.graceMinutes + 5,
+    });
+    await expireStaleBookings({
+      readProviderStatus: async (payment) => ({
+        paymentIntentId: payment.providerPaymentIntentId,
+        status: "PAID",
+        amountCents: 1,
+      }),
+    });
+    check("a provider amount that disagrees with the priced total settles NOTHING",
+      (await Payment.findById(mismatched.payment._id).lean()).status === "REQUIRES_PAYMENT");
+    check("and the hold is kept for a human rather than released on a discrepancy",
+      (await statusOf(mismatched.booking._id)) === BOOKING_STATUS.PENDING_PAYMENT);
 
     // 8. checkout.session.expired
     const abandoned = await makeHold({ ageMinutes: 5 });

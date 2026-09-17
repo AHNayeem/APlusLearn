@@ -22,7 +22,7 @@ to one factory.
 | OAuth | `DevOAuthProvider` | **Google**, **Apple** — OIDC ID tokens | `OAUTH_PROVIDER` |
 | Geocoding | `LocalTableGeocodingProvider` | **Google Geocoding API** | `GEOCODING_PROVIDER` |
 | Meeting links | `MockMeetingProvider` | **Zoom**, **Google Meet**, **Microsoft Teams** — any combination | `MEETING_PROVIDER` |
-| File storage | `LocalStorageProvider` | **S3-compatible object storage** | `STORAGE_PROVIDER` |
+| File storage | `LocalStorageProvider` | **MinIO** — S3-compatible object storage | `STORAGE_PROVIDER` |
 
 ## How a provider is chosen
 
@@ -88,8 +88,15 @@ The key's own prefix decides live vs test mode — `APP_ENV` never does. Each
 
 | Endpoint | Events |
 |---|---|
-| `POST https://<domain>/api/webhooks/payments` | `checkout.session.completed`, `checkout.session.expired`, `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed`, `payment_intent.succeeded`, `payment_intent.payment_failed`, `charge.succeeded`, `charge.refunded`, `payout.paid`, `payout.failed` |
-| `POST https://<domain>/api/webhooks/payments?connect=1` | `account.updated`, `transfer.created`, `transfer.reversed` |
+| `POST https://<domain>/api/webhooks/payments` | `checkout.session.completed`, `checkout.session.expired`, `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed`, `payment_intent.succeeded`, `payment_intent.payment_failed`, `charge.succeeded`, `refund.created`, `refund.updated` |
+| `POST https://<domain>/api/webhooks/payments?connect=1` | `account.updated`, `transfer.created`, `transfer.reversed`, `payout.paid`, `payout.failed` |
+
+`refund.created` / `refund.updated` are what reconcile a refund issued from
+Stripe's own dashboard. `charge.refunded` is still accepted, but from Stripe's
+2022-11-15 API version it no longer arrives with its `refunds` list expanded,
+so it no longer carries the refund id this application dedupes on — the
+handler says so explicitly rather than reporting "already known" and losing
+the refund.
 
 **A booking is confirmed only by a verified webhook.** The browser returning
 from Stripe lands on `/bookings/checkout/<id>/complete`, which shows a waiting
@@ -107,6 +114,37 @@ Processing guarantees, in [`webhook.service.js`](../src/services/webhook.service
   late `payment_intent.payment_failed` cannot un-pay a settled payment.
 - **Amount-checked** — an event whose amount disagrees with the priced total
   is refused outright.
+- **Retryable** — a delivery that *failed* is reprocessed when Stripe
+  redelivers it. A duplicate is only dropped once the first attempt actually
+  succeeded; otherwise a one-minute Mongo blip would wedge that event forever,
+  because the redelivery is the recovery mechanism. Re-claiming is safe
+  precisely because the handlers assert state rather than transition it.
+
+### When the webhook never arrives
+
+A webhook can be lost: an endpoint that was down, a forwarder that was not
+running, a signing secret rotated mid-flight. Unreconciled, that is the worst
+outcome this application has — the purchaser is charged, no event arrives, and
+the `booking-expiry` sweep releases the lesson they paid for.
+
+So before releasing any hold, `expireStaleBookings()` asks Stripe directly
+what happened to each unpaid payment
+(`providerPaymentStatus()` → `paymentIntents.retrieve`). This is still the
+backend as the source of truth — it is Stripe's API answering, not a browser:
+
+| Stripe says | What happens |
+|---|---|
+| paid | settled and the lessons confirmed, exactly as the webhook would have, audited with `source: "reconciliation"` |
+| not paid | the slot is released as normal |
+| cannot be asked | **the hold is kept** and retried next run |
+
+The last row is the important one. A slot held ten minutes too long is
+recoverable; a paid lesson deleted because we guessed is not. An amount that
+disagrees with the priced total also settles nothing and keeps the hold, for a
+human to look at.
+
+The development provider has no remote state and is never consulted — its
+`getPaymentStatus()` refuses rather than returning a fabricated success.
 
 ### Stripe dashboard setup
 
@@ -122,8 +160,26 @@ Processing guarantees, in [`webhook.service.js`](../src/services/webhook.service
 ### Testing
 
 Stripe test mode: `4242 4242 4242 4242` succeeds, `4000 0000 0000 0002` is
-declined, `4000 0025 0000 3155` requires 3-D Secure. Replay webhooks locally
-with `stripe listen --forward-to localhost:3000/api/webhooks/payments`.
+declined, `4000 0025 0000 3155` requires 3-D Secure.
+
+```bash
+# 1. test keys in .env.local — the key's prefix decides the mode, not APP_ENV
+PAYMENT_PROVIDER=stripe
+STRIPE_SECRET_KEY=sk_test_…
+
+# 2. forward Stripe's real deliveries to the dev server, and copy the
+#    whsec_… it prints into STRIPE_WEBHOOK_SECRET before restarting
+stripe listen --forward-to localhost:3000/api/webhooks/payments
+
+# 3. replay a specific event to exercise a handler, or the same event twice
+#    to prove idempotency
+stripe trigger checkout.session.completed
+stripe events resend evt_…
+```
+
+**No publishable key is required.** Checkout is hosted by Stripe and the
+purchaser is redirected to it, so no Stripe code runs in the browser and there
+is no client-side key to expose.
 
 ---
 
@@ -432,32 +488,60 @@ quotes are stripped from it, because it is later echoed in a
 The admin retrieval route answers with `nosniff`, a `sandbox` content-security
 policy and `no-store`.
 
-### Object storage
+### MinIO
 
 ```
-STORAGE_PROVIDER=s3
-S3_BUCKET=aplus-learn-prod
-S3_ACCESS_KEY_ID=…
-S3_SECRET_ACCESS_KEY=…
-S3_REGION=ca-central-1        # "auto" for Cloudflare R2
-S3_ENDPOINT=                  # unset for Amazon; the service URL otherwise
-S3_PREFIX=prod                # one bucket, several environments
-S3_FORCE_PATH_STYLE=true
+STORAGE_PROVIDER=minio
+STORAGE_ENDPOINT=https://minio.example.com   # the S3 API root, not the console
+STORAGE_BUCKET=aplus-learn
+STORAGE_ACCESS_KEY=…
+STORAGE_SECRET_KEY=…
+STORAGE_REGION=us-east-1      # MinIO's default
+STORAGE_PREFIX=prod           # one bucket, several environments
+STORAGE_FORCE_PATH_STYLE=true # MinIO serves path-style
+STORAGE_SSE=                  # leave unset for MinIO — see below
+STORAGE_TIMEOUT_MS=20000
 ```
 
-`S3StorageProvider` speaks the S3 API directly — SigV4 signed with
-`node:crypto`, no SDK — so it runs unchanged against Amazon S3, Cloudflare R2,
-Backblaze B2, DigitalOcean Spaces and MinIO. Adding tens of megabytes of SDK
-to the server bundle for three operations would be the same trade
-`lib/images/inspect.js` already declines.
+`ObjectStorageProvider` speaks the S3 API directly — SigV4 signed with
+`node:crypto`, no SDK — so the same adapter runs unchanged against MinIO,
+Amazon S3, Cloudflare R2, Backblaze B2 and DigitalOcean Spaces. Adding tens of
+megabytes of SDK to the server bundle for four operations would be the same
+trade `lib/images/inspect.js` already declines. The SigV4 implementation is
+tested against AWS's own published signature vector, which MinIO implements
+identically.
+
+**`STORAGE_SSE` must stay unset on MinIO.** MinIO answers `NotImplemented` to
+a per-object `x-amz-server-side-encryption` header unless a KMS is configured,
+which would fail every upload. Encrypt at the bucket or volume level instead.
+On Amazon S3, set it to `AES256`.
 
 **The bucket must be private, and no configuration makes it otherwise.**
-Nothing in the application hands out an object URL: both scopes are fetched
-server-side and streamed through a route that has already authorised the
-caller, so there is no signed link to leak, expire badly or forward. The
-provider sets no ACL, requests `AES256` at rest, and generates every key as a
-UUID under its scope prefix. Grant the credentials `s3:GetObject`,
-`s3:PutObject` and `s3:DeleteObject` on `<bucket>/<prefix>/*` and nothing else.
+Nothing in the application hands out an object URL, and **there is no
+presigned-URL code path** — deliberately. A signed link is a bearer token for
+a file: it can be forwarded, logged by an intermediary, and used after the
+session that minted it has ended. Both scopes are instead fetched server-side
+and streamed through a route that has already authorised the caller, which is
+strictly stronger and is the model every consumer of the interface is written
+against. The provider sets no ACL and generates every key as a UUID under its
+scope prefix. Grant the credentials `GetObject`, `PutObject` and
+`DeleteObject` on `<bucket>/<prefix>/*` and nothing else.
+
+### Verifying the configuration
+
+```bash
+bun run storage:check              # credentials open the bucket
+bun run storage:check --roundtrip  # and a file survives put → get → head → delete
+```
+
+The check reads the same `STORAGE_*` variables the application does, prints
+the endpoint, bucket, prefix and addressing mode, and never prints a
+credential. Failures are named rather than generic: a 403 says the credentials
+are wrong or under-permissioned, a 404 distinguishes a missing object from a
+missing bucket, a 501 names `STORAGE_SSE`, and a DNS or TLS failure is tagged
+as a storage error with the endpoint host rather than escaping raw. Anything
+the store echoes back has the access key and secret redacted out of it before
+it reaches a log.
 
 **`STORAGE_PROVIDER=development` is refused when `APP_ENV=production.`** A
 serverless filesystem does not survive the request that wrote to it, so a
@@ -466,16 +550,22 @@ loses it. Failing to start is the better outcome, and is what happens.
 
 ### Migrating an existing deployment
 
-The stored `storageKey` is just the object's filename, so nothing in the
-database changes. Copy the files across, keeping the names exactly:
+`storageKey` in the database is the object's *filename* — never a URL, never a
+bucket, never a path — so moving between providers changes nothing in Mongo.
 
 ```bash
-aws s3 sync .storage/documents "s3://$S3_BUCKET/$S3_PREFIX/documents"
-aws s3 sync .storage/branding  "s3://$S3_BUCKET/$S3_PREFIX/branding"
+bun run storage:migrate --dry-run   # list what would be copied
+bun run storage:migrate             # copy .storage/** into the bucket
 ```
 
-Then set `STORAGE_PROVIDER=s3` and the credentials. Nothing is deleted from
-`.storage/` by this application; remove it yourself once the copy is verified.
+Filenames are preserved exactly, because they are the keys the database
+already holds. Objects already present are skipped, so the command is safe to
+re-run. The content type is re-derived from the bytes on the way in, exactly
+as the upload path does it, rather than guessed from the extension. Nothing is
+deleted from `.storage/` — set `STORAGE_PROVIDER=minio`, restart, confirm a
+document opens under **Admin → Verification**, and remove the directory
+yourself once you are satisfied.
+
 
 ---
 

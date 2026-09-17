@@ -29,7 +29,17 @@ import { recordAudit } from "./audit.service";
  *   ordered-ish events arrive out of order, so each handler is written as a
  *               state assertion rather than a state transition — a late
  *               failure never un-pays a settled payment.
+ *   retryable   a delivery that *failed*, or one whose process died holding
+ *               the claim, is reprocessed when the provider redelivers it.
+ *               Idempotency must not swallow the recovery mechanism.
  */
+
+/**
+ * How long a claim may sit in PROCESSING before another delivery may take it
+ * over. The provider gives up on its own request in seconds, so anything
+ * still "in progress" after this did not survive to finish.
+ */
+const STUCK_AFTER_MS = 5 * 60 * 1000;
 
 /**
  * Verify, claim and process one webhook delivery.
@@ -59,14 +69,51 @@ export async function handlePaymentWebhook({ payload, signature, connect = false
       status: "PROCESSING",
     });
   } catch (error) {
-    if (error?.code === 11000) {
+    if (error?.code !== 11000) throw error;
+
+    // Already seen. Whether that means "stop" depends on how the first
+    // attempt ended.
+    //
+    // A delivery that FAILED must be retryable, or a transient fault — a
+    // Mongo blip, a meeting provider that was down for a minute — would
+    // wedge that event permanently: the route answers 500, the provider
+    // redelivers as designed, and the redelivery gets swallowed here as a
+    // duplicate. The redelivery is the recovery mechanism; dropping it
+    // throws it away.
+    //
+    // Re-claiming is safe precisely because every handler below is a state
+    // assertion rather than a transition — `markPaymentPaid` no-ops on an
+    // already-paid payment, `confirmBookings` on an already-confirmed
+    // booking. The conditional update is the lock, so of two simultaneous
+    // retries only one gets the row.
+    // A row left in PROCESSING is reclaimed on the same reasoning, but only
+    // once it is old enough to be certain nobody is still working on it. The
+    // provider abandons its own request in well under a minute, so a handler
+    // that has been "in progress" for `STUCK_AFTER_MS` did not finish — the
+    // process was killed, redeployed or scaled away mid-event — and without
+    // this it would hold the claim forever and every redelivery would be
+    // dropped as a duplicate.
+    record = await WebhookEvent.findOneAndUpdate(
+      {
+        provider: provider.name,
+        eventId: event.id,
+        $or: [
+          { status: "FAILED" },
+          { status: "PROCESSING", updatedAt: { $lte: new Date(Date.now() - STUCK_AFTER_MS) } },
+        ],
+      },
+      { $set: { status: "PROCESSING" }, $inc: { attempts: 1 } },
+      { returnDocument: "after" },
+    );
+
+    if (!record) {
+      // PROCESSED, IGNORED, or being worked on by another delivery right now.
       await WebhookEvent.updateOne(
         { provider: provider.name, eventId: event.id },
         { $inc: { attempts: 1 } },
       );
       return { received: true, duplicate: true, type: event.type };
     }
-    throw error;
   }
 
   // 3. Processing.
@@ -129,6 +176,16 @@ async function dispatch(event) {
       return describeCard(object);
 
     // Covers refunds issued from the provider's own dashboard as well as ours.
+    //
+    // Both shapes are handled because the provider changed which one carries
+    // the detail. `charge.refunded` used to arrive with its `refunds` list
+    // expanded; from Stripe's 2022-11-15 API version it does not, so the
+    // individual refund — and therefore the id this application dedupes on —
+    // only appears on the `refund.*` events.
+    case "refund.created":
+    case "refund.updated":
+      return recordOneRefund(object);
+
     case "charge.refunded":
       return reconcileRefund(object);
 
@@ -392,13 +449,53 @@ function brandLabel(brand) {
   return labels[brand] ?? "Card";
 }
 
+/**
+ * One refund, from a `refund.*` event.
+ *
+ * `providerRefundId` is the idempotency key inside `recordProviderRefund`, so
+ * a refund this application issued itself is already known and records
+ * nothing — and the same event arriving three times records it once.
+ */
+async function recordOneRefund(refund) {
+  if (refund.status && refund.status !== "succeeded") {
+    return { handled: false, result: `refund ${refund.status}` };
+  }
+
+  const payment = await resolvePayment(refund);
+  if (!payment) return { handled: false, result: "no matching payment" };
+
+  const { changed } = await recordProviderRefund(payment._id, {
+    providerRefundId: refund.id,
+    amountCents: refund.amount,
+    reason: refund.metadata?.policy ?? "Refunded at the payment provider",
+  });
+
+  return {
+    handled: true,
+    paymentId: payment._id,
+    providerObjectId: refund.id,
+    result: changed ? "refund recorded" : "refund already known",
+  };
+}
+
 /** Bring our refund ledger in line with the provider's. */
 async function reconcileRefund(charge) {
   const payment = await resolvePayment(charge);
   if (!payment) return { handled: false, result: "no matching payment" };
   const paymentId = payment._id;
 
-  const refunds = charge.refunds?.data ?? [];
+  const refunds = charge.refunds?.data;
+  if (!refunds) {
+    // Unexpanded, as modern API versions send it. The `refund.*` events
+    // carry the detail; there is nothing to reconcile from here.
+    return {
+      handled: false,
+      paymentId,
+      providerObjectId: charge.id,
+      result: "charge carries no expanded refunds; handled by refund.* instead",
+    };
+  }
+
   let applied = 0;
 
   for (const refund of refunds) {

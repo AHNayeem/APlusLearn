@@ -51,7 +51,12 @@ import { isSlotBookable } from "@/lib/booking/slots";
 import { getSettings } from "./settings.service";
 import { getMeetingProvider } from "./external/meeting-provider";
 import { brandedEmailTemplates } from "./external/email-provider";
-import { createPaymentForBooking, refundPayment } from "./payment.service";
+import {
+  createPaymentForBooking,
+  refundPayment,
+  providerPaymentStatus,
+  markPaymentPaid,
+} from "./payment.service";
 import { notify } from "./notification.service";
 import { recordAudit } from "./audit.service";
 import { refreshNextAvailable } from "./availability.service";
@@ -442,8 +447,17 @@ export async function confirmBookings(paymentId, { meetingProvider } = {}) {
  * @param {number}  [options.limit]  Ceiling on one sweep, so a backlog is
  *                                   worked through over several runs instead
  *                                   of in one very long request.
+ * @param {Function} [options.readProviderStatus]  How the payment provider is
+ *                                   asked what really happened. Injected by
+ *                                   tests, which must be able to make the
+ *                                   provider say "paid" or fall over without
+ *                                   an account at Stripe.
  */
-export async function expireStaleBookings({ now = new Date(), limit = 500 } = {}) {
+export async function expireStaleBookings({
+  now = new Date(),
+  limit = 500,
+  readProviderStatus = providerPaymentStatus,
+} = {}) {
   const settings = await getSettings();
 
   // Nothing created inside the shortest possible hold can be stale, so the
@@ -464,10 +478,18 @@ export async function expireStaleBookings({ now = new Date(), limit = 500 } = {}
   const paymentIds = [...new Set(candidates.filter((b) => b.paymentId).map((b) => String(b.paymentId)))];
   const payments = paymentIds.length
     ? await Payment.find({ _id: { $in: paymentIds } })
-        .select("_id status checkoutExpiresAt providerCheckoutUrl")
+        .select("_id status checkoutExpiresAt providerCheckoutUrl provider providerCheckoutId providerPaymentIntentId totalCents")
         .lean()
     : [];
   const paymentById = new Map(payments.map((p) => [String(p._id), p]));
+
+  // Before releasing anything, ask the provider what actually happened to
+  // each unpaid payment. A webhook can be lost, and the only outcome worse
+  // than a slot held too long is a paid lesson deleted because the event
+  // never arrived. `unreconciled` holds the payments we could not get an
+  // answer for; their bookings are kept for the next sweep rather than
+  // released on a guess.
+  const unreconciled = await reconcileUnpaidPayments(payments, paymentById, readProviderStatus);
 
   let expired = 0;
   let held = 0;
@@ -476,6 +498,14 @@ export async function expireStaleBookings({ now = new Date(), limit = 500 } = {}
 
   for (const booking of candidates) {
     const payment = booking.paymentId ? paymentById.get(String(booking.paymentId)) : null;
+
+    // The provider could not be asked, so we do not know whether this was
+    // paid. Keep the hold and try again on the next run.
+    if (payment && unreconciled.has(String(payment._id))) {
+      held += 1;
+      continue;
+    }
+
     const verdict = shouldReleaseHold({ booking, payment, settings, now });
     if (!verdict.expire) {
       held += 1;
@@ -503,6 +533,83 @@ export async function expireStaleBookings({ now = new Date(), limit = 500 } = {}
   await Promise.all([...tutorProfileIds].map((id) => refreshNextAvailable(id)));
 
   return { examined: candidates.length, expired, held, payments: paymentsClosed };
+}
+
+/**
+ * Catch up on payments whose confirming webhook never arrived (§20, §38).
+ *
+ * Called by the sweep above, on exactly the payments it is about to release
+ * lessons for. For each one the provider's own API is asked what happened —
+ * not a browser, not a redirect, the provider — and the answer is applied:
+ *
+ *   PAID    settle it and confirm its bookings, the same way the webhook
+ *           would have. `markPaymentPaid` is a no-op if a webhook has since
+ *           landed, so a race between the two settles once.
+ *   FAILED  leave it; the sweep releases the slot as it already would.
+ *   unknown keep the hold. We are about to do something irreversible and we
+ *           could not establish that the purchaser was not charged.
+ *
+ * The development provider has no remote state and is never asked;
+ * `providerPaymentStatus()` returns null for it.
+ *
+ * @returns {Promise<Set<string>>} ids of payments whose state could not be
+ *   established, whose bookings must therefore be left alone.
+ */
+async function reconcileUnpaidPayments(payments, paymentById, readProviderStatus) {
+  const unreconciled = new Set();
+
+  for (const payment of payments) {
+    if (payment.status !== PAYMENT_STATUS.REQUIRES_PAYMENT && payment.status !== PAYMENT_STATUS.PROCESSING) {
+      continue;
+    }
+
+    let remote;
+    try {
+      remote = await readProviderStatus(payment);
+    } catch (error) {
+      // A provider outage must not turn into deleted lessons.
+      console.warn(
+        `[booking-expiry] could not reconcile payment ${payment._id} with the provider: ${error.message}`,
+      );
+      unreconciled.add(String(payment._id));
+      continue;
+    }
+
+    // Nothing to ask (development provider, or no session was ever opened).
+    if (!remote) continue;
+
+    if (remote.status !== "PAID") continue;
+
+    try {
+      const { changed } = await markPaymentPaid(payment._id, {
+        paidAt: new Date(),
+        paymentIntentId: remote.paymentIntentId,
+        amountCents: remote.amountCents,
+      });
+      if (changed) {
+        await confirmBookings(payment._id);
+        await recordAudit({
+          actor: { role: "SYSTEM" },
+          action: AUDIT_ACTIONS.PAYMENT_SETTLED,
+          entityType: "Payment",
+          entityId: payment._id,
+          metadata: { source: "reconciliation", amountCents: remote.amountCents },
+        });
+      }
+      // Either way the money is in: the sweep must not touch these lessons.
+      paymentById.set(String(payment._id), { ...payment, status: PAYMENT_STATUS.PAID });
+    } catch (error) {
+      // An amount mismatch lands here, and is exactly the case where doing
+      // nothing automatically is right. It is audited by `markPaymentPaid`'s
+      // own error and the hold is kept for a human to look at.
+      console.error(
+        `[booking-expiry] payment ${payment._id} is paid at the provider but could not be settled: ${error.message}`,
+      );
+      unreconciled.add(String(payment._id));
+    }
+  }
+
+  return unreconciled;
 }
 
 /**

@@ -128,8 +128,20 @@ export class MockPaymentProvider extends PaymentProvider {
     };
   }
 
-  async getPaymentStatus({ paymentIntentId }) {
-    return { paymentIntentId, status: "PAID" };
+  /**
+   * There is nothing to read back. The development flow settles in-app, in
+   * `capturePayment` above, so the Payment record is already the only and
+   * authoritative account of what happened — there is no remote state to
+   * reconcile against. Answering "PAID" here would be a fake success: it
+   * would tell a caller a payment had gone through without anything having
+   * examined a payment. So it refuses instead, and every caller reaches it
+   * only through `confirmsByWebhook`, which is false for this provider.
+   */
+  async getPaymentStatus() {
+    throw new AppError(
+      "The development payment provider keeps no remote state to read back.",
+      { status: 503, code: "NOT_CONFIGURED" },
+    );
   }
 
   async processRefund({ paymentIntentId, amountCents, reason }) {
