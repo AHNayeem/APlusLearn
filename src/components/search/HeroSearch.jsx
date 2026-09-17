@@ -52,11 +52,11 @@ export function HeroSearch({ provinces = [], grades = [], subjects = [], classNa
     <form
       onSubmit={submit}
       className={cn(
-        "relative rounded-3xl border border-white/10 bg-white/[0.06] p-2.5 sm:p-3",
+        "relative rounded-3xl border border-ink-200/70 bg-white/75 p-2.5 sm:p-3",
         "backdrop-blur-2xl",
         // Two shadows doing different jobs: the inset hairline is the glass
-        // edge catching light, the cast shadow lifts the console off the grid.
-        "shadow-[inset_0_1px_0_0_rgb(255_255_255/0.12),0_40px_90px_-30px_rgb(2_6_23/0.95)]",
+        // edge catching light, the cast shadow lifts the console off the page.
+        "shadow-[inset_0_1px_0_0_rgb(255_255_255/0.95),0_36px_80px_-32px_rgb(15_23_42/0.45)]",
         className,
       )}
       role="search"
@@ -65,7 +65,7 @@ export function HeroSearch({ provinces = [], grades = [], subjects = [], classNa
       {/* A faint bloom bleeding out from under the panel. */}
       <div
         aria-hidden="true"
-        className="pointer-events-none absolute -inset-x-8 -bottom-8 -z-10 h-24 rounded-full bg-brand-500/25 blur-3xl"
+        className="pointer-events-none absolute -inset-x-8 -bottom-8 -z-10 h-24 rounded-full bg-brand-300/45 blur-3xl"
       />
 
       <CourseAutocomplete
@@ -77,7 +77,7 @@ export function HeroSearch({ provinces = [], grades = [], subjects = [], classNa
 
       {/* gap-px over a light background paints the hairlines between cells, so
           the four refinements read as one instrument. */}
-      <div className="mt-2.5 grid grid-cols-2 gap-px overflow-hidden rounded-2xl bg-white/10 lg:grid-cols-4">
+      <div className="mt-2.5 grid grid-cols-2 gap-px overflow-hidden rounded-2xl border border-ink-200/70 bg-ink-200 lg:grid-cols-4">
         <ConsoleSelect
           icon={Map}
           label="Province"
@@ -144,12 +144,12 @@ export function HeroSearch({ provinces = [], grades = [], subjects = [], classNa
         <SubmitButton />
       </div>
 
-      <p className="mt-3 px-1.5 pb-0.5 text-center text-xs text-white/45 sm:text-left">
+      <p className="mt-3 px-1.5 pb-0.5 text-center text-xs text-ink-500 sm:text-left">
         No account needed to search. Try a course code like{" "}
         <button
           type="button"
           onClick={() => setQuery("MHF4U")}
-          className="font-semibold text-brand-200 underline-offset-2 transition-colors hover:text-white hover:underline"
+          className="font-semibold text-brand-600 underline-offset-2 transition-colors hover:text-brand-800 hover:underline"
         >
           MHF4U
         </button>{" "}
@@ -202,16 +202,16 @@ function ConsoleSelect({ icon: Icon, label, children, ...props }) {
   return (
     <div
       className={cn(
-        "group relative flex items-center gap-2.5 bg-night-soft/85 px-3 py-2.5 sm:gap-3 sm:px-4",
-        "transition-colors duration-200 hover:bg-white/[0.07]",
-        "focus-within:bg-white/[0.09]",
+        "group relative flex items-center gap-2.5 bg-white/85 px-3 py-2.5 sm:gap-3 sm:px-4",
+        "transition-colors duration-200 hover:bg-white",
+        "focus-within:bg-brand-50/70",
       )}
     >
-      <Icon className="hidden size-4 shrink-0 text-brand-300 min-[420px]:block" aria-hidden="true" />
+      <Icon className="hidden size-4 shrink-0 text-brand-600 min-[420px]:block" aria-hidden="true" />
       <span className="min-w-0 flex-1">
         <label
           htmlFor={id}
-          className="block text-[10px] font-bold uppercase tracking-[0.14em] text-white/40"
+          className="block text-[10px] font-bold uppercase tracking-[0.14em] text-ink-400"
         >
           {label}
         </label>
@@ -219,9 +219,7 @@ function ConsoleSelect({ icon: Icon, label, children, ...props }) {
           id={id}
           className={cn(
             "-ml-0.5 w-full cursor-pointer appearance-none truncate rounded bg-transparent",
-            "pl-0.5 pr-1 text-sm font-semibold text-white outline-none",
-            // Gives the native option list a dark popup to match the console.
-            "[color-scheme:dark]",
+            "pl-0.5 pr-1 text-sm font-semibold text-ink-900 outline-none",
           )}
           {...props}
         >
@@ -229,7 +227,7 @@ function ConsoleSelect({ icon: Icon, label, children, ...props }) {
         </select>
       </span>
       <ChevronDown
-        className="size-4 shrink-0 text-white/35 transition-colors group-hover:text-white/70"
+        className="size-4 shrink-0 text-ink-400 transition-colors group-hover:text-ink-600"
         aria-hidden="true"
       />
     </div>
@@ -243,24 +241,24 @@ function ConsoleInput({ icon: Icon, label, className, ...props }) {
   return (
     <div
       className={cn(
-        "flex flex-1 items-center gap-3 rounded-2xl border border-white/10 bg-night-soft/85 px-4 py-2",
-        "transition-colors duration-200 focus-within:border-white/25 focus-within:bg-white/[0.09]",
+        "flex flex-1 items-center gap-3 rounded-2xl border border-ink-200 bg-white/85 px-4 py-2",
+        "transition-colors duration-200 focus-within:border-brand-300 focus-within:bg-white",
         className,
       )}
     >
-      <Icon className="size-4 shrink-0 text-brand-300" aria-hidden="true" />
+      <Icon className="size-4 shrink-0 text-brand-600" aria-hidden="true" />
       <span className="min-w-0 flex-1">
         <label
           htmlFor={id}
-          className="block text-[10px] font-bold uppercase tracking-[0.14em] text-white/40"
+          className="block text-[10px] font-bold uppercase tracking-[0.14em] text-ink-400"
         >
           {label}
         </label>
         <input
           id={id}
           className={cn(
-            "w-full bg-transparent text-sm font-semibold text-white outline-none",
-            "placeholder:font-normal placeholder:text-white/35",
+            "w-full bg-transparent text-sm font-semibold text-ink-900 outline-none",
+            "placeholder:font-normal placeholder:text-ink-400",
           )}
           {...props}
         />
@@ -342,7 +340,7 @@ function CourseAutocomplete({ value, onChange, province, onPick }) {
   return (
     <div ref={containerRef} className="relative">
       <Search
-        className="pointer-events-none absolute left-5 top-1/2 size-5 -translate-y-1/2 text-brand-300"
+        className="pointer-events-none absolute left-5 top-1/2 size-5 -translate-y-1/2 text-brand-500"
         aria-hidden="true"
       />
       <label className="sr-only" htmlFor="hero-course">Course, course code or subject</label>
@@ -363,11 +361,11 @@ function CourseAutocomplete({ value, onChange, province, onPick }) {
         aria-autocomplete="list"
         aria-activedescendant={highlighted >= 0 ? `hero-course-${highlighted}` : undefined}
         className={cn(
-          "h-[3.75rem] w-full rounded-2xl border border-white/10 bg-night-soft/85 pl-14 pr-5 sm:pr-24",
-          "text-base font-semibold text-white outline-none",
-          "placeholder:font-normal placeholder:text-white/40",
+          "h-[3.75rem] w-full rounded-2xl border border-ink-200 bg-white pl-14 pr-5 sm:pr-24",
+          "text-base font-semibold text-ink-900 outline-none",
+          "placeholder:font-normal placeholder:text-ink-400",
           "transition-colors duration-200",
-          "hover:border-white/20 focus:border-brand-400/60 focus:bg-white/[0.09]",
+          "hover:border-ink-300 focus:border-brand-400 focus:bg-white",
           "focus:ring-4 focus:ring-brand-500/15",
         )}
       />
@@ -377,14 +375,14 @@ function CourseAutocomplete({ value, onChange, province, onPick }) {
       {!loading && value.trim().length > 0 && (
         <kbd
           aria-hidden="true"
-          className="pointer-events-none absolute right-4 top-1/2 hidden -translate-y-1/2 items-center gap-1 rounded-md border border-white/15 bg-white/[0.08] px-2 py-1 text-[10px] font-semibold text-white/50 sm:flex"
+          className="pointer-events-none absolute right-4 top-1/2 hidden -translate-y-1/2 items-center gap-1 rounded-md border border-ink-200 bg-ink-50 px-2 py-1 text-[10px] font-semibold text-ink-500 sm:flex"
         >
           <CornerDownLeft className="size-3" />
           Enter
         </kbd>
       )}
       {loading && (
-        <Loader2 className="absolute right-5 top-1/2 size-4 -translate-y-1/2 animate-spin text-brand-300" />
+        <Loader2 className="absolute right-5 top-1/2 size-4 -translate-y-1/2 animate-spin text-brand-500" />
       )}
 
       {open && (
@@ -396,8 +394,8 @@ function CourseAutocomplete({ value, onChange, province, onPick }) {
             "absolute inset-x-0 top-full z-30 mt-2 max-h-80 overflow-y-auto rounded-2xl p-1.5",
             // Opaque, not glass: the list sits over the console's own controls
             // and anything showing through reads as a rendering fault.
-            "border border-white/10 bg-night-soft",
-            "shadow-[0_30px_60px_-20px_rgb(2_6_23/0.95)]",
+            "border border-ink-200 bg-white",
+            "shadow-[0_30px_60px_-22px_rgb(15_23_42/0.45)]",
           )}
         >
           {results.map((item, index) => (
@@ -414,15 +412,15 @@ function CourseAutocomplete({ value, onChange, province, onPick }) {
                 }}
                 className={cn(
                   "flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition-colors",
-                  index === highlighted ? "bg-white/10" : "hover:bg-white/[0.06]",
+                  index === highlighted ? "bg-brand-50" : "hover:bg-ink-50",
                 )}
               >
                 <span
                   className={cn(
                     "flex size-8 shrink-0 items-center justify-center rounded-lg ring-1 ring-inset",
                     item.type === "COURSE"
-                      ? "bg-brand-500/15 text-brand-200 ring-brand-400/25"
-                      : "bg-accent-500/15 text-accent-300 ring-accent-400/25",
+                      ? "bg-brand-50 text-brand-600 ring-brand-100"
+                      : "bg-accent-50 text-accent-700 ring-accent-200",
                   )}
                 >
                   {item.type === "COURSE" ? (
@@ -432,10 +430,10 @@ function CourseAutocomplete({ value, onChange, province, onPick }) {
                   )}
                 </span>
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate text-sm font-semibold text-white">
+                  <span className="block truncate text-sm font-semibold text-ink-900">
                     {item.label}
                   </span>
-                  <span className="block truncate text-xs text-white/45">{item.sublabel}</span>
+                  <span className="block truncate text-xs text-ink-500">{item.sublabel}</span>
                 </span>
               </button>
             </li>
