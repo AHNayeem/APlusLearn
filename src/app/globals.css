@@ -137,6 +137,10 @@
   --animate-drift-b: drift-b 26s var(--ease-in-out-quart) infinite;
   --animate-halo: halo 2.6s cubic-bezier(0, 0, 0.2, 1) infinite;
   --animate-sheen: sheen 5s var(--ease-in-out-quart) infinite;
+
+  /* The testimonial rail. Slow enough to read a card as it passes, and long
+     enough that a full pass is never the thing you are watching. */
+  --animate-marquee: marquee 52s linear infinite;
 }
 
 @keyframes fade-up {
@@ -183,6 +187,78 @@
 @keyframes sheen {
   0%        { transform: translateX(-150%) skewX(-20deg); }
   45%, 100% { transform: translateX(450%) skewX(-20deg); }
+}
+
+/* --------------------------------------------------------------------------
+   Testimonial rail (§12)
+   -------------------------------------------------------------------------- */
+
+/**
+ * The track holds the reviews twice and travels exactly half its width, so it
+ * arrives back where it started and the seam never lands anywhere you can see
+ * it. The space between cards is a margin on each card rather than a flex gap
+ * on the track: with a gap, half the track is half a gap short of one full set
+ * and the loop jumps on every pass.
+ *
+ * Deliberately unlayered rather than a `@utility`, so the reduced-motion rules
+ * below outrank anything Tailwind emits for this element.
+ */
+@keyframes marquee {
+  from { transform: translate3d(0, 0, 0); }
+  to   { transform: translate3d(-50%, 0, 0); }
+}
+
+.marquee-rail {
+  overflow: hidden;
+  /* Narrower on a phone, where 4rem either side would fade most of the one
+     card you can actually see. */
+  mask-image: linear-gradient(
+    to right,
+    transparent,
+    #000 1.5rem,
+    #000 calc(100% - 1.5rem),
+    transparent
+  );
+}
+
+@media (min-width: 640px) {
+  .marquee-rail {
+    mask-image: linear-gradient(
+      to right,
+      transparent,
+      #000 4rem,
+      #000 calc(100% - 4rem),
+      transparent
+    );
+  }
+}
+
+.marquee-track {
+  display: flex;
+  width: max-content;
+  animation: var(--animate-marquee);
+}
+
+/* A quote that slides out from under you mid-sentence is worse than no motion
+   at all, so pointing at the rail, tabbing into it, or pressing the pause
+   button all stop it. */
+.marquee-rail:hover .marquee-track,
+.marquee-rail:focus-within .marquee-track,
+.marquee-rail.is-paused .marquee-track {
+  animation-play-state: paused;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* The global reset below already stops the animation. On its own that would
+     leave the reviews past the first screenful unreachable, so the rail turns
+     into an ordinary scroller and the duplicate set — which exists only to
+     close the loop — is dropped. */
+  .marquee-rail {
+    overflow-x: auto;
+    mask-image: none;
+  }
+  .marquee-track { animation: none; }
+  .marquee-clone { display: none; }
 }
 
 /* --------------------------------------------------------------------------

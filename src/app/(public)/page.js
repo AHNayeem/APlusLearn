@@ -39,7 +39,7 @@ export default async function HomePage() {
       getSettings(),
       Review.find({ status: REVIEW_STATUS.PUBLISHED, body: { $exists: true } })
         .sort({ rating: -1, createdAt: -1 })
-        .limit(6)
+        .limit(24)
         .populate("authorId", "firstName lastName")
         .lean(),
       TutorProfile.aggregate([
@@ -57,7 +57,14 @@ export default async function HomePage() {
       featuredTutors({ limit: 4 }),
     ]);
 
-  const testimonials = toPlain(reviews).map((review) => ({
+  // The homepage rail shows quotes shoulder to shoulder, where two families
+  // praising a tutor in the same words reads as a rendering bug rather than as
+  // agreement. One card per distinct review, then the first eight.
+  const distinctReviews = [
+    ...new Map(toPlain(reviews).map((review) => [review.body.trim(), review])).values(),
+  ].slice(0, 8);
+
+  const testimonials = distinctReviews.map((review) => ({
     id: review.id,
     rating: review.rating,
     title: review.title,

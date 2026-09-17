@@ -92,7 +92,7 @@ Verified on a clean database: `npm run seed` → `npx eslint src scripts` (clean
 |---|---|---|
 | Hero search: province, grade, subject, course, code, mode, location | `src/components/search/HeroSearch.jsx` | Implemented |
 | Search without an account | `/find-a-tutor` is public; QA asserts anonymous search works | Implemented |
-| All 12 required sections | `src/components/home/Sections.jsx` + `Hero`, `FeaturedTutors`; centred section headers with the shared wave ornament (`Section`), illustrated steps via `StepCards` and the shared `StepArt` scene kit, which also draws the online / in-person pair; verification is one divided ledger panel and grades one K-12 ladder rather than ragged card grids | Implemented |
+| All 12 required sections | `src/components/home/Sections.jsx` + `Hero`, `FeaturedTutors`; centred section headers with the shared wave ornament (`Section`), illustrated steps via `StepCards` and the shared `StepArt` scene kit, which also draws the online / in-person pair; verification is one divided ledger panel and grades one K-12 ladder rather than ragged card grids; popular course cards are tinted by the code's discipline letter and link by `courseCode`, falling back to `course` + `grade` slugs for the codeless elementary courses; testimonials run as a self-scrolling rail (`TestimonialRail`) that pauses on hover, focus and an explicit button | Implemented |
 | Primary CTAs | "Find a tutor" / "Become a tutor" in hero, header and footer | Implemented |
 
 ## 13. Canadian curriculum
@@ -368,7 +368,7 @@ taking a page down.
 |---|---|---|
 | Subtle animation across 13 surfaces | `Reveal`/`RevealGroup`, `motion` transitions on modals, tabs, toasts, dropdowns | Implemented |
 | Fast and purposeful, not childish | 150–250ms, `ease-out-quint`, no bounce or parallax | Implemented |
-| `prefers-reduced-motion` | Global CSS override + `useReducedMotion()` in motion components | Implemented |
+| `prefers-reduced-motion` | Global CSS override + `useReducedMotion()` in motion components; the testimonial rail drops its duplicate set and becomes a plain horizontal scroller | Implemented |
 
 ## 32. Loading / error / empty states
 

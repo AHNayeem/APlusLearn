@@ -1,13 +1,14 @@
 import Link from "next/link";
 import * as Icons from "lucide-react";
 import {
-  ShieldCheck, Video, MapPin, Wallet, Clock, BadgeCheck, ArrowRight, Check, Quote,
-  IdCard, Stamp, GraduationCap, School,
+  ShieldCheck, Video, MapPin, Wallet, Clock, BadgeCheck, ArrowRight, Check,
+  IdCard, Stamp, GraduationCap, School, X,
 } from "lucide-react";
 import { cn } from "@/lib/utils/cn";
-import { Badge, Button, Rating, Reveal, RevealGroup, RevealItem } from "@/components/ui";
+import { Badge, Button, Reveal, RevealGroup, RevealItem } from "@/components/ui";
 import { StepCards } from "@/components/home/StepCards";
 import { StepArt } from "@/components/home/StepArt";
+import { TestimonialRail } from "@/components/home/TestimonialRail";
 import { formatRate, formatNumber } from "@/lib/utils/format";
 import { VERIFICATION_LABELS, VERIFICATION_DESCRIPTIONS, VERIFICATION_TYPES } from "@/constants";
 
@@ -244,6 +245,38 @@ function toneClasses(key) {
 
 // --- Popular Ontario courses (§12) -----------------------------------------
 
+/**
+ * Cards are tinted by the code's opening letter, because in Ontario's system
+ * that letter *is* the discipline — M mathematics, E English, S science,
+ * F French, B business, I computer studies. The section's whole argument is
+ * that the code carries meaning, so the only thing allowed to colour a card is
+ * the part of it that does — which is also why the palette goes quiet when the
+ * popular list happens to be mostly maths, rather than inventing difference.
+ * Computer studies borrows the ink tone the subjects section already gives it.
+ * Codeless elementary courses fall back to brand.
+ */
+const CODE_TONES = {
+  M: { rule: "bg-brand-600", code: "text-brand-700", chip: "bg-brand-50 text-brand-700 ring-brand-100" },
+  E: { rule: "bg-accent-500", code: "text-accent-700", chip: "bg-accent-50 text-accent-700 ring-accent-100" },
+  S: { rule: "bg-success-600", code: "text-success-700", chip: "bg-success-50 text-success-700 ring-success-100" },
+  F: { rule: "bg-plum-600", code: "text-plum-700", chip: "bg-plum-50 text-plum-700 ring-plum-100" },
+  I: { rule: "bg-ink-700", code: "text-ink-700", chip: "bg-ink-100 text-ink-700 ring-ink-200" },
+  B: { rule: "bg-warning-600", code: "text-warning-700", chip: "bg-warning-50 text-warning-700 ring-warning-100" },
+};
+
+/**
+ * The five characters of an Ontario code, split the way the ministry defines
+ * them. Shown coming apart rather than described, because "a code maps to
+ * exactly one curriculum" stays an abstract claim until you watch MHF4U do it.
+ * The diagram is `aria-hidden` — read aloud it is just letters — and the line
+ * underneath carries the same information in prose.
+ */
+const CODE_ANATOMY = [
+  { chars: "MHF", label: "Course" },
+  { chars: "4", label: "Grade" },
+  { chars: "U", label: "Pathway" },
+];
+
 export function PopularCourses({ courses = [] }) {
   if (!courses.length) return null;
 
@@ -251,7 +284,7 @@ export function PopularCourses({ courses = [] }) {
     <Section
       eyebrow="Popular Ontario courses"
       title="Search by course code, the way report cards do"
-      description="Ontario course codes map to exactly one curriculum. Searching MHF4U finds tutors who have taught that course — not just “senior math”."
+      description="A report card hands you MHF4U, not “senior math”. Search the code and you get tutors who have taught that exact course."
       tone="muted"
       action={
         <Button href="/courses" variant="secondary" iconRight={<ArrowRight className="size-4" />}>
@@ -259,34 +292,122 @@ export function PopularCourses({ courses = [] }) {
         </Button>
       }
     >
-      <RevealGroup className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {courses.map((course) => (
-          <RevealItem key={course.id}>
-            <Link
-              href={`/find-a-tutor?courseCode=${course.code}&province=ON`}
-              className="group flex h-full items-start gap-4 rounded-2xl border border-ink-200 bg-canvas p-5 transition-all duration-200 hover:-translate-y-0.5 hover:border-brand-300 hover:shadow-lg motion-reduce:hover:translate-y-0"
-            >
-              <span className="flex size-12 shrink-0 items-center justify-center rounded-xl bg-brand-600 text-[11px] font-black tracking-tight text-white">
-                {course.code ?? "ON"}
-              </span>
-              <span className="min-w-0 flex-1">
-                <span className="block text-sm font-bold text-ink-900 group-hover:text-brand-700">
-                  {course.name}
-                </span>
-                <span className="mt-0.5 block text-xs text-ink-500">
-                  Grade {course.gradeLevel} · {course.stream}
-                </span>
-                {course.tutorCount > 0 && (
-                  <span className="mt-2 inline-flex items-center gap-1 text-xs font-semibold text-success-700">
-                    <span className="size-1.5 rounded-full bg-success-500" />
-                    {course.tutorCount} {course.tutorCount === 1 ? "tutor" : "tutors"} available
-                  </span>
+      <RevealGroup className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+        {courses.map((course) => {
+          const tone = CODE_TONES[course.code?.[0]] ?? CODE_TONES.M;
+          // Elementary courses carry no code, so they resolve by slug instead —
+          // narrowed by grade, because a slug is only unique within one.
+          const href = course.code
+            ? `/find-a-tutor?courseCode=${course.code}&province=ON`
+            : `/find-a-tutor?course=${course.slug}&grade=${course.gradeSlug}&province=ON`;
+
+          return (
+            <RevealItem key={course.id} className="h-full">
+              <Link
+                href={href}
+                className={cn(
+                  "group flex h-full flex-col overflow-hidden rounded-2xl border border-ink-200 bg-canvas",
+                  "transition duration-300 ease-out",
+                  "hover:-translate-y-1 hover:border-brand-200 hover:bg-white hover:shadow-xl",
+                  "motion-reduce:transition-none motion-reduce:hover:translate-y-0",
                 )}
-              </span>
-            </Link>
-          </RevealItem>
-        ))}
+              >
+                <span className={cn("block h-1.5 w-full", tone.rule)} aria-hidden="true" />
+
+                <span className="flex flex-1 flex-col p-5 sm:p-6">
+                  <span
+                    className={cn(
+                      "block font-extrabold tracking-tight",
+                      course.code ? "text-[1.7rem] leading-none" : "text-lg leading-snug",
+                      tone.code,
+                    )}
+                  >
+                    {course.code ?? course.name}
+                  </span>
+
+                  {course.code && (
+                    <span className="mt-2 block text-sm font-bold text-ink-900 transition-colors group-hover:text-brand-700">
+                      {course.name}
+                    </span>
+                  )}
+
+                  <span
+                    className={cn(
+                      "mt-3 inline-flex w-fit items-center rounded-sm px-2 py-1 ring-1 ring-inset",
+                      "text-[11px] font-bold uppercase tracking-[0.08em]",
+                      tone.chip,
+                    )}
+                  >
+                    Grade {course.gradeLevel} · {course.stream}
+                  </span>
+
+                  {course.description && (
+                    <span className="mt-4 line-clamp-2 text-xs leading-relaxed text-ink-500">
+                      {course.description}
+                    </span>
+                  )}
+
+                  <span className="mt-auto pt-5">
+                    <span className="flex items-center justify-between gap-3 border-t border-ink-200/70 pt-4">
+                      {course.tutorCount > 0 ? (
+                        <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-success-700">
+                          <span className="size-1.5 rounded-full bg-success-500" aria-hidden="true" />
+                          {formatNumber(course.tutorCount)}{" "}
+                          {course.tutorCount === 1 ? "tutor" : "tutors"} available
+                        </span>
+                      ) : (
+                        <span className="text-xs font-semibold text-ink-400">Browse tutors</span>
+                      )}
+                      <ArrowRight
+                        className="size-4 shrink-0 text-ink-300 transition duration-200 group-hover:translate-x-0.5 group-hover:text-brand-600 motion-reduce:group-hover:translate-x-0"
+                        aria-hidden="true"
+                      />
+                    </span>
+                  </span>
+                </span>
+              </Link>
+            </RevealItem>
+          );
+        })}
       </RevealGroup>
+
+      <Reveal className="mt-10 lg:mt-12">
+        <div className="mx-auto max-w-2xl rounded-2xl border border-ink-200 bg-canvas px-6 py-7 text-center sm:px-8">
+          <p className="text-xs font-bold uppercase tracking-[0.14em] text-ink-400">
+            How an Ontario code reads
+          </p>
+
+          <div className="mt-5 flex items-start justify-center gap-4 sm:gap-6" aria-hidden="true">
+            {CODE_ANATOMY.map(({ chars, label }) => (
+              <span key={label} className="flex flex-col items-center">
+                <span className="flex gap-1.5">
+                  {[...chars].map((char, index) => (
+                    <span
+                      key={`${label}-${index}`}
+                      className={cn(
+                        "flex size-10 items-center justify-center rounded-sm bg-white",
+                        "text-lg font-extrabold text-ink-900 shadow-xs ring-1 ring-ink-200",
+                        "sm:size-11 sm:text-xl",
+                      )}
+                    >
+                      {char}
+                    </span>
+                  ))}
+                </span>
+                <span className="mt-2 h-2 w-full border-x border-b border-ink-200" />
+                <span className="mt-2 text-[10px] font-bold uppercase tracking-[0.12em] text-brand-600">
+                  {label}
+                </span>
+              </span>
+            ))}
+          </div>
+
+          <p className="mx-auto mt-5 max-w-md text-xs leading-relaxed text-ink-500">
+            Three letters for the course, one digit for the grade, one for the pathway. MHF4U is
+            Grade 12 university-level Advanced Functions — and nothing else answers to it.
+          </p>
+        </div>
+      </Reveal>
     </Section>
   );
 }
@@ -416,26 +537,44 @@ export function TutorsByGrade({ grades = [] }) {
 
 // --- Why choose APlus Learn (§12) ------------------------------------------
 
+/**
+ * The four arguments, each hung on the frustration it answers (§12).
+ *
+ * The heading promises parents who have been burned before, so each card
+ * names the burn first — in grey, struck through with a small cross — and
+ * only then makes the claim. Without that, the four cards restate the
+ * verification and payment sections that sit either side of this one.
+ * Each reason carries its own colour family so four cards do not read as one
+ * repeated thing.
+ */
 const REASONS = [
   {
     icon: BadgeCheck,
-    title: "Verified before they're visible",
-    body: "Every tutor's ID is checked and their credentials confirmed before their profile appears in search. Teaching certificates are verified against the Ontario College of Teachers register.",
+    friction: "Anyone can print “qualified tutor” on a listing.",
+    title: "Checked before you can find them",
+    body: "A profile only reaches search once its ID and credentials are confirmed — teaching certificates against the Ontario College of Teachers register.",
+    tint: "bg-brand-50 text-brand-600",
   },
   {
     icon: Wallet,
-    title: "One transparent price",
-    body: "The hourly rate you see is what you pay. Our commission comes out of the tutor's side, and it's shown to them plainly. No registration fees, no minimum packages.",
+    friction: "Agency fees you discover at checkout.",
+    title: "The rate on the profile is the rate you pay",
+    body: "No registration fee, no minimum package, nothing added at the end. Our commission comes out of the tutor's side, and it is shown to them plainly.",
+    tint: "bg-accent-50 text-accent-600",
   },
   {
     icon: ShieldCheck,
-    title: "Your money is protected",
+    friction: "Paying up front and hoping for the best.",
+    title: "Your money waits until the lesson has happened",
     body: "Payment is held until the lesson is complete. Free cancellation up to 24 hours before, and a full refund if a tutor doesn't show.",
+    tint: "bg-success-50 text-success-600",
   },
   {
     icon: Clock,
-    title: "Real availability, not phone tag",
-    body: "Tutors keep their calendars current. You book a slot that's genuinely free — no waiting two days to find out they're busy.",
+    friction: "Three messages just to find a time that works.",
+    title: "You book a slot, not a conversation",
+    body: "Tutors keep their calendars current, so the slot you pick is genuinely free. No waiting two days to hear that Tuesday is no good after all.",
+    tint: "bg-plum-50 text-plum-600",
   },
 ];
 
@@ -444,20 +583,38 @@ export function WhyChoose() {
     <Section
       eyebrow="Why APlus Learn"
       title="Built for parents who've been burned by tutoring before"
+      description="Four things that usually go wrong with tutoring — and what we changed so they don't."
       tone="muted"
     >
       <RevealGroup className="grid gap-6 md:grid-cols-2">
-        {REASONS.map((reason) => (
-          <RevealItem key={reason.title}>
-            <div className="flex h-full gap-4 rounded-2xl border border-ink-200 bg-canvas p-6">
-              <span className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-brand-100 text-brand-600">
-                <reason.icon className="size-5" />
-              </span>
-              <div className="min-w-0">
-                <h3 className="text-base font-bold text-ink-900">{reason.title}</h3>
-                <p className="mt-2 text-sm leading-relaxed text-ink-500">{reason.body}</p>
+        {REASONS.map(({ icon: ReasonIcon, friction, title, body, tint }) => (
+          <RevealItem key={title} className="h-full">
+            <article
+              className={cn(
+                "group flex h-full flex-col overflow-hidden rounded-2xl border border-ink-200/80 bg-white",
+                "shadow-sm transition duration-300 ease-out",
+                "hover:-translate-y-1 hover:border-brand-200 hover:shadow-xl",
+                "motion-reduce:transition-none motion-reduce:hover:translate-y-0",
+              )}
+            >
+              <p className="flex items-center gap-2.5 border-b border-ink-100 bg-canvas px-6 py-4 text-[13px] text-ink-500">
+                {/* <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-ink-200 text-ink-600">
+                  <X className="size-3" strokeWidth={3.2} aria-hidden="true" />
+                </span> */}
+                {/* line-through */}
+                <span className=" decoration-ink-300">{friction}</span>
+              </p>
+
+              <div className="flex flex-1 flex-col gap-4 p-6 sm:flex-row sm:gap-5 sm:p-7">
+                <span className={cn("flex size-12 shrink-0 items-center justify-center rounded-2xl", tint)}>
+                  <ReasonIcon className="size-5.5" aria-hidden="true" />
+                </span>
+                <div className="min-w-0">
+                  <h3 className="text-base font-bold tracking-tight text-ink-900">{title}</h3>
+                  <p className="mt-2 text-sm leading-relaxed text-ink-500">{body}</p>
+                </div>
               </div>
-            </div>
+            </article>
           </RevealItem>
         ))}
       </RevealGroup>
@@ -735,32 +892,9 @@ export function Testimonials({ reviews = [] }) {
       title="Reviews you can trust, because they're tied to real lessons"
       description="Only a family who booked and completed a lesson can leave a review. There is no way to buy one."
     >
-      <RevealGroup className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
-        {reviews.slice(0, 6).map((review) => (
-          <RevealItem key={review.id}>
-            <figure className="flex h-full flex-col rounded-2xl border border-ink-200 bg-white p-6">
-              <Quote className="size-6 text-brand-200" aria-hidden="true" />
-              <Rating value={review.rating} showValue={false} className="mt-3" />
-              {review.title && (
-                <figcaption className="mt-3 text-sm font-bold text-ink-900">
-                  {review.title}
-                </figcaption>
-              )}
-              <blockquote className="mt-2 flex-1 text-sm leading-relaxed text-ink-600">
-                “{review.body}”
-              </blockquote>
-              <div className="mt-5 flex items-center gap-2 border-t border-ink-100 pt-4 text-xs">
-                <span className="font-semibold text-ink-700">{review.authorName}</span>
-                <span className="text-ink-300">·</span>
-                <span className="text-ink-500">{review.courseCode ?? review.courseName}</span>
-                <Badge tone="success" size="sm" className="ml-auto">
-                  Verified
-                </Badge>
-              </div>
-            </figure>
-          </RevealItem>
-        ))}
-      </RevealGroup>
+      <Reveal>
+        <TestimonialRail reviews={reviews} />
+      </Reveal>
     </Section>
   );
 }
