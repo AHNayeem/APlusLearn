@@ -144,7 +144,27 @@ export function VerificationQueue({ records }) {
   );
 }
 
+/**
+ * Nothing pending means nothing to render. The form lives in its own
+ * component so it never has to cope with a null decision: reading
+ * `decision.record` below the guard is still a dependency the compiler
+ * evaluates above it.
+ */
 function DecisionModal({ decision, onClose }) {
+  if (!decision) return null;
+
+  return (
+    <DecisionForm
+      // Remounting per decision clears the fields between records.
+      key={`${decision.record.id}:${decision.status}`}
+      record={decision.record}
+      status={decision.status}
+      onClose={onClose}
+    />
+  );
+}
+
+function DecisionForm({ record, status, onClose }) {
   const router = useRouter();
   const toast = useToast();
   const [note, setNote] = useState("");
@@ -152,11 +172,11 @@ function DecisionModal({ decision, onClose }) {
   const [expiresAt, setExpiresAt] = useState("");
   const today = useToday();
 
-  const isApprove = decision?.status === "APPROVED";
+  const isApprove = status === "APPROVED";
 
   const { submit, pending, error, fieldErrors } = useSubmit(async () => {
-    await api.post(`/api/admin/verification/${decision.record.id}`, {
-      status: decision.status,
+    await api.post(`/api/admin/verification/${record.id}`, {
+      status,
       note: note || undefined,
       referenceNumber: referenceNumber || undefined,
       expiresAt: expiresAt ? new Date(expiresAt).toISOString() : undefined,
@@ -166,17 +186,12 @@ function DecisionModal({ decision, onClose }) {
       "The tutor has been notified.",
     );
     onClose();
-    setNote("");
-    setReferenceNumber("");
-    setExpiresAt("");
     router.refresh();
   });
 
-  if (!decision) return null;
-
   const titles = {
-    APPROVED: `Approve ${decision.record.label}`,
-    REJECTED: `Reject ${decision.record.label}`,
+    APPROVED: `Approve ${record.label}`,
+    REJECTED: `Reject ${record.label}`,
     INFO_REQUESTED: "Request more information",
   };
 
@@ -184,7 +199,7 @@ function DecisionModal({ decision, onClose }) {
     <Modal
       open
       onClose={onClose}
-      title={titles[decision.status]}
+      title={titles[status]}
       description={
         isApprove
           ? "The badge appears on their profile immediately and families can filter by it."
@@ -196,7 +211,7 @@ function DecisionModal({ decision, onClose }) {
             Cancel
           </Button>
           <Button
-            variant={decision.status === "REJECTED" ? "danger" : "primary"}
+            variant={status === "REJECTED" ? "danger" : "primary"}
             onClick={submit}
             loading={pending}
             disabled={!isApprove && note.trim().length < 5}

@@ -377,6 +377,7 @@ taking a page down.
 | Loading, skeleton, empty, error, success, retry | `src/components/ui/States.jsx` | Implemented |
 | All 8 named empty states | Every list renders a purpose-written `EmptyState` | Implemented |
 | Never a blank screen | `loading.js`, `error.js`, `not-found.js` at the app root | Implemented |
+| 404 inherits one header | `NotFoundBody` is headerless; each chromed segment (`(public)`, `(dashboard)`, `admin`, `tutor`) has its own `not-found.js`, so a `notFound()` never stacks a second header under the layout's | Implemented |
 | Empty states suggest a next action | Search empty state proposes which filter to relax | Implemented |
 
 ## 33–34. Responsive & accessible
