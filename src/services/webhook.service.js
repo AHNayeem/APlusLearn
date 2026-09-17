@@ -7,7 +7,8 @@ import {
   markPaymentFailed,
   recordProviderRefund,
 } from "./payment.service";
-import { confirmBookings } from "./booking.service";
+import { confirmBookings, releaseBookingsForFailedPayment } from "./booking.service";
+import { failureReleasesHold } from "@/lib/booking/policy";
 import { applyAccountState, payoutAccountByProviderId } from "./payout.service";
 import { recordAudit } from "./audit.service";
 
@@ -153,11 +154,17 @@ async function dispatch(event) {
  * was created — with the provider's identifiers as the fallback for objects
  * that do not carry it.
  */
+const PAYMENT_FIELDS = "_id status providerCheckoutId providerPaymentIntentId providerCheckoutUrl checkoutExpiresAt";
+
 async function resolvePayment(object) {
   const metadataId = object.metadata?.paymentId;
   if (metadataId) {
-    const byMetadata = await Payment.findById(metadataId).select("_id").lean();
-    if (byMetadata) return byMetadata._id;
+    // Metadata is attacker-influenced in principle, so it is treated as a
+    // *lookup key* and never as an assertion: whatever comes back must still
+    // agree with the provider identifiers on the event itself, checked by
+    // `eventMatchesPayment()` in the handlers that act destructively.
+    const byMetadata = await Payment.findById(metadataId).select(PAYMENT_FIELDS).lean();
+    if (byMetadata) return byMetadata;
   }
 
   const candidates = [
@@ -168,16 +175,52 @@ async function resolvePayment(object) {
   ].filter(Boolean);
 
   for (const query of candidates) {
-    const hit = await Payment.findOne(query).select("_id").lean();
-    if (hit) return hit._id;
+    const hit = await Payment.findOne(query).select(PAYMENT_FIELDS).lean();
+    if (hit) return hit;
   }
   return null;
 }
 
+/**
+ * Does this event actually belong to this payment?
+ *
+ * Only the destructive handlers ask. A `paymentId` in metadata is enough to
+ * *find* a payment, but not enough to expire its bookings: without this check
+ * anyone who could get one signed event delivered — a replay from a test
+ * account, a session created against a different payment — could name someone
+ * else's payment in metadata and have their lessons released.
+ *
+ * The event must carry at least one provider identifier we already stored
+ * against that payment.
+ */
+function eventMatchesPayment(object, payment) {
+  const presented = new Set(
+    [
+      object.id,
+      idOf(object.payment_intent),
+      idOf(object.checkout_session),
+      idOf(object.latest_charge),
+    ].filter(Boolean),
+  );
+
+  return [payment.providerCheckoutId, payment.providerPaymentIntentId]
+    .filter(Boolean)
+    .some((known) => presented.has(known));
+}
+
 /** Settle a payment and confirm its bookings. Safe to run twice. */
 async function settle(object, { paymentIntentId, amountCents }) {
-  const paymentId = await resolvePayment(object);
-  if (!paymentId) return { handled: false, result: "no matching payment" };
+  const payment = await resolvePayment(object);
+  if (!payment) return { handled: false, result: "no matching payment" };
+  const paymentId = payment._id;
+
+  // A payment we have never opened a session for has no identifier to check
+  // against, so there is nothing to disagree with; once it has one, the event
+  // must name it (§42).
+  const identified = Boolean(payment.providerCheckoutId || payment.providerPaymentIntentId);
+  if (identified && !eventMatchesPayment(object, payment)) {
+    return { handled: false, paymentId, result: "event does not match this payment" };
+  }
 
   const { changed } = await markPaymentPaid(paymentId, {
     paidAt: new Date(),
@@ -209,9 +252,22 @@ async function settle(object, { paymentIntentId, amountCents }) {
   };
 }
 
+/**
+ * A declined payment (§20).
+ *
+ * Whether the held slots go back immediately is `failureReleasesHold()` in
+ * lib/booking/policy, not a rule invented here — the short version is that a
+ * decline inside a live hosted session is a retry, and a decline with no
+ * session left to retry through is an abandonment.
+ */
 async function decline(object) {
-  const paymentId = await resolvePayment(object);
-  if (!paymentId) return { handled: false, result: "no matching payment" };
+  const payment = await resolvePayment(object);
+  if (!payment) return { handled: false, result: "no matching payment" };
+  const paymentId = payment._id;
+
+  if (!eventMatchesPayment(object, payment)) {
+    return { handled: false, paymentId, result: "event does not match this payment" };
+  }
 
   const { changed } = await markPaymentFailed(paymentId, {
     failureReason:
@@ -219,29 +275,88 @@ async function decline(object) {
       "Your card was declined. Try a different payment method.",
   });
 
+  if (!changed) {
+    return {
+      handled: true,
+      paymentId,
+      providerObjectId: object.id,
+      result: "already settled; failure ignored",
+    };
+  }
+
+  let released = 0;
+  if (failureReleasesHold({ payment })) {
+    ({ expired: released } = await releaseBookingsForFailedPayment(paymentId, {
+      reason: "payment declined and no checkout session remained",
+    }));
+  }
+
   return {
     handled: true,
     paymentId,
     providerObjectId: object.id,
-    result: changed ? "marked failed" : "already settled; failure ignored",
+    result: released
+      ? `marked failed, ${released} booking(s) released`
+      : "marked failed, slots held until the hold lapses",
   };
 }
 
 /**
- * A checkout session that was never paid. The bookings keep their held slots
- * until the booking service expires them, and the payment stays payable — the
- * purchaser can simply start a new session.
+ * A checkout session that was never paid (§19, §20).
+ *
+ * The provider has declared that session dead, so the slots it was holding go
+ * back on the tutor's calendar now rather than waiting for the sweep. Two
+ * guards make that safe to act on:
+ *
+ *   1. the event must name *this payment's current* session. A late delivery
+ *      for a session the purchaser has already replaced would otherwise
+ *      release a booking they are actively paying for;
+ *   2. `releaseBookingsForFailedPayment` refuses a settled payment outright,
+ *      so an expiry arriving after a successful payment changes nothing.
+ *
+ * Re-delivery is harmless: the second run finds nothing in PENDING_PAYMENT
+ * left to claim and reports zero.
  */
 async function expire(object) {
-  const paymentId = await resolvePayment(object);
-  if (!paymentId) return { handled: false, result: "no matching payment" };
+  const payment = await resolvePayment(object);
+  if (!payment) return { handled: false, result: "no matching payment" };
+  const paymentId = payment._id;
+
+  if (!eventMatchesPayment(object, payment)) {
+    return { handled: false, paymentId, result: "event does not match this payment" };
+  }
+
+  if (payment.providerCheckoutId && object.id && payment.providerCheckoutId !== object.id) {
+    return {
+      handled: false,
+      paymentId,
+      providerObjectId: object.id,
+      result: "superseded session expired; the payment has a newer one",
+    };
+  }
 
   await Payment.updateOne(
     { _id: paymentId, status: PAYMENT_STATUS.REQUIRES_PAYMENT },
     { $unset: { providerCheckoutUrl: "", checkoutExpiresAt: "" } },
   );
 
-  return { handled: true, paymentId, providerObjectId: object.id, result: "checkout expired" };
+  const { expired } = failureReleasesHold({ payment, sessionEnded: true })
+    ? await releaseBookingsForFailedPayment(paymentId, { reason: "checkout session expired" })
+    : { expired: 0 };
+
+  if (expired) {
+    await Payment.updateOne(
+      { _id: paymentId, status: PAYMENT_STATUS.REQUIRES_PAYMENT },
+      { $set: { status: PAYMENT_STATUS.FAILED, failureReason: "Checkout was not completed in time." } },
+    );
+  }
+
+  return {
+    handled: true,
+    paymentId,
+    providerObjectId: object.id,
+    result: `checkout expired, ${expired} booking(s) released`,
+  };
 }
 
 /**
@@ -253,8 +368,9 @@ async function describeCard(charge) {
   const card = charge.payment_method_details?.card;
   if (!card) return { handled: false, result: "no card details on charge" };
 
-  const paymentId = await resolvePayment(charge);
-  if (!paymentId) return { handled: false, result: "no matching payment" };
+  const payment = await resolvePayment(charge);
+  if (!payment) return { handled: false, result: "no matching payment" };
+  const paymentId = payment._id;
 
   await Payment.updateOne(
     { _id: paymentId },
@@ -278,8 +394,9 @@ function brandLabel(brand) {
 
 /** Bring our refund ledger in line with the provider's. */
 async function reconcileRefund(charge) {
-  const paymentId = await resolvePayment(charge);
-  if (!paymentId) return { handled: false, result: "no matching payment" };
+  const payment = await resolvePayment(charge);
+  if (!payment) return { handled: false, result: "no matching payment" };
+  const paymentId = payment._id;
 
   const refunds = charge.refunds?.data ?? [];
   let applied = 0;

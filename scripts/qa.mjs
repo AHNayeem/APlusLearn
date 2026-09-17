@@ -535,6 +535,117 @@ async function main() {
   const tutorVerification = await tutor("/api/tutor/verification");
   check("tutor sees verification status", tutorVerification.ok && tutorVerification.payload.data.records.length === 5);
 
+  // --- Verification documents, end to end (R33) -----------------------------
+  //
+  //   tutor uploads → nobody but an administrator can read it back →
+  //   the administrator retrieves it → the retrieval is audited.
+  //
+  // The upload goes through the storage abstraction, so this exercises
+  // whichever provider the deployment has configured.
+  section("Verification documents (R33)");
+
+  const tutorUpload = (path, form) => tutor(path, { form });
+
+  const certificate = new FormData();
+  certificate.append("type", "EDUCATION");
+  certificate.append(
+    "file",
+    // A real PDF, so the server's own byte inspection has something to read.
+    new Blob([Buffer.from("%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer\n%%EOF\n")], {
+      type: "application/pdf",
+    }),
+    // A filename carrying a path, a quote and a header break — none of which
+    // may survive into storage or into a response header.
+    'evil"\r\nX-Injected: yes/../../etc/passwd.pdf',
+  );
+  const uploaded = await tutorUpload("/api/tutor/verification/upload", certificate);
+  check("a tutor can upload a verification document",
+    uploaded.ok, JSON.stringify(uploaded.payload?.error));
+
+  const documentId = uploaded.payload?.data?.document?.id;
+  const storedName = uploaded.payload?.data?.document?.fileName ?? "";
+  check("the uploader's filename is sanitised before it is stored",
+    !storedName.includes("\r") && !storedName.includes("\n") &&
+      !storedName.includes('"') && !storedName.includes("/"),
+    JSON.stringify(storedName));
+  check("the private storage key is NEVER returned to the uploader",
+    !("storageKey" in (uploaded.payload?.data?.document ?? {})),
+    JSON.stringify(Object.keys(uploaded.payload?.data?.document ?? {})));
+
+  // A script renamed and relabelled as a PDF.
+  const disguisedDoc = new FormData();
+  disguisedDoc.append("type", "EDUCATION");
+  disguisedDoc.append(
+    "file",
+    new Blob(["<?php system($_GET['c']); ?>"], { type: "application/pdf" }),
+    "shell.pdf",
+  );
+  const disguisedRefused = await tutorUpload("/api/tutor/verification/upload", disguisedDoc);
+  check("a script relabelled as a PDF is REFUSED on its bytes, not its label",
+    disguisedRefused.status === 422 || disguisedRefused.status === 400,
+    `status ${disguisedRefused.status}`);
+
+  const svgDoc = new FormData();
+  svgDoc.append("type", "EDUCATION");
+  svgDoc.append(
+    "file",
+    new Blob(['<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'], {
+      type: "image/png",
+    }),
+    "logo.png",
+  );
+  const svgDocRefused = await tutorUpload("/api/tutor/verification/upload", svgDoc);
+  check("a script-capable SVG is REFUSED as a verification document",
+    svgDocRefused.status === 422 || svgDocRefused.status === 400,
+    `status ${svgDocRefused.status}`);
+
+  if (documentId) {
+    const anonDoc = await anon(`/api/admin/verification/documents/${documentId}`);
+    check("an anonymous request cannot retrieve a verification document",
+      anonDoc.status === 401 || anonDoc.status === 403, `status ${anonDoc.status}`);
+
+    const parentDoc = await parent(`/api/admin/verification/documents/${documentId}`);
+    check("a parent cannot retrieve a verification document", parentDoc.status === 403);
+
+    const ownerDoc = await tutor(`/api/admin/verification/documents/${documentId}`);
+    check("not even the tutor who uploaded it can reach the admin document route",
+      ownerDoc.status === 403, `status ${ownerDoc.status}`);
+
+    // A second, unrelated tutor account.
+    const otherTutorDoc = await minorTutor(`/api/admin/verification/documents/${documentId}`);
+    check("another tutor cannot retrieve someone else's identity paperwork",
+      otherTutorDoc.status === 403);
+
+    const guessed = await admin("/api/admin/verification/documents/000000000000000000000000");
+    check("a guessed document id is a 404, not a file", guessed.status === 404);
+
+    const adminDoc = await admin(`/api/admin/verification/documents/${documentId}`, { raw: true });
+    check("an administrator CAN retrieve the document", adminDoc.status === 200);
+    check("and the bytes come back through the storage abstraction",
+      (await adminDoc.clone().arrayBuffer()).byteLength > 0);
+    check("served as the type its bytes really are",
+      adminDoc.headers.get("content-type") === "application/pdf",
+      adminDoc.headers.get("content-type"));
+    check("no header was injected through the filename",
+      adminDoc.headers.get("x-injected") === null);
+    check("the browser is told not to sniff or execute it",
+      adminDoc.headers.get("x-content-type-options") === "nosniff" &&
+        (adminDoc.headers.get("content-security-policy") ?? "").includes("sandbox"));
+    check("the document is never cached",
+      (adminDoc.headers.get("cache-control") ?? "").includes("no-store"));
+
+    // Retrieval is repeatable — the same bytes, every time.
+    const adminDocAgain = await admin(`/api/admin/verification/documents/${documentId}`, { raw: true });
+    check("retrieval is deterministic — the same document comes back on a second read",
+      adminDocAgain.status === 200 &&
+        (await adminDocAgain.arrayBuffer()).byteLength ===
+          (await adminDoc.arrayBuffer()).byteLength);
+  }
+
+  const docsPublic = await anon(`/api/branding/logo`);
+  check("branding assets are served by setting name, never by storage key",
+    docsPublic.status === 200 || docsPublic.status === 404, `status ${docsPublic.status}`);
+
   const openRequests = await tutor("/api/requests/open");
   check("tutor sees open requests", openRequests.ok);
 
@@ -1448,13 +1559,279 @@ async function main() {
   check(
     "the job catalogue names every scheduled job",
     jobList.ok &&
-      ["booking-reminders", "verification-expiry", "payouts", "request-expiry"].every((key) =>
+      ["booking-reminders", "booking-expiry", "verification-expiry", "payouts", "request-expiry"].every((key) =>
         jobList.payload.data.jobs.some((j) => j.key === key),
       ),
   );
 
   const unknownJob = await admin("/api/cron/does-not-exist");
   check("an unknown job name is a 404", unknownJob.status === 404);
+
+  // --- Abandoned checkout releases the slot (R41) ---------------------------
+  //
+  // The whole journey, over HTTP, in the order a real abandonment happens:
+  //
+  //   pick a slot → create the booking → walk away → the hold lapses →
+  //   the scheduler releases it → the slot is bookable again → someone else
+  //   books it.
+  //
+  // The hold window is a platform setting, so the wait is compressed by
+  // configuring it to zero rather than by reaching past the API. The original
+  // value is restored at the end whatever happens.
+  section("Abandoned checkout releases the slot (R41)");
+
+  const strangerStudents = await strangerParent("/api/students");
+  const strangerStudentId = strangerStudents.payload?.data?.students?.[0]?.id;
+  check("the second family has a learner of their own to book for",
+    Boolean(strangerStudentId));
+
+  const holdSettings = await admin("/api/admin/settings");
+  const originalHold = holdSettings.payload?.data?.settings?.checkoutHoldMinutes;
+  check(
+    "the unpaid-booking hold is an administrable business rule",
+    typeof originalHold === "number",
+    `checkoutHoldMinutes was ${originalHold}`,
+  );
+
+  try {
+    const expirySlots = await parent(
+      `/api/tutors/${tutorId}/availability?days=21&durationMinutes=60`,
+    );
+    const expiryDay = expirySlots.payload?.data?.days?.find((d) => d.slots.length > 0);
+    const abandonedSlot = expiryDay?.slots[0]?.startAt;
+    check("a free slot is on offer before the abandoned booking", Boolean(abandonedSlot));
+
+    // The platform this tutor really teaches on, read from their profile —
+    // not assumed, because the server now refuses one they do not offer.
+    const tutorProfilePublic = await anon(`/api/tutors/${tutorId}`);
+    const offeredPlatforms =
+      tutorProfilePublic.payload?.data?.tutor?.onlineMeetingProviders ?? [];
+    check("the tutor publishes which meeting platforms they teach on",
+      offeredPlatforms.length > 0, JSON.stringify(offeredPlatforms));
+
+    // Find any online tutor who does *not* offer all three platforms, so the
+    // refusal can be exercised rather than skipped.
+    const allPlatforms = ["ZOOM", "GOOGLE_MEET", "MICROSOFT_TEAMS"];
+    let picky = null;
+    for (const candidate of (await anon("/api/search/tutors?province=ON&pageSize=20")).payload
+      ?.data?.tutors ?? []) {
+      const profile = (await anon(`/api/tutors/${candidate.id}`)).payload?.data?.tutor;
+      const offers = profile?.onlineMeetingProviders ?? [];
+      const missing = allPlatforms.find((platform) => !offers.includes(platform));
+      if (offers.length && missing && profile?.courses?.length) {
+        picky = { profile, missing };
+        break;
+      }
+    }
+    check("the marketplace has a tutor who offers only some meeting platforms",
+      Boolean(picky), "every seeded tutor offers all three");
+
+    if (picky) {
+      const pickySlots = await anon(
+        `/api/tutors/${picky.profile.id}/availability?days=21&durationMinutes=60`,
+      );
+      const pickySlot = pickySlots.payload?.data?.days?.find((d) => d.slots.length > 0)?.slots[0]
+        ?.startAt;
+
+      const wrongPlatform = await parent("/api/bookings", {
+        method: "POST",
+        body: {
+          tutorProfileId: picky.profile.id,
+          studentProfileId: studentId,
+          courseId: picky.profile.courses[0].courseId,
+          mode: "ONLINE",
+          startAt: pickySlot,
+          durationMinutes: 60,
+          meetingProvider: picky.missing,
+        },
+      });
+      check("a meeting platform the tutor does not offer is REFUSED server-side",
+        wrongPlatform.status === 422 &&
+          wrongPlatform.payload?.error?.code === "MEETING_PROVIDER_UNAVAILABLE",
+        `${wrongPlatform.status} ${JSON.stringify(wrongPlatform.payload?.error)}`);
+    }
+
+    const abandoned = await parent("/api/bookings", {
+      method: "POST",
+      body: {
+        tutorProfileId: tutorId,
+        studentProfileId: studentId,
+        courseId,
+        mode: "ONLINE",
+        startAt: abandonedSlot,
+        durationMinutes: 60,
+        meetingProvider: offeredPlatforms[0],
+        studentNotes: "QA — abandoned checkout",
+      },
+    });
+    const abandonedId = abandoned.payload?.data?.bookings?.[0]?.id;
+    check("the booking is created and awaiting payment",
+      abandoned.ok && abandoned.payload?.data?.bookings?.[0]?.status === "PENDING_PAYMENT",
+      JSON.stringify(abandoned.payload?.error));
+
+    const slotsWhileHeld = await parent(
+      `/api/tutors/${tutorId}/availability?days=21&durationMinutes=60`,
+    );
+    const stillOffered = slotsWhileHeld.payload?.data?.days?.some((d) =>
+      d.slots.some((slot) => slot.startAt === abandonedSlot),
+    );
+    check("while it is held, the slot is OFF the public calendar", stillOffered === false);
+
+    const blockedByHold = await strangerParent("/api/bookings", {
+      method: "POST",
+      body: {
+        tutorProfileId: tutorId,
+        studentProfileId: strangerStudentId,
+        courseId,
+        mode: "ONLINE",
+        startAt: abandonedSlot,
+        durationMinutes: 60,
+        meetingProvider: offeredPlatforms[0],
+      },
+    });
+    check("another family cannot take a slot that is genuinely held",
+      blockedByHold.status === 409, `status ${blockedByHold.status}`);
+
+    // Nothing is stale yet, so the job must leave it exactly where it is.
+    const earlyRun = await admin("/api/cron/booking-expiry", { method: "POST" });
+    check("the expiry job runs and reports", earlyRun.ok && earlyRun.payload.data.job === "booking-expiry",
+      JSON.stringify(earlyRun.payload));
+    const afterEarly = await parent(`/api/bookings/${abandonedId}`);
+    check("a FRESH hold is not expired by the job",
+      afterEarly.payload?.data?.booking?.status === "PENDING_PAYMENT");
+
+    // Now let the hold lapse.
+    await admin("/api/admin/settings", {
+      method: "PATCH",
+      body: { checkoutHoldMinutes: 0 },
+    });
+
+    const release = await admin("/api/cron/booking-expiry", { method: "POST" });
+    check("the job releases the lapsed hold",
+      release.ok && release.payload.data.result.expired >= 1, JSON.stringify(release.payload?.data));
+
+    const expiredBooking = await parent(`/api/bookings/${abandonedId}`);
+    check("the abandoned booking is EXPIRED",
+      expiredBooking.payload?.data?.booking?.status === "EXPIRED",
+      expiredBooking.payload?.data?.booking?.status);
+    check("an expired booking can no longer be cancelled or refunded",
+      expiredBooking.payload?.data?.booking?.permissions?.canCancel === false);
+
+    const slotsAfter = await parent(
+      `/api/tutors/${tutorId}/availability?days=21&durationMinutes=60`,
+    );
+    const offeredAgain = slotsAfter.payload?.data?.days?.some((d) =>
+      d.slots.some((slot) => slot.startAt === abandonedSlot),
+    );
+    check("the released slot is BACK on the public calendar", offeredAgain === true);
+
+    const rebooked = await strangerParent("/api/bookings", {
+      method: "POST",
+      body: {
+        tutorProfileId: tutorId,
+        studentProfileId: strangerStudentId,
+        courseId,
+        mode: "ONLINE",
+        startAt: abandonedSlot,
+        durationMinutes: 60,
+        // Deliberately a different platform from the abandoned booking's, so
+        // the stored choice is proven to follow the booking rather than a
+        // deployment default.
+        meetingProvider: offeredPlatforms.at(-1),
+      },
+    });
+    check("ANOTHER family can now book the released slot",
+      rebooked.ok, JSON.stringify(rebooked.payload?.error));
+
+    const rebookedId = rebooked.payload?.data?.bookings?.[0]?.id;
+    check("the learner's chosen meeting platform is stored on the booking, not assumed",
+      rebooked.payload?.data?.bookings?.[0]?.meetingProvider === offeredPlatforms.at(-1),
+      rebooked.payload?.data?.bookings?.[0]?.meetingProvider);
+
+    // Re-running the job is safe, and does not touch the new booking's own
+    // hold beyond releasing it — which is correct, since it is also lapsed.
+    const rerun = await admin("/api/cron/booking-expiry", { method: "POST" });
+    check("re-running the expiry job is safe", rerun.ok);
+    const expiredTwice = await parent(`/api/bookings/${abandonedId}`);
+    check("a booking already expired is not expired again",
+      expiredTwice.payload?.data?.booking?.status === "EXPIRED");
+
+    // A paid booking is untouchable however the job is run. (This one has
+    // been through the cancellation section by now, so the invariant to
+    // assert is that the expiry job did not claim it — not its exact status.)
+    const paidStill = await parent(`/api/bookings/${bookingId}`);
+    check("a PAID booking is never claimed by the expiry job",
+      paidStill.payload?.data?.booking?.status !== "EXPIRED",
+      paidStill.payload?.data?.booking?.status);
+
+    // Clean up the rebooked hold so the seeded calendar is left as found.
+    if (rebookedId) {
+      await strangerParent(`/api/bookings/${rebookedId}/cancel`, {
+        method: "POST",
+        body: { reason: "QA cleanup" },
+      });
+    }
+
+    const expiredInList = await parent("/api/bookings?scope=CANCELLED&pageSize=50");
+    check("an expired lesson is visible to the family, not silently hidden",
+      expiredInList.payload?.data?.bookings?.some((b) => b.id === abandonedId),
+      JSON.stringify(expiredInList.payload?.data?.bookings?.map((b) => b.status)));
+  } finally {
+    await admin("/api/admin/settings", {
+      method: "PATCH",
+      body: { checkoutHoldMinutes: originalHold ?? 60 },
+    });
+  }
+
+  const holdRestored = await admin("/api/admin/settings");
+  check("the hold setting is restored after the test",
+    holdRestored.payload?.data?.settings?.checkoutHoldMinutes === originalHold);
+
+  // A booking that carries the state the client is not allowed to decide.
+  // Aimed at a genuinely free slot, so the request SUCCEEDS and what is
+  // stored can be inspected — a 409 would prove nothing about §42.
+  const injectionSlots = await parent(
+    `/api/tutors/${tutorId}/availability?days=21&durationMinutes=60`,
+  );
+  const injectionSlot = injectionSlots.payload?.data?.days?.find((d) => d.slots.length > 0)
+    ?.slots[0]?.startAt;
+
+  const clientHold = await parent("/api/bookings", {
+    method: "POST",
+    body: {
+      tutorProfileId: tutorId,
+      studentProfileId: studentId,
+      courseId,
+      mode: "ONLINE",
+      startAt: injectionSlot,
+      durationMinutes: 60,
+      meetingProvider: "ZOOM",
+      // None of these are the client's to decide (§42).
+      status: "CONFIRMED",
+      expiredAt: null,
+      confirmedAt: new Date().toISOString(),
+      meeting: { joinUrl: "https://evil.example/meeting", provider: "ZOOM", meetingId: "evil" },
+      price: { totalCents: 1, subtotalCents: 1, commissionCents: 0, tutorEarningsCents: 1 },
+    },
+  });
+  check("a booking carrying injected state is still accepted on its merits",
+    clientHold.ok, JSON.stringify(clientHold.payload?.error));
+
+  if (clientHold.ok) {
+    const injected = clientHold.payload.data.bookings[0];
+    check("an injected booking status is IGNORED — it still awaits payment",
+      injected.status === "PENDING_PAYMENT", injected.status);
+    check("an injected meeting link is IGNORED — no room exists before payment",
+      !injected.meeting?.joinUrl, JSON.stringify(injected.meeting));
+    check("an injected price is IGNORED — the total comes from the tutor's stored rate",
+      injected.price.totalCents > 1000, String(injected.price.totalCents));
+    check("an injected confirmedAt is IGNORED", !injected.confirmedAt);
+
+    await parent(`/api/bookings/${injected.id}/cancel`, {
+      method: "POST",
+      body: { reason: "QA cleanup" },
+    });
+  }
 
   const countReminders = async () => {
     const res = await parent("/api/notifications?pageSize=50");

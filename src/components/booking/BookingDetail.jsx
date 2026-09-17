@@ -57,6 +57,23 @@ export function BookingDetail({ booking, viewerRole, justConfirmed }) {
           </Alert>
         )}
 
+        {booking.status === BOOKING_STATUS.EXPIRED && (
+          <Alert
+            tone="neutral"
+            title="This time has been released"
+            action={
+              tutorProfile?.slug ? (
+                <Button href={`/tutors/${tutorProfile.slug}`} size="sm" variant="secondary">
+                  Book again
+                </Button>
+              ) : null
+            }
+          >
+            Payment was not completed in time, so the slot went back on the tutor&rsquo;s
+            calendar and is available to other learners. Nothing was charged.
+          </Alert>
+        )}
+
         {isCancelled && booking.cancellation && (
           <Alert tone="neutral" title={`Cancelled — ${booking.cancellation.policyApplied?.replace(/_/g, " ").toLowerCase()}`}>
             <p>{booking.cancellation.reason}</p>

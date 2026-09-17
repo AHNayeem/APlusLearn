@@ -25,6 +25,7 @@ const TABS = [
   { value: BOOKING_STATUS.COMPLETED, label: "Completed" },
   { value: BOOKING_STATUS.PENDING_PAYMENT, label: "Unpaid" },
   { value: BOOKING_STATUS.DISPUTED, label: "Disputed" },
+  { value: BOOKING_STATUS.EXPIRED, label: "Expired" },
 ];
 
 export default async function AdminBookingsPage({ searchParams }) {

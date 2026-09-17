@@ -257,7 +257,15 @@ async function main() {
           gradeLevels: [...new Set(taught.map((c) => c.gradeLevel))],
           provinceCodes: ["ON"],
           lessonModes: t.modes,
-          onlineMeetingProviders: t.modes.includes("ONLINE") ? ["ZOOM", "GOOGLE_MEET"] : [],
+          // All three platforms §27 names. Not every tutor offers every one,
+          // so the booking form has something real to choose between.
+          onlineMeetingProviders: t.modes.includes("ONLINE")
+            ? tutorProfiles.length % 3 === 0
+              ? ["ZOOM", "GOOGLE_MEET", "MICROSOFT_TEAMS"]
+              : tutorProfiles.length % 3 === 1
+                ? ["ZOOM", "GOOGLE_MEET"]
+                : ["GOOGLE_MEET", "MICROSOFT_TEAMS"]
+            : [],
           // Not everyone teaching in person is willing to host at their own
           // place, so alternate — otherwise every card looks identical.
           inPersonLocationTypes: t.modes.includes("IN_PERSON")

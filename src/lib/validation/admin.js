@@ -194,6 +194,10 @@ export const platformSettingsSchema = z
     cancellationAbuseWindowDays: z.coerce.number().int().min(1).max(365).optional(),
     minimumBookingNoticeHours: z.coerce.number().int().min(0).max(168).optional(),
     bookingHorizonDays: z.coerce.number().int().min(1).max(365).optional(),
+    // Stripe refuses a session shorter than 30 minutes or longer than a day,
+    // so the same bounds apply here. 0 is allowed for a deployment that wants
+    // holds released as soon as the sweep sees them.
+    checkoutHoldMinutes: z.coerce.number().int().min(0).max(1440).optional(),
     minHourlyRate: z.coerce.number().int().min(0).max(500).optional(),
     maxHourlyRate: z.coerce.number().int().min(1).max(1000).optional(),
     payoutHoldDays: z.coerce.number().int().min(0).max(60).optional(),

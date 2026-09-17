@@ -26,6 +26,7 @@ const MARKETPLACE_KEYS = [
   "cancellationAbuseWindowDays",
   "minimumBookingNoticeHours",
   "bookingHorizonDays",
+  "checkoutHoldMinutes",
   "minHourlyRate",
   "maxHourlyRate",
   "payoutHoldDays",
@@ -271,6 +272,20 @@ export function MarketplaceSettings({ settings }) {
                 max={365}
                 value={s.form.bookingHorizonDays}
                 onChange={s.set("bookingHorizonDays")}
+              />
+            </Field>
+            <Field
+              label="Unpaid booking hold"
+              htmlFor="set-checkout-hold"
+              hint="Minutes a booking holds its slot while the family pays. After this the slot is released and the lesson is marked as payment not completed."
+            >
+              <Input
+                id="set-checkout-hold"
+                type="number"
+                min={0}
+                max={1440}
+                value={s.form.checkoutHoldMinutes}
+                onChange={s.set("checkoutHoldMinutes")}
               />
             </Field>
           </div>

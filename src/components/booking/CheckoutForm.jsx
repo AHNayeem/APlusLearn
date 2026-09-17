@@ -18,7 +18,7 @@ import { LESSON_MODES } from "@/constants";
  * never computes or submits a price, only the card details, which go straight
  * to the provider and are never stored (§35, §42).
  */
-export function CheckoutForm({ payment, bookings, meetingProvider }) {
+export function CheckoutForm({ payment, bookings }) {
   const router = useRouter();
   const toast = useToast();
 
@@ -35,7 +35,6 @@ export function CheckoutForm({ payment, bookings, meetingProvider }) {
   const { submit, pending, error, fieldErrors } = useSubmit(async () => {
     const result = await api.post(`/api/payments/${payment.id}/capture`, {
       card: { ...card, number: card.number.replace(/\s/g, "") },
-      meetingProvider,
     });
     toast.success(
       result.confirmed > 1 ? `${result.confirmed} lessons confirmed` : "Lesson confirmed",

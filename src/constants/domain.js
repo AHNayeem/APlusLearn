@@ -119,6 +119,12 @@ export const BOOKING_STATUS = {
   NO_SHOW_STUDENT: "NO_SHOW_STUDENT",
   NO_SHOW_TUTOR: "NO_SHOW_TUTOR",
   DISPUTED: "DISPUTED",
+  /**
+   * Checkout was never completed and the slot has been given back (§19).
+   * Terminal: nothing transitions out of it, and it is deliberately absent
+   * from BLOCKING_BOOKING_STATUSES below.
+   */
+  EXPIRED: "EXPIRED",
 };
 
 export const BOOKING_STATUS_LABELS = {
@@ -131,6 +137,7 @@ export const BOOKING_STATUS_LABELS = {
   NO_SHOW_STUDENT: "Student no-show",
   NO_SHOW_TUTOR: "Tutor no-show",
   DISPUTED: "Under dispute",
+  EXPIRED: "Payment not completed",
 };
 
 export const CANCELLED_STATUSES = [
@@ -139,7 +146,16 @@ export const CANCELLED_STATUSES = [
   BOOKING_STATUS.CANCELLED_BY_ADMIN,
 ];
 
-/** Statuses that still occupy a slot on the tutor's calendar. */
+/**
+ * Statuses that still occupy a slot on the tutor's calendar.
+ *
+ * PENDING_PAYMENT is here because an unpaid booking must hold its slot while
+ * the purchaser is at the checkout page — but only for as long as the hold
+ * lasts. `CHECKOUT_HOLD` in constants/config.js sets that window, and the
+ * `booking-expiry` job moves anything past it to EXPIRED, which is *not* in
+ * this list. Without that job, an abandoned checkout would remove a tutor's
+ * availability permanently.
+ */
 export const BLOCKING_BOOKING_STATUSES = [
   BOOKING_STATUS.PENDING_PAYMENT,
   BOOKING_STATUS.CONFIRMED,
@@ -279,6 +295,7 @@ export const NOTIFICATION_TYPES = {
   BOOKING_CANCELLED: "BOOKING_CANCELLED",
   BOOKING_REMINDER: "BOOKING_REMINDER",
   BOOKING_COMPLETED: "BOOKING_COMPLETED",
+  BOOKING_EXPIRED: "BOOKING_EXPIRED",
   REFUND_ISSUED: "REFUND_ISSUED",
   APPLICATION_SUBMITTED: "APPLICATION_SUBMITTED",
   APPLICATION_APPROVED: "APPLICATION_APPROVED",
@@ -380,6 +397,7 @@ export const AUDIT_ACTIONS = {
   VERIFICATION_BADGE_REVOKED: "VERIFICATION_BADGE_REVOKED",
   BOOKING_CANCELLED: "BOOKING_CANCELLED",
   BOOKING_NO_SHOW_REPORTED: "BOOKING_NO_SHOW_REPORTED",
+  BOOKING_EXPIRED: "BOOKING_EXPIRED",
   BOOKING_RESCHEDULED: "BOOKING_RESCHEDULED",
   PAYMENT_SETTLED: "PAYMENT_SETTLED",
   REFUND_ISSUED: "REFUND_ISSUED",

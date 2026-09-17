@@ -11,7 +11,8 @@ import {
 } from "@/constants";
 import { NotFoundError, BusinessRuleError, AuthorizationError } from "@/lib/api/errors";
 import { toPlain } from "@/lib/utils/serialize";
-import { getStorageProvider } from "./external/storage-provider";
+import { inspectDocument, safeFileName } from "@/lib/images/inspect";
+import { getStorageProvider, STORAGE_SCOPES } from "./external/storage-provider";
 import { notify } from "./notification.service";
 import { recordAudit } from "./audit.service";
 
@@ -89,24 +90,60 @@ export async function uploadVerificationDocument(
   );
 
   const buffer = Buffer.from(await file.arrayBuffer());
+
+  // `file.type` is a claim the browser made. The stored content type is the
+  // one the bytes actually are, so a script renamed to `.pdf` — or declared
+  // as `application/pdf` — is refused rather than stored and later served
+  // back to an administrator's browser (§16, §35).
+  const contentType = inspectDocument(buffer);
+  if (!contentType || !UPLOAD.acceptedDocumentTypes.includes(contentType)) {
+    throw new BusinessRuleError(
+      "That file is not a PDF, JPG, PNG or WebP. Upload the document in one of those formats.",
+      "UNSUPPORTED_FILE_TYPE",
+    );
+  }
+  if (contentType !== file.type) {
+    throw new BusinessRuleError(
+      "That file's contents do not match the type it claims to be.",
+      "UNSUPPORTED_FILE_TYPE",
+    );
+  }
+
+  // Kept as a label for the administrator, never as a path and never raw:
+  // it ends up in a response header when the document is served back.
+  const fileName = safeFileName(file.name, `${type}.pdf`);
+
   const stored = await getStorageProvider().put({
     buffer,
-    fileName: file.name,
-    contentType: file.type,
+    fileName,
+    contentType,
+    extension: extensionForDocument(contentType),
+    scope: STORAGE_SCOPES.DOCUMENTS,
   });
 
   const document = await VerificationDocument.create({
     verificationRecordId: record._id,
     tutorProfileId: profile._id,
     type,
-    fileName: file.name,
-    contentType: file.type,
+    fileName,
+    contentType,
     sizeBytes: stored.sizeBytes,
     storageKey: stored.storageKey,
     status: DOCUMENT_STATUS.UPLOADED,
   });
 
   return toPlain({ ...document.toObject(), storageKey: undefined });
+}
+
+const DOCUMENT_EXTENSIONS = {
+  "application/pdf": ".pdf",
+  "image/jpeg": ".jpg",
+  "image/png": ".png",
+  "image/webp": ".webp",
+};
+
+function extensionForDocument(contentType) {
+  return DOCUMENT_EXTENSIONS[contentType] ?? "";
 }
 
 /** Stream a document to an administrator. Never reachable by anyone else. */
@@ -120,7 +157,10 @@ export async function readVerificationDocument(documentId, admin) {
     .lean();
   if (!document) throw new NotFoundError("That document no longer exists.");
 
-  const buffer = await getStorageProvider().get({ storageKey: document.storageKey });
+  const buffer = await getStorageProvider().get({
+    storageKey: document.storageKey,
+    scope: STORAGE_SCOPES.DOCUMENTS,
+  });
 
   await recordAudit({
     actor: admin,
@@ -130,7 +170,13 @@ export async function readVerificationDocument(documentId, admin) {
     metadata: { viewed: true },
   });
 
-  return { buffer, contentType: document.contentType, fileName: document.fileName };
+  // Sanitised again on the way out: documents stored before the upload path
+  // cleaned filenames must not become a header-injection vector now.
+  return {
+    buffer,
+    contentType: document.contentType,
+    fileName: safeFileName(document.fileName, "document"),
+  };
 }
 
 export async function decideVerification(

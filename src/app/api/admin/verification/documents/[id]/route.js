@@ -16,8 +16,17 @@ export const GET = routeHandler(
     return new Response(buffer, {
       headers: {
         "Content-Type": contentType,
-        "Content-Disposition": `inline; filename="${fileName.replace(/"/g, "")}"`,
+        // `fileName` is sanitised by the service; quoting it here as well
+        // keeps the header well-formed for a name containing a semicolon.
+        "Content-Disposition": `inline; filename="${fileName}"`,
         "Cache-Control": "private, no-store",
+        // The bytes are identity paperwork an administrator opens in their
+        // own browser. These say: render it as the type we determined from
+        // the bytes, do not sniff it into something executable, and do not
+        // let it reach out to anything (§35).
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'; img-src 'self'; object-src 'none'; sandbox",
+        "Referrer-Policy": "no-referrer",
       },
     });
   },

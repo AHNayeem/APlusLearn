@@ -14,6 +14,7 @@ export function statusTone(status) {
   if (status === BOOKING_STATUS.PENDING_PAYMENT) return "warning";
   if (status === BOOKING_STATUS.DISPUTED) return "danger";
   if (CANCELLED_STATUSES.includes(status)) return "neutral";
+  if (status === BOOKING_STATUS.EXPIRED) return "neutral";
   if (status?.startsWith("NO_SHOW")) return "danger";
   return "neutral";
 }

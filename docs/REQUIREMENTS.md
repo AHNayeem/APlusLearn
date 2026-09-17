@@ -165,6 +165,13 @@ Verified on a clean database: `npm run seed` → `npx eslint src scripts` (clean
 | One-time and recurring | `RECURRENCE` weekly/biweekly; whole series reserved and paid together | Implemented |
 | All display fields | `BookingDetail` | Implemented |
 | Cancellation policy shown before paying | `cancellationPolicyText()` in the price summary | Implemented |
+| An unpaid booking holds its slot | `PENDING_PAYMENT` ∈ `BLOCKING_BOOKING_STATUSES`; public availability drops the slot immediately | Implemented |
+| An abandoned checkout releases it again | `BOOKING_STATUS.EXPIRED` (outside `BLOCKING_BOOKING_STATUSES`) + the `booking-expiry` job calling `expireStaleBookings()`; each release claims the booking's `PENDING_PAYMENT` status, so overlapping runs release it exactly once | Implemented |
+| The hold window lives in one place | `CHECKOUT_HOLD` (default) → `Settings.checkoutHoldMinutes` (admin-configurable) → read by the sweep, the policy module and the hosted checkout session alike | Implemented |
+| Whether a hold may be released is one rule | `shouldReleaseHold()` / `failureReleasesHold()` in `lib/booking/policy.js`; a settled payment is never released, whatever its age | Implemented |
+| Payment failure releases the slot immediately where appropriate | `checkout.session.expired` always; `payment_intent.payment_failed` only when no live checkout session remains, so a declined card can still be retried | Implemented |
+| A crash before the payment existed does not block forever | A booking with no `paymentId` is swept on the same rule | Implemented |
+| A payment settling after its hold lapsed | `confirmBookings()` revives an `EXPIRED` booking when the slot is still free, and audits it as needing a refund when it is not | Implemented |
 
 ## 20. Payments & payouts
 
@@ -306,9 +313,12 @@ taking a page down.
 | Requirement | Implementation | Status |
 |---|---|---|
 | Zoom | `ZoomMeetingProvider` — Server-to-Server OAuth; waiting room on, join-before-host off, recording off | Awaiting credentials |
-| Google Meet / Teams | Same `MeetingProvider` interface; both need a per-host OAuth grant rather than an account credential | Phase 2 |
+| Google Meet | `GoogleMeetProvider` — service-account JWT, Calendar conference creation; event carries no attendees | Awaiting credentials |
+| Microsoft Teams | `MicrosoftTeamsMeetingProvider` — Graph client credentials, `onlineMeetings`; lobby bypassed for the two participants | Awaiting credentials |
+| Platform chosen per booking | `Booking.meetingProvider`, validated against the tutor's `onlineMeetingProviders` and stored at creation; read back when the room is created — never taken from a confirmation request | Implemented |
+| No participant identity sent to a meeting provider | No adapter sends a learner's or tutor's name or email; Meet events have no attendees, Teams meetings no participants | Implemented |
 | Meeting info on the booking | `Booking.meeting`; released only to the purchaser, tutor and admins — never on a public profile or in search | Implemented |
-| Host credentials never stored | Zoom's `start_url` is dropped by the adapter; QA and the integration tests assert it | Implemented |
+| Host credentials never stored | Zoom's `start_url`, Teams' `audioConferencing` conference id and `joinInformation`, and Meet's organiser are all dropped by their adapters; the integration tests assert each | Implemented |
 | Cancellation and reschedule | A reschedule moves the existing room so the join link keeps working; a cancellation tears it down | Implemented |
 | Provider outage does not strand a paid lesson | Meeting creation failure is logged; the booking still confirms and the room is filled in later | Implemented |
 | 5 in-person location types | `IN_PERSON_LOCATIONS` | Implemented |
@@ -409,11 +419,11 @@ and webhook endpoints.
 | Email abstraction | `ConsoleEmailProvider` | `ResendEmailProvider` + 13 branded responsive templates | Awaiting credentials |
 | Auth providers | `DevOAuthProvider` | `OpenIdOAuthProvider` — Google and Apple ID tokens | Awaiting credentials |
 | Geocoding | `LocalTableGeocodingProvider` | `GoogleGeocodingProvider`, country-filtered, coarsened, with table fallback | Awaiting credentials |
-| Video meetings | `MockMeetingProvider` | `ZoomMeetingProvider` — Server-to-Server OAuth, create / move / tear down | Awaiting credentials |
-| Document storage | `LocalStorageProvider` | Interface declared; no object-store implementation | Phase 2 |
+| Video meetings | `MockMeetingProvider` | `ZoomMeetingProvider`, `GoogleMeetProvider`, `MicrosoftTeamsMeetingProvider` — create / move / tear down; several may be live at once | Awaiting credentials |
+| File storage | `LocalStorageProvider` | `S3StorageProvider` — SigV4 over `fetch`; S3, R2, B2, Spaces, MinIO | Awaiting credentials |
 | Calendar | — | `CalendarProvider` interface declared | Phase 2 |
 | Configuration-driven selection | `src/lib/config/env.js`; `APP_ENV` + one `*_PROVIDER` per integration | — | Implemented |
-| Production never silently fakes | `PAYMENT_PROVIDER`/`EMAIL_PROVIDER=development` refused under `APP_ENV=production`; a named provider without credentials stops the boot | — | Implemented |
+| Production never silently fakes | `PAYMENT_PROVIDER`/`EMAIL_PROVIDER`/`STORAGE_PROVIDER=development` refused under `APP_ENV=production`; a named provider without credentials stops the boot | — | Implemented |
 | Start-up validation | `src/instrumentation.js` — warns in development, refuses to boot in production | — | Implemented |
 | Operator visibility | Admin → Platform settings → Integrations: provider, mode and recent webhook deliveries | — | Implemented |
 | UI unchanged when the real provider lands | All access goes through `get*Provider()`; no service or component names a provider | — | Implemented |
@@ -553,18 +563,15 @@ no queue or worker process.
    built and idempotent (§48); what the deployment supplies is a scheduler and
    a `CRON_SECRET`. `vercel.json` declares the entries for Vercel; any cron,
    CronJob or workflow that can issue an authenticated HTTP request works
-   equally well. Without one, reminders are not sent, badges do not expire and
-   payouts stay administrator-initiated.
+   equally well. Without one, reminders are not sent, badges do not expire,
+   payouts stay administrator-initiated, **and abandoned checkouts never
+   release the tutor's slot** — `booking-expiry` is the job that does it.
 3. **Webhook delivery needs a public URL.** Locally, use
    `stripe listen --forward-to localhost:3000/api/webhooks/payments`.
 
 ### Not implemented
 
-1. **Object-store document storage.** Verification documents are written to
-   `./.storage/documents` and served only through the audited admin route.
-   `StorageProvider` is the interface a production implementation would satisfy;
-   it is the one integration with no production adapter yet.
-2. **Calendar sync.** `CalendarProvider` is declared and `Availability`
+1. **Calendar sync.** `CalendarProvider` is declared and `Availability`
    already stores `externalCalendars`, but nothing implements it (Phase 2).
 3. **SMS and push notifications.** The channels exist on the model and in
    `NOTIFICATION_CHANNELS`; only in-app and email are delivered (Phase 2).

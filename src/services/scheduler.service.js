@@ -1,7 +1,7 @@
 import "server-only";
 import { AUDIT_ACTIONS } from "@/constants";
 import { NotFoundError } from "@/lib/api/errors";
-import { sendBookingReminders } from "./booking.service";
+import { sendBookingReminders, expireStaleBookings } from "./booking.service";
 import { expireStaleVerifications } from "./verification.service";
 import { runScheduledPayouts } from "./payout.service";
 import { expireStaleRequests } from "./request.service";
@@ -31,6 +31,7 @@ import { recordAudit } from "./audit.service";
 
 export const JOBS = {
   BOOKING_REMINDERS: "booking-reminders",
+  BOOKING_EXPIRY: "booking-expiry",
   VERIFICATION_EXPIRY: "verification-expiry",
   PAYOUTS: "payouts",
   REQUEST_EXPIRY: "request-expiry",
@@ -46,6 +47,15 @@ const REGISTRY = {
       "Sends the 24-hour and 1-hour reminders for confirmed lessons. Each reminder is claimed on the booking before it is sent, so repeat runs never duplicate one.",
     suggestedCron: "*/15 * * * *",
     run: (options) => sendBookingReminders(options),
+  },
+  [JOBS.BOOKING_EXPIRY]: {
+    name: "Abandoned checkout expiry",
+    description:
+      "Releases the slots held by bookings whose checkout was never completed, so an abandoned payment cannot take a tutor's availability off the calendar permanently. Each booking is claimed on its PENDING_PAYMENT status before it is released, and a settled payment is never touched.",
+    // Runs often: the hold is measured in minutes, so a daily sweep would
+    // leave a slot dead for most of the day after it should have come back.
+    suggestedCron: "*/10 * * * *",
+    run: (options) => expireStaleBookings(options),
   },
   [JOBS.VERIFICATION_EXPIRY]: {
     name: "Verification expiry",
@@ -132,11 +142,15 @@ export async function runAllScheduledJobs(options = {}) {
  * otherwise a fifteen-minute reminder sweep would bury the trail that
  * matters (§35).
  */
+/** Counts that describe what a job *looked at*, not what it changed. */
+const NON_MUTATING_COUNTS = ["examined", "held"];
+
 async function recordJobRun(actor, outcome) {
   const changedSomething =
     !outcome.ok ||
     Object.entries(outcome.result ?? {}).some(
-      ([key, value]) => typeof value === "number" && value > 0 && key !== "examined",
+      ([key, value]) =>
+        typeof value === "number" && value > 0 && !NON_MUTATING_COUNTS.includes(key),
     );
   if (!changedSomething) return;
 

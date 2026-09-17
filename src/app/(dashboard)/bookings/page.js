@@ -15,7 +15,7 @@ const TABS = [
   { value: "UPCOMING", label: "Upcoming" },
   { value: "PAST", label: "Past" },
   { value: "AWAITING_REVIEW", label: "To review" },
-  { value: "CANCELLED", label: "Cancelled" },
+  { value: "CANCELLED", label: "Cancelled & expired" },
 ];
 
 const EMPTY_COPY = {
@@ -33,7 +33,8 @@ const EMPTY_COPY = {
   },
   CANCELLED: {
     title: "No cancelled lessons",
-    description: "Cancellations and any refunds applied will be listed here.",
+    description:
+      "Cancellations, any refunds applied, and lessons whose payment was never completed are listed here.",
   },
 };
 

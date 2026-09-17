@@ -159,6 +159,32 @@ export const BRANDING_ASSETS = {
 
 export const BRANDING_ASSET_KEYS = Object.keys(BRANDING_ASSETS);
 
+/**
+ * How long an unpaid booking holds its slot (§19, §20).
+ *
+ * This is the *only* place the number lives. Three things read it and they
+ * must not drift apart:
+ *
+ *   1. the payment provider, which sets its hosted checkout session to expire
+ *      at `minutes` (Stripe's `expires_at`);
+ *   2. the `booking-expiry` scheduled job, which releases PENDING_PAYMENT
+ *      bookings once `minutes` have passed since the booking was created;
+ *   3. the checkout page, which tells the purchaser how long they have.
+ *
+ * `graceMinutes` is added only to a *provider-stated* session expiry, so the
+ * sweep never races the provider's clock: the session is already dead by the
+ * time anything is released, and a webhook that arrives in the last moments
+ * still finds its bookings held. Our own window needs no slack — it is
+ * measured from a timestamp this application wrote.
+ *
+ * Stripe's minimum session lifetime is 30 minutes and its maximum is 24
+ * hours, so `minutes` must stay inside that range.
+ */
+export const CHECKOUT_HOLD = {
+  minutes: 60,
+  graceMinutes: 10,
+};
+
 export const DEFAULT_SETTINGS = {
   /** Platform commission taken from each lesson, as a percentage. */
   commissionPercent: 15,
@@ -184,6 +210,15 @@ export const DEFAULT_SETTINGS = {
 
   /** How far ahead the calendar accepts bookings. */
   bookingHorizonDays: 60,
+
+  /**
+   * Minutes an unpaid booking holds its slot before the `booking-expiry` job
+   * releases it (§19). Defaults to `CHECKOUT_HOLD.minutes`; an operator can
+   * tighten it on a busy marketplace or loosen it for slower payment methods.
+   * The hosted checkout session is created with the same window, so the two
+   * cannot drift.
+   */
+  checkoutHoldMinutes: CHECKOUT_HOLD.minutes,
 
   /** Tutor pricing guard rails, in CAD per hour. */
   minHourlyRate: 15,

@@ -96,6 +96,17 @@ const BookingSchema = new mongoose.Schema(
     subjectName: { type: String, trim: true },
 
     mode: { type: String, enum: Object.values(LESSON_MODES), required: true },
+    /**
+     * The platform the purchaser chose for an online lesson (§27).
+     *
+     * Stored as *intent* at booking time and read back when the room is
+     * actually created, which happens later and on a different thread of
+     * control — a verified webhook, not the browser that booked. Without it
+     * the choice was silently lost and every lesson fell back to one
+     * provider. `meeting.provider` below records what was really used, which
+     * differs when the chosen provider is not configured on this deployment.
+     */
+    meetingProvider: { type: String, enum: Object.values(MEETING_PROVIDERS) },
     meeting: { type: MeetingSchema, default: undefined },
     location: { type: LessonLocationSchema, default: undefined },
 
@@ -126,6 +137,8 @@ const BookingSchema = new mongoose.Schema(
 
     confirmedAt: { type: Date },
     completedAt: { type: Date },
+    /** Set when an unpaid hold lapsed and the slot was released (§19). */
+    expiredAt: { type: Date },
     cancellation: { type: CancellationSchema, default: undefined },
 
     /** Set once a review exists, so "leave a review" prompts disappear. */
@@ -140,6 +153,8 @@ BookingSchema.index({ tutorProfileId: 1, startAt: 1, status: 1 });
 BookingSchema.index({ purchaserId: 1, startAt: -1 });
 BookingSchema.index({ studentProfileId: 1, startAt: -1 });
 BookingSchema.index({ status: 1, startAt: 1 });
+// The expiry sweep asks for PENDING_PAYMENT bookings oldest-first.
+BookingSchema.index({ status: 1, createdAt: 1 });
 BookingSchema.index({ tutorUserId: 1, status: 1, completedAt: -1 });
 
 export const Booking = mongoose.models.Booking || mongoose.model("Booking", BookingSchema);

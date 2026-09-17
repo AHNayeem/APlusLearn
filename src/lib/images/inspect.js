@@ -186,6 +186,43 @@ export function validateImage(buffer, spec) {
   return { ok: true, ...found };
 }
 
+/**
+ * Identify an uploaded *document* — the formats verification paperwork comes
+ * in (§16).
+ *
+ * Same reasoning as `inspectImage`: `file.type` is a string the browser sent
+ * and an attacker sets it freely, so the format is decided by reading the
+ * bytes. A PDF is added to the four raster formats because a certificate or a
+ * police check usually arrives as one.
+ *
+ * @returns {string|null} the content type the bytes really are.
+ */
+export function inspectDocument(buffer) {
+  const buf = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
+  if (buf.length > 4 && buf.toString("ascii", 0, 5) === "%PDF-") return "application/pdf";
+  return inspectImage(buf)?.contentType ?? null;
+}
+
+/**
+ * A stored filename, made safe to put in a header and to show to an
+ * administrator.
+ *
+ * The uploader's filename never reaches the filesystem — the storage key is a
+ * UUID — but it is kept as a label and later echoed in a `Content-Disposition`
+ * header. A CR or LF in it would end that header and start one of the
+ * attacker's choosing, so control characters, path separators and quotes all
+ * come out here.
+ */
+export function safeFileName(name, fallback = "document") {
+  const cleaned = String(name ?? "")
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .replace(/[\\/]/g, "_")
+    .replace(/["']/g, "")
+    .trim()
+    .slice(0, 120);
+  return cleaned || fallback;
+}
+
 export function describeTypes(types) {
   const names = types.map((t) => extensionFor(t).replace(".", "").toUpperCase());
   if (names.length === 1) return `a ${names[0]}`;

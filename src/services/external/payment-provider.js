@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import Stripe from "stripe";
 import { requireIntegration, resolveIntegration, DEVELOPMENT } from "@/lib/config/env";
 import { AppError } from "@/lib/api/errors";
+import { CHECKOUT_HOLD } from "@/constants";
 
 /**
  * Payment provider abstraction (§20, §38).
@@ -262,6 +263,7 @@ export class StripePaymentProvider extends PaymentProvider {
     successUrl,
     cancelUrl,
     idempotencyKey,
+    holdMinutes = CHECKOUT_HOLD.minutes,
   }) {
     const session = await this.stripe.checkout.sessions.create(
       {
@@ -288,9 +290,10 @@ export class StripePaymentProvider extends PaymentProvider {
         metadata: sanitiseMetadata({ ...metadata, bookingReference }),
         success_url: successUrl,
         cancel_url: cancelUrl,
-        // Long enough for a parent to finish, short enough that a held slot
-        // is not blocked indefinitely.
-        expires_at: Math.floor(Date.now() / 1000) + 60 * 60,
+        // The hosted session and the booking hold expire together, from the
+        // same configured window, so the two can never drift apart (§19, §20).
+        // Stripe's own bounds are 30 minutes to 24 hours.
+        expires_at: Math.floor(Date.now() / 1000) + clampSessionMinutes(holdMinutes) * 60,
       },
       idempotencyKey ? { idempotencyKey } : undefined,
     );
@@ -514,6 +517,15 @@ function sanitiseMetadata(metadata) {
       .filter(([, value]) => value !== undefined && value !== null && value !== "")
       .map(([key, value]) => [key, String(value).slice(0, 500)]),
   );
+}
+
+/**
+ * Stripe accepts a session lifetime between 30 minutes and 24 hours. An
+ * operator's shorter hold is honoured on our side but cannot be pushed into
+ * the session, so it is clamped here rather than making session creation fail.
+ */
+function clampSessionMinutes(minutes) {
+  return Math.min(Math.max(Number(minutes) || CHECKOUT_HOLD.minutes, 30), 24 * 60);
 }
 
 function idOf(value) {

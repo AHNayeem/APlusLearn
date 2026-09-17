@@ -14,7 +14,9 @@ import { NotFoundError, BusinessRuleError, AuthorizationError } from "@/lib/api/
 import { requireVerifiedEmail } from "@/lib/auth/assert";
 import { toPlain } from "@/lib/utils/serialize";
 import { formatMoney } from "@/lib/utils/format";
+import { holdMinutes } from "@/lib/booking/policy";
 import { getPaymentProvider } from "./external/payment-provider";
+import { getSettings } from "./settings.service";
 import { brandedEmailTemplates } from "./external/email-provider";
 import { notify } from "./notification.service";
 import { recordAudit } from "./audit.service";
@@ -76,9 +78,10 @@ export async function createPaymentForBooking({ bookings, purchaserId, tutorUser
  * dead page. The amount always comes from the Payment row.
  */
 async function openCheckoutSession(payment, booking, provider = getPaymentProvider(), { bookingIds } = {}) {
-  const purchaser = await User.findById(payment.purchaserId)
-    .select("email paymentCustomerId")
-    .lean();
+  const [purchaser, settings] = await Promise.all([
+    User.findById(payment.purchaserId).select("email paymentCustomerId").lean(),
+    getSettings(),
+  ]);
 
   const ids =
     bookingIds ??
@@ -98,6 +101,9 @@ async function openCheckoutSession(payment, booking, provider = getPaymentProvid
     // One session per payment attempt: a retried request reuses the session
     // instead of creating a second chargeable one.
     idempotencyKey: `checkout-${payment._id}-${payment.checkoutAttempts ?? 0}`,
+    // The provider's session and the booking hold expire together, both from
+    // `checkoutHoldMinutes` (§19, §20).
+    holdMinutes: holdMinutes(settings),
     metadata: {
       paymentId: String(payment._id),
       bookingIds: ids.join(","),

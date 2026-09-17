@@ -76,11 +76,55 @@ export const INTEGRATIONS = {
     selector: "MEETING_PROVIDER",
     // A deterministic room link is still a working link for a manual host.
     fakeAllowedInProduction: true,
+    // §27 names three platforms and a learner picks per booking, so this one
+    // integration can have several adapters live at once. `MEETING_PROVIDER`
+    // accordingly takes a comma-separated list.
+    multi: true,
     providers: {
       zoom: {
         label: "Zoom",
         required: ["ZOOM_ACCOUNT_ID", "ZOOM_CLIENT_ID", "ZOOM_CLIENT_SECRET"],
         optional: ["ZOOM_USER_ID"],
+      },
+      google_meet: {
+        label: "Google Meet",
+        required: [
+          "GOOGLE_MEET_CLIENT_EMAIL",
+          "GOOGLE_MEET_PRIVATE_KEY",
+          "GOOGLE_MEET_IMPERSONATE",
+        ],
+        optional: ["GOOGLE_MEET_CALENDAR_ID"],
+      },
+      microsoft_teams: {
+        label: "Microsoft Teams",
+        required: [
+          "MS_TEAMS_TENANT_ID",
+          "MS_TEAMS_CLIENT_ID",
+          "MS_TEAMS_CLIENT_SECRET",
+          "MS_TEAMS_USER_ID",
+        ],
+        optional: [],
+      },
+    },
+  },
+  storage: {
+    label: "File storage",
+    selector: "STORAGE_PROVIDER",
+    // The local filesystem is a development convenience, not a deployment
+    // option: on an ephemeral host it accepts a tutor's identity document and
+    // then loses it, which breaks verification and mishandles the document.
+    fakeAllowedInProduction: false,
+    providers: {
+      s3: {
+        label: "S3-compatible object storage",
+        required: ["S3_BUCKET", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY"],
+        optional: [
+          "S3_REGION",
+          "S3_ENDPOINT",
+          "S3_PREFIX",
+          "S3_FORCE_PATH_STYLE",
+          "S3_SESSION_TOKEN",
+        ],
       },
     },
   },
@@ -94,7 +138,10 @@ function hasCredentials(spec) {
 /**
  * Resolve one integration.
  *
- * @returns {{ name: string, label: string, configured: boolean, missing: string[], error: string|null }}
+ * @returns {{ name: string, names: string[], label: string, configured: boolean, missing: string[], error: string|null }}
+ *   `name` is the primary provider; `names` is every provider this
+ *   integration has live, which is more than one only for a `multi`
+ *   integration such as meeting links.
  */
 export function resolveIntegration(key) {
   const integration = INTEGRATIONS[key];
@@ -108,22 +155,46 @@ export function resolveIntegration(key) {
     if (production && !integration.fakeAllowedInProduction) {
       return fail(key, `${integration.selector}=development is refused when APP_ENV=production.`);
     }
-    return { name: DEVELOPMENT, label: "Development", configured: true, missing: [], error: null };
+    return {
+      name: DEVELOPMENT,
+      names: [DEVELOPMENT],
+      label: "Development",
+      configured: true,
+      missing: [],
+      error: null,
+    };
   }
 
   if (requested) {
-    const spec = integration.providers[requested];
-    if (!spec) {
-      return fail(
-        key,
-        `${integration.selector}="${requested}" is not a provider this build knows. Supported: ${Object.keys(integration.providers).join(", ")}, development.`,
-      );
+    // A `multi` integration may name several adapters at once. Every one of
+    // them is validated; naming a provider without its secrets is a hard
+    // failure whether it was named alone or in a list.
+    const names = integration.multi
+      ? requested.split(",").map((n) => n.trim()).filter(Boolean)
+      : [requested];
+
+    for (const name of names) {
+      const spec = integration.providers[name];
+      if (!spec) {
+        return fail(
+          key,
+          `${integration.selector}="${name}" is not a provider this build knows. Supported: ${Object.keys(integration.providers).join(", ")}, development.`,
+        );
+      }
+      const missing = spec.required.filter((k) => !process.env[k]?.trim());
+      if (missing.length) {
+        return fail(key, `${integration.selector}=${name} needs ${missing.join(", ")}.`);
+      }
     }
-    const missing = spec.required.filter((k) => !process.env[k]?.trim());
-    if (missing.length) {
-      return fail(key, `${integration.selector}=${requested} needs ${missing.join(", ")}.`);
-    }
-    return { name: requested, label: spec.label, configured: true, missing: [], error: null };
+
+    return {
+      name: names[0],
+      names,
+      label: names.map((n) => integration.providers[n].label).join(" + "),
+      configured: true,
+      missing: [],
+      error: null,
+    };
   }
 
   // Nothing requested. Production never guesses.
@@ -135,15 +206,23 @@ export function resolveIntegration(key) {
   }
 
   // Development: light up whatever has credentials.
-  for (const [name, spec] of Object.entries(integration.providers)) {
-    if (hasCredentials(spec)) {
-      return { name, label: spec.label, configured: true, missing: [], error: null };
-    }
+  const live = Object.entries(integration.providers).filter(([, spec]) => hasCredentials(spec));
+  if (live.length) {
+    const names = integration.multi ? live.map(([name]) => name) : [live[0][0]];
+    return {
+      name: names[0],
+      names,
+      label: names.map((n) => integration.providers[n].label).join(" + "),
+      configured: true,
+      missing: [],
+      error: null,
+    };
   }
 
   const firstProvider = Object.values(integration.providers)[0];
   return {
     name: DEVELOPMENT,
+    names: [DEVELOPMENT],
     label: "Development",
     configured: true,
     missing: firstProvider?.required.filter((k) => !process.env[k]?.trim()) ?? [],
@@ -154,6 +233,7 @@ export function resolveIntegration(key) {
 function fail(key, message) {
   return {
     name: DEVELOPMENT,
+    names: [],
     label: "Unconfigured",
     configured: false,
     missing: [],

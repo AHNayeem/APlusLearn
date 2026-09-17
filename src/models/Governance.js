@@ -257,6 +257,11 @@ const SettingsSchema = new mongoose.Schema(
       min: 0,
     },
     bookingHorizonDays: { type: Number, default: DEFAULT_SETTINGS.bookingHorizonDays, min: 1 },
+    checkoutHoldMinutes: {
+      type: Number,
+      default: DEFAULT_SETTINGS.checkoutHoldMinutes,
+      min: 0,
+    },
     minHourlyRate: { type: Number, default: DEFAULT_SETTINGS.minHourlyRate, min: 0 },
     maxHourlyRate: { type: Number, default: DEFAULT_SETTINGS.maxHourlyRate, min: 1 },
     payoutHoldDays: { type: Number, default: DEFAULT_SETTINGS.payoutHoldDays, min: 0 },

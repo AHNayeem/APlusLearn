@@ -21,8 +21,8 @@ to one factory.
 | Email | `ConsoleEmailProvider` | **Resend** | `EMAIL_PROVIDER` |
 | OAuth | `DevOAuthProvider` | **Google**, **Apple** — OIDC ID tokens | `OAUTH_PROVIDER` |
 | Geocoding | `LocalTableGeocodingProvider` | **Google Geocoding API** | `GEOCODING_PROVIDER` |
-| Meeting links | `MockMeetingProvider` | **Zoom** — Server-to-Server OAuth | `MEETING_PROVIDER` |
-| Document storage | `LocalStorageProvider` | *(not implemented — see below)* | — |
+| Meeting links | `MockMeetingProvider` | **Zoom**, **Google Meet**, **Microsoft Teams** — any combination | `MEETING_PROVIDER` |
+| File storage | `LocalStorageProvider` | **S3-compatible object storage** | `STORAGE_PROVIDER` |
 
 ## How a provider is chosen
 
@@ -300,10 +300,104 @@ it. Only the meeting id, join URL and passcode are kept, on the booking, and
 `getBooking()` releases them to the purchaser, the tutor and an administrator
 and to nobody else. Public tutor profiles and search results never carry one.
 
-Google Meet and Microsoft Teams reach the same `MeetingProvider` interface but
-need a per-host OAuth grant (Google Calendar, Microsoft Graph) rather than an
-account credential, so they are a configuration and consent exercise rather
-than a code one.
+---
+
+## 5b. Meeting links — Google Meet
+
+```
+MEETING_PROVIDER=google_meet          # or "zoom,google_meet,microsoft_teams"
+GOOGLE_MEET_CLIENT_EMAIL=rooms@<project>.iam.gserviceaccount.com
+GOOGLE_MEET_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n…\n-----END PRIVATE KEY-----\n"
+GOOGLE_MEET_IMPERSONATE=rooms@your-domain.ca
+GOOGLE_MEET_CALENDAR_ID=primary
+```
+
+Google has no API that mints a standalone Meet room — a Meet belongs to a
+calendar event — so the adapter creates an event on a calendar the platform
+owns, asks Google to attach a conference to it, and keeps the `hangoutLink`.
+
+**Google Cloud → IAM → Service Accounts**, create a JSON key, and enable the
+Google Calendar API on the project. Then **Workspace Admin → Security → API
+controls → Domain-wide delegation**: add the service account's client id with
+the scope `https://www.googleapis.com/auth/calendar.events`. The adapter signs
+its own JWT assertion with that key and exchanges it for a bearer token — the
+same shape as Zoom's Server-to-Server grant, and for the same reason.
+
+`GOOGLE_MEET_PRIVATE_KEY` keeps the JSON file's literal `\n` escapes; the
+adapter unescapes them. A malformed key fails with a clear error that never
+echoes any of the key material.
+
+**The event is created with no attendees.** Adding the learner and tutor would
+be the obvious thing and is deliberately not done: it would put a child's
+email address into Google's calendar, send invitations this application did
+not ask for, and expose each participant's address to the other. The event is
+`private`, guests cannot invite others or see each other, and the application
+distributes the link itself. Only the event id and the Meet link are stored.
+
+---
+
+## 5c. Meeting links — Microsoft Teams
+
+```
+MEETING_PROVIDER=microsoft_teams      # or "zoom,google_meet,microsoft_teams"
+MS_TEAMS_TENANT_ID=…
+MS_TEAMS_CLIENT_ID=…
+MS_TEAMS_CLIENT_SECRET=…
+MS_TEAMS_USER_ID=…                    # the organiser account's object id
+```
+
+Graph's `onlineMeetings` resource is the closest of the three to what the
+application wants: a standalone meeting with a join link, no calendar event
+and no invitations.
+
+**Entra ID → App registrations**, add a client secret, and grant the
+*application* permission `OnlineMeetings.ReadWrite.All` with admin consent.
+Then scope the app to one organiser account, so a leaked client secret cannot
+create meetings as arbitrary users:
+
+```powershell
+New-CsApplicationAccessPolicy -Identity APlusLearn `
+  -AppIds <client-id> -Description "APlus Learn meeting rooms"
+Grant-CsApplicationAccessPolicy -PolicyName APlusLearn `
+  -Identity <organiser-object-id>
+```
+
+That organiser is a service account and never attends, so the lobby is set to
+let the two participants straight in — an empty lobby nobody can be admitted
+from would simply mean no lesson. The link is the secret, and it is private to
+the purchaser and the tutor.
+
+**`audioConferencing` and `joinInformation` are dropped.** The first carries a
+dial-in conference id that works as a credential; the second carries the
+organiser's identity. Neither is returned, stored or logged. No participant is
+named to Microsoft.
+
+---
+
+## 5d. Choosing between them
+
+`MEETING_PROVIDER` is the one selector that takes a **comma-separated list**,
+because §27 lets a learner pick a platform per booking from the ones their
+tutor teaches on:
+
+```
+MEETING_PROVIDER=zoom,google_meet     # Teams bookings get a development link
+```
+
+A platform that is not listed falls back to the development provider's
+deterministic room link rather than failing the booking. A platform that *is*
+listed but is missing a secret is a hard startup failure, as everywhere else.
+
+The learner's choice is stored on the booking at creation time — validated
+against the tutor's own `onlineMeetingProviders` — and read back when the room
+is created, which happens after payment, on a verified webhook that has no
+access to the original request. No meeting provider is ever taken from a
+request body at confirmation time.
+
+All three behave identically from the application's point of view: create
+after payment, PATCH on reschedule so an existing join link keeps working,
+DELETE on cancellation, and a provider outage leaves the booking confirmed
+with the link to be filled in later rather than losing a paid lesson.
 
 ---
 
@@ -313,10 +407,10 @@ Two scopes, both written outside `public/`. Nothing is ever written into the
 served web root — a writable directory inside it is how an upload feature
 becomes a remote-code-execution feature.
 
-| Scope | Path | Audience |
+| Scope | Location | Audience |
 |---|---|---|
-| `documents` | `./.storage/documents` | Private. Verification paperwork, served only through the audited admin route. The storage key is `select: false` on the model so it cannot leak through a serialised document. |
-| `branding` | `./.storage/branding` | Public *content*, private *files*. Logos and icons uploaded at Admin → Platform settings, served by `/api/branding/[asset]`. |
+| `documents` | `.storage/documents` or `<prefix>/documents/` | Private. Verification paperwork, served only through the audited admin route. The storage key is `select: false` on the model so it cannot leak through a serialised document. |
+| `branding` | `.storage/branding` or `<prefix>/branding/` | Public *content*, private *files*. Logos and icons uploaded at Admin → Platform settings, served by `/api/branding/[asset]`. |
 
 Branding assets are addressed by **setting name**, never by storage key: the
 route resolves `logo`, `favicon`, `appleTouchIcon`, `logoDark` or `ogImage`
@@ -329,13 +423,59 @@ outright — it is a script-capable document, not a picture. Responses carry
 policy; replacing an asset changes the `?v=` every page emits, so a new file is
 a new URL.
 
-A production deployment should implement `StorageProvider` against an object
-store — private ACLs with short-lived signed URLs for documents, ordinary
-public objects or a CDN for branding. The interface is in
-[`storage-provider.js`](../src/services/external/storage-provider.js); this is
-the one integration with no production implementation yet. Note that the local
-filesystem does not survive a redeploy on an ephemeral host and is not shared
-between instances, so an uploaded logo will not persist there without one.
+Verification documents get the same treatment and more. The content type is
+read from the bytes and must agree with what the upload claimed, so a script
+relabelled `application/pdf` is refused rather than stored. The uploader's
+filename is kept only as a label — control characters, path separators and
+quotes are stripped from it, because it is later echoed in a
+`Content-Disposition` header — and the file is stored under a generated UUID.
+The admin retrieval route answers with `nosniff`, a `sandbox` content-security
+policy and `no-store`.
+
+### Object storage
+
+```
+STORAGE_PROVIDER=s3
+S3_BUCKET=aplus-learn-prod
+S3_ACCESS_KEY_ID=…
+S3_SECRET_ACCESS_KEY=…
+S3_REGION=ca-central-1        # "auto" for Cloudflare R2
+S3_ENDPOINT=                  # unset for Amazon; the service URL otherwise
+S3_PREFIX=prod                # one bucket, several environments
+S3_FORCE_PATH_STYLE=true
+```
+
+`S3StorageProvider` speaks the S3 API directly — SigV4 signed with
+`node:crypto`, no SDK — so it runs unchanged against Amazon S3, Cloudflare R2,
+Backblaze B2, DigitalOcean Spaces and MinIO. Adding tens of megabytes of SDK
+to the server bundle for three operations would be the same trade
+`lib/images/inspect.js` already declines.
+
+**The bucket must be private, and no configuration makes it otherwise.**
+Nothing in the application hands out an object URL: both scopes are fetched
+server-side and streamed through a route that has already authorised the
+caller, so there is no signed link to leak, expire badly or forward. The
+provider sets no ACL, requests `AES256` at rest, and generates every key as a
+UUID under its scope prefix. Grant the credentials `s3:GetObject`,
+`s3:PutObject` and `s3:DeleteObject` on `<bucket>/<prefix>/*` and nothing else.
+
+**`STORAGE_PROVIDER=development` is refused when `APP_ENV=production.`** A
+serverless filesystem does not survive the request that wrote to it, so a
+production deployment on it accepts a tutor's identity paperwork and then
+loses it. Failing to start is the better outcome, and is what happens.
+
+### Migrating an existing deployment
+
+The stored `storageKey` is just the object's filename, so nothing in the
+database changes. Copy the files across, keeping the names exactly:
+
+```bash
+aws s3 sync .storage/documents "s3://$S3_BUCKET/$S3_PREFIX/documents"
+aws s3 sync .storage/branding  "s3://$S3_BUCKET/$S3_PREFIX/branding"
+```
+
+Then set `STORAGE_PROVIDER=s3` and the credentials. Nothing is deleted from
+`.storage/` by this application; remove it yourself once the copy is verified.
 
 ---
 

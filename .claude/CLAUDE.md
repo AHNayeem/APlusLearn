@@ -16,11 +16,18 @@ Package manager is **bun** (`bun.lock`, `packageManager: bun@1.3.12`); npm works
 | `bun run seed` | Wipe and reseed MongoDB with the Ontario marketplace fixture |
 | `bun run seed:keep` | Add only missing seed data |
 | `bun run qa` | End-to-end API suite over real HTTP — **requires `bun run dev` running in another terminal** |
+| `bun run test:integrations` | Provider adapters and DB-backed service rules, with `fetch` stubbed — no third-party service is contacted |
 
-`scripts/qa.mjs` is the only test suite; there is no unit-test runner. It is a single
-sequential script with no filter flag — to run one area, comment out `section(...)`
-blocks in [scripts/qa.mjs](scripts/qa.mjs) or point it elsewhere with `QA_BASE_URL`.
-It asserts both success paths and the authorization checks that must **fail**.
+Two suites, no unit-test runner. Both are single sequential scripts with no filter flag —
+to run one area, comment out `section(...)` blocks.
+
+- [scripts/qa.mjs](scripts/qa.mjs) drives the real HTTP API against a running dev server
+  (`QA_BASE_URL` points it elsewhere) and asserts both success paths and the authorization
+  checks that must **fail**.
+- [scripts/integration-tests.mjs](scripts/integration-tests.mjs) imports `src/` directly
+  through a loader that teaches Node the `@/*` alias, and covers the Stripe/Resend/OAuth/
+  geocoding/meeting/storage adapters plus the booking-hold rules. Sections needing MongoDB
+  report as skipped without it.
 
 Setup: `cp .env.example .env.local`, then set `MONGODB_URI` and `AUTH_SECRET`
 (≥32 chars, `openssl rand -base64 48`). Everything else has a dev fallback.
@@ -56,7 +63,9 @@ ad-hoc JSON responses, and never let a raw driver error reach the client.
 
 ### Rules the code holds to
 
-- **Single implementation of each business rule.** Pricing only in [src/lib/booking/pricing.js](src/lib/booking/pricing.js); every cancellation path (student, tutor, admin, dispute) resolves through [src/lib/booking/policy.js](src/lib/booking/policy.js). Don't add a second calculation.
+- **Single implementation of each business rule.** Pricing only in [src/lib/booking/pricing.js](src/lib/booking/pricing.js); every cancellation path (student, tutor, admin, dispute) resolves through [src/lib/booking/policy.js](src/lib/booking/policy.js), which also owns whether an unpaid booking may give its slot back (`shouldReleaseHold`, `failureReleasesHold`). Don't add a second calculation.
+- **`PENDING_PAYMENT` holds a slot; `EXPIRED` does not.** An unpaid booking blocks the tutor's calendar for `Settings.checkoutHoldMinutes` (default [`CHECKOUT_HOLD`](src/constants/config.js)), after which the `booking-expiry` job releases it. Anything that adds a booking status must decide deliberately whether it belongs in `BLOCKING_BOOKING_STATUSES`.
+- **Scheduled work is one registry.** Jobs are registered in [src/services/scheduler.service.js](src/services/scheduler.service.js) and invoked through `/api/cron/<job>`; each claims its work atomically so overlapping runs are safe. Add to the registry and to `vercel.json`, not to a second scheduler.
 - **The client supplies intent, never state.** Amounts, commission and statuses are derived server-side from stored data. `bun run qa` asserts an injected `price` or `status` is ignored.
 - **Ownership is checked against the loaded DB record**, never a request field (`requireOwnership`, `requireParticipant`, `ownsOrAdmin`).
 - **`isSearchable` is derived**, not client-set — it gates every public tutor query, so an unapproved profile cannot surface in search.
@@ -82,8 +91,19 @@ options and the page-level `searchParams` parsing. Add the schema there rather t
 Each integration in [src/services/external/](src/services/external/) is an abstract class + a
 working development implementation + a `get*Provider()` factory that picks based on env vars
 (`MockPaymentProvider`, `ConsoleEmailProvider`, deterministic meeting links, bundled Canadian
-geocoding table, local document storage under `.storage/`). Wiring a real provider means
+geocoding table, `LocalStorageProvider` under `.storage/`). Wiring a real provider means
 implementing the interface and returning it from the factory — no service or UI change.
+Selection rules live only in [src/lib/config/env.js](src/lib/config/env.js): production never
+guesses, and `development` is refused for payments, email and storage.
+
+Two integrations are shaped slightly differently and it matters:
+
+- **Meeting links** may have several adapters live at once, because §27 lets a learner pick a
+  platform per booking. `MEETING_PROVIDER` takes a comma-separated list and
+  `getMeetingProvider(provider)` takes the `MEETING_PROVIDERS` value stored on the booking.
+- **Storage** has two scopes (`documents`, `branding`) and never returns a URL — bytes are
+  fetched server-side and streamed through an authorised route.
+
 Dev test cards: `4242 4242 4242 4242` succeeds, anything ending `0002` is declined.
 
 ### UI

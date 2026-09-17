@@ -23,6 +23,7 @@ import {
   PAGE_SIZES,
   ROLES,
   FEATURES,
+  PAYMENT_STATUS,
 } from "@/constants";
 import {
   NotFoundError,
@@ -43,6 +44,8 @@ import {
   canComplete,
   assessCancellationAbuse,
   cancellationPolicyText,
+  shouldReleaseHold,
+  holdMinutes,
 } from "@/lib/booking/policy";
 import { isSlotBookable } from "@/lib/booking/slots";
 import { getSettings } from "./settings.service";
@@ -98,9 +101,10 @@ function assertTutorTeachesCourse(tutor, courseId) {
 /**
  * Create a booking (or a recurring series).
  *
- * Bookings start in PENDING_PAYMENT and are only CONFIRMED once the payment
- * service reports success, so an abandoned checkout never blocks a tutor's
- * calendar indefinitely.
+ * Bookings start in PENDING_PAYMENT, which *does* hold the slot — that is the
+ * point of it — and are CONFIRMED once the payment service reports success.
+ * An abandoned checkout is released by `expireStaleBookings()` below, which
+ * the `booking-expiry` job runs; the hold window itself is `CHECKOUT_HOLD`.
  */
 export async function createBooking(input, actor) {
   // Enforced here rather than only in the route pipeline, so every path into
@@ -142,6 +146,22 @@ export async function createBooking(input, actor) {
 
   if (!tutor.lessonModes.includes(input.mode)) {
     throw new BusinessRuleError("This tutor does not offer that lesson type.");
+  }
+
+  // The meeting platform is the learner's choice, but only from the ones this
+  // tutor actually teaches on. Checked here rather than trusted from the form,
+  // because this value now decides which provider a real room is created on
+  // (§27, §42).
+  if (input.mode === LESSON_MODES.ONLINE) {
+    const offered = tutor.onlineMeetingProviders?.length
+      ? tutor.onlineMeetingProviders
+      : [MEETING_PROVIDERS.ZOOM];
+    if (!offered.includes(input.meetingProvider)) {
+      throw new BusinessRuleError(
+        "This tutor does not teach on that meeting platform.",
+        "MEETING_PROVIDER_UNAVAILABLE",
+      );
+    }
   }
 
   // A lesson mode the operator has switched off platform-wide is refused here,
@@ -218,6 +238,9 @@ export async function createBooking(input, actor) {
       courseCode: course.code,
       subjectName: course.subjectName,
       mode: input.mode,
+      // Intent, recorded now and acted on later. The room itself is created
+      // after payment, by a webhook that has no access to this request (§27).
+      meetingProvider: input.mode === LESSON_MODES.ONLINE ? input.meetingProvider : undefined,
       location: input.mode === LESSON_MODES.IN_PERSON ? input.location : undefined,
       startAt: start,
       endAt: end,
@@ -322,29 +345,297 @@ function seriesStartTimes(startAt, recurrence, occurrences) {
  * here, once there is actually something to attend (§27).
  */
 export async function confirmBookings(paymentId, { meetingProvider } = {}) {
-  const bookings = await Booking.find({ paymentId, status: BOOKING_STATUS.PENDING_PAYMENT });
-  if (!bookings.length) return { confirmed: 0 };
+  // EXPIRED is included for one narrow case: a payment that settles in the
+  // moments after the sweep released its hold — an async payment method, or a
+  // webhook that arrived late. Reviving is conditional on the slot still
+  // being free, checked per booking below, so a lesson is never resurrected
+  // on top of somebody else's.
+  const candidates = await Booking.find({
+    paymentId,
+    status: { $in: [BOOKING_STATUS.PENDING_PAYMENT, BOOKING_STATUS.EXPIRED] },
+  });
+  if (!candidates.length) return { confirmed: 0 };
 
   const confirmed = [];
+  const unconfirmable = [];
 
-  for (const booking of bookings) {
+  for (const booking of candidates) {
+    if (booking.status === BOOKING_STATUS.EXPIRED && !(await slotStillFree(booking))) {
+      unconfirmable.push(booking);
+      continue;
+    }
+
     booking.status = BOOKING_STATUS.CONFIRMED;
     booking.confirmedAt = new Date();
+    booking.expiredAt = undefined;
 
     if (booking.mode === LESSON_MODES.ONLINE) {
-      booking.meeting = await createMeetingFor(booking, meetingProvider);
+      // The stored choice wins; the argument is only a fallback for callers
+      // that confirm a booking made before the field existed.
+      booking.meeting = await createMeetingFor(booking, booking.meetingProvider ?? meetingProvider);
     }
 
     await booking.save();
     confirmed.push(booking);
   }
 
+  if (unconfirmable.length) {
+    // Money was taken for a slot that is gone. Nothing here can put that
+    // right silently, so it is made loud: an administrator refunds it.
+    console.error(
+      `[booking] payment ${paymentId} settled after ${unconfirmable.length} hold(s) lapsed and the slot(s) were retaken.`,
+    );
+    await recordAudit({
+      actor: { role: "SYSTEM" },
+      action: AUDIT_ACTIONS.BOOKING_EXPIRED,
+      entityType: "Payment",
+      entityId: paymentId,
+      metadata: {
+        reason: "paid after hold lapsed; slot no longer available",
+        bookings: unconfirmable.map((b) => b.reference),
+        needsRefund: true,
+      },
+    });
+  }
+
+  if (!confirmed.length) return { confirmed: 0, unconfirmable: unconfirmable.length };
+
   await Promise.all([
     refreshNextAvailable(confirmed[0].tutorProfileId),
     notifyBookingConfirmed(confirmed),
   ]);
 
-  return { confirmed: confirmed.length, bookings: toPlain(confirmed) };
+  return {
+    confirmed: confirmed.length,
+    unconfirmable: unconfirmable.length,
+    bookings: toPlain(confirmed),
+  };
+}
+
+// --- Releasing an abandoned hold (§19, §20) --------------------------------
+
+/**
+ * Release the slots held by bookings whose checkout was never completed.
+ *
+ * This is what stops an abandoned — or deliberately abandoned — checkout from
+ * erasing a tutor's calendar. Without it, PENDING_PAYMENT is a hold that
+ * nothing ever lets go of, and any signed-in learner can take a tutor's whole
+ * week off the market for free.
+ *
+ * The contract, because the `booking-expiry` job may run at any time, twice
+ * at once, or after a long gap:
+ *
+ *   **Idempotent.** Every write is a conditional claim on a status the
+ *   booking must still be in. A second run finds nothing left to claim.
+ *   **Overlap-safe.** Two concurrent runs race on the same claims and exactly
+ *   one wins each; the loser sees `modifiedCount === 0` and moves on.
+ *   **Conservative.** Whether a hold may be released at all is decided by
+ *   `shouldReleaseHold()` in lib/booking/policy — the one place that rule
+ *   lives — and a settled payment is never touched, whatever its age.
+ *
+ * It also collects bookings created before this mechanism existed: they are
+ * old PENDING_PAYMENT rows with a lapsed hold, which is exactly what this
+ * query selects, so they are swept on the first run rather than migrated.
+ *
+ * @param {object}  [options]
+ * @param {Date}    [options.now]    Injected by tests so "stale" is deterministic.
+ * @param {number}  [options.limit]  Ceiling on one sweep, so a backlog is
+ *                                   worked through over several runs instead
+ *                                   of in one very long request.
+ */
+export async function expireStaleBookings({ now = new Date(), limit = 500 } = {}) {
+  const settings = await getSettings();
+
+  // Nothing created inside the shortest possible hold can be stale, so the
+  // query never even looks at the bookings currently being paid for.
+  const earliestPossible = new Date(now.getTime() - holdMinutes(settings) * 60_000);
+
+  const candidates = await Booking.find({
+    status: BOOKING_STATUS.PENDING_PAYMENT,
+    createdAt: { $lte: earliestPossible },
+  })
+    .sort({ createdAt: 1 })
+    .limit(limit)
+    .lean();
+
+  if (!candidates.length) return { examined: 0, expired: 0, held: 0, payments: 0 };
+
+  // One read per payment, not per booking: a recurring series shares one.
+  const paymentIds = [...new Set(candidates.filter((b) => b.paymentId).map((b) => String(b.paymentId)))];
+  const payments = paymentIds.length
+    ? await Payment.find({ _id: { $in: paymentIds } })
+        .select("_id status checkoutExpiresAt providerCheckoutUrl")
+        .lean()
+    : [];
+  const paymentById = new Map(payments.map((p) => [String(p._id), p]));
+
+  let expired = 0;
+  let held = 0;
+  const tutorProfileIds = new Set();
+  const settledPayments = new Set();
+
+  for (const booking of candidates) {
+    const payment = booking.paymentId ? paymentById.get(String(booking.paymentId)) : null;
+    const verdict = shouldReleaseHold({ booking, payment, settings, now });
+    if (!verdict.expire) {
+      held += 1;
+      continue;
+    }
+
+    const released = await releaseBooking(booking, { now, reason: verdict.reason });
+    if (!released) {
+      held += 1;
+      continue;
+    }
+
+    expired += 1;
+    tutorProfileIds.add(String(booking.tutorProfileId));
+    if (payment) settledPayments.add(String(payment._id));
+  }
+
+  // A payment whose lessons are all gone must stop being payable, or the
+  // checkout page would happily take money for nothing.
+  let paymentsClosed = 0;
+  for (const paymentId of settledPayments) {
+    if (await closeAbandonedPayment(paymentId)) paymentsClosed += 1;
+  }
+
+  await Promise.all([...tutorProfileIds].map((id) => refreshNextAvailable(id)));
+
+  return { examined: candidates.length, expired, held, payments: paymentsClosed };
+}
+
+/**
+ * Move one booking to EXPIRED, if it is still there to be moved.
+ *
+ * The status filter is the whole guarantee. Between the sweep's read and this
+ * write the booking may have been confirmed by a webhook or cancelled by its
+ * purchaser; in either case the update matches nothing and the caller is told
+ * so rather than overwriting a decision someone else made.
+ *
+ * @returns {Promise<boolean>} whether this call is the one that expired it.
+ */
+async function releaseBooking(booking, { now = new Date(), reason } = {}) {
+  const claim = await Booking.updateOne(
+    { _id: booking._id, status: BOOKING_STATUS.PENDING_PAYMENT },
+    { $set: { status: BOOKING_STATUS.EXPIRED, expiredAt: now } },
+  );
+  if (claim.modifiedCount !== 1) return false;
+
+  await recordAudit({
+    actor: { role: "SYSTEM" },
+    action: AUDIT_ACTIONS.BOOKING_EXPIRED,
+    entityType: "Booking",
+    entityId: booking._id,
+    metadata: {
+      reference: booking.reference,
+      reason,
+      startAt: new Date(booking.startAt).toISOString(),
+      tutorProfileId: String(booking.tutorProfileId),
+    },
+  });
+
+  // Told once per booking, and only to the purchaser: the tutor never saw an
+  // unpaid hold as a confirmed lesson, so nothing changed on their side.
+  await notifyHoldReleased(booking).catch((error) => {
+    console.error(`[booking] expiry notice failed for ${booking.reference}:`, error.message);
+  });
+
+  return true;
+}
+
+/**
+ * Stop an abandoned payment being payable, once every booking it covers has
+ * been released. A payment still carrying a live booking is left alone.
+ */
+async function closeAbandonedPayment(paymentId) {
+  const stillHeld = await Booking.exists({
+    paymentId,
+    status: { $in: BLOCKING_BOOKING_STATUSES },
+  });
+  if (stillHeld) return false;
+
+  const claim = await Payment.updateOne(
+    {
+      _id: paymentId,
+      status: { $in: [PAYMENT_STATUS.REQUIRES_PAYMENT, PAYMENT_STATUS.PROCESSING] },
+    },
+    {
+      $set: { status: PAYMENT_STATUS.FAILED, failureReason: "Checkout was not completed in time." },
+      $unset: { providerCheckoutUrl: "", checkoutExpiresAt: "" },
+    },
+  );
+  return claim.modifiedCount === 1;
+}
+
+async function notifyHoldReleased(booking) {
+  await notify({
+    userId: booking.purchaserId,
+    type: NOTIFICATION_TYPES.BOOKING_EXPIRED,
+    title: "Your held lesson time has been released",
+    body: `Payment for ${booking.courseName} on ${formatDate(booking.startAt, { weekday: "short", timeZone: booking.timeZone })} at ${formatTime(booking.startAt, booking.timeZone)} was not completed, so the time is available to book again.`,
+    href: `/tutors`,
+    entityType: "Booking",
+    entityId: booking._id,
+    channels: [NOTIFICATION_CHANNELS.IN_APP],
+  });
+}
+
+/**
+ * Release the slots behind one payment immediately, on a *verified* provider
+ * failure (§20, §38).
+ *
+ * Called only by `webhook.service`, after the event's signature has been
+ * checked and the payment resolved from it — never from anything a browser
+ * sent. Whether a given failure should release at all is `failureReleasesHold()`
+ * in lib/booking/policy; this function does not second-guess it, it only
+ * enforces that a settled payment's bookings are untouchable.
+ *
+ * @returns {Promise<{ expired: number }>}
+ */
+export async function releaseBookingsForFailedPayment(paymentId, { reason, now = new Date() } = {}) {
+  const payment = await Payment.findById(paymentId).select("_id status").lean();
+  if (!payment) return { expired: 0 };
+
+  // Belt and braces over the caller's own check: money in hand outranks any
+  // failure event, which routinely arrive out of order.
+  if (
+    payment.status === PAYMENT_STATUS.PAID ||
+    payment.status === PAYMENT_STATUS.PARTIALLY_REFUNDED ||
+    payment.status === PAYMENT_STATUS.REFUNDED
+  ) {
+    return { expired: 0 };
+  }
+
+  const held = await Booking.find({
+    paymentId: payment._id,
+    status: BOOKING_STATUS.PENDING_PAYMENT,
+  }).lean();
+  if (!held.length) return { expired: 0 };
+
+  let expired = 0;
+  const tutorProfileIds = new Set();
+
+  for (const booking of held) {
+    if (await releaseBooking(booking, { now, reason: reason ?? "payment failed" })) {
+      expired += 1;
+      tutorProfileIds.add(String(booking.tutorProfileId));
+    }
+  }
+
+  await Promise.all([...tutorProfileIds].map((id) => refreshNextAvailable(id)));
+
+  return { expired };
+}
+
+/** Is this lesson's window still clear of every booking that blocks a slot? */
+async function slotStillFree(booking) {
+  const clash = await Booking.exists(
+    overlapQuery([{ startAt: booking.startAt, endAt: booking.endAt }], booking.tutorProfileId, [
+      booking._id,
+    ]),
+  );
+  return !clash;
 }
 
 /**
@@ -356,9 +647,15 @@ export async function confirmBookings(paymentId, { meetingProvider } = {}) {
  * two participants — `getBooking()` is what enforces that.
  */
 async function createMeetingFor(booking, requestedProvider) {
-  const provider = requestedProvider ?? MEETING_PROVIDERS.ZOOM;
+  // The platform the learner chose. It reached here from the Booking record,
+  // which was written server-side at booking time — never from a request
+  // body at confirmation time (§42).
+  const provider = requestedProvider ?? booking.meetingProvider ?? MEETING_PROVIDERS.ZOOM;
   try {
-    return await getMeetingProvider().createMeeting({
+    // One adapter per platform: Zoom, Google Meet or Microsoft Teams,
+    // falling back to the development provider where this deployment has no
+    // credentials for the one that was chosen.
+    return await getMeetingProvider(provider).createMeeting({
       provider,
       topic: `${booking.courseName} lesson`,
       agenda: booking.courseCode ? `${booking.courseName} (${booking.courseCode})` : undefined,
@@ -372,11 +669,20 @@ async function createMeetingFor(booking, requestedProvider) {
   }
 }
 
-/** Tear a room down so a cancelled lesson's link stops working. */
+/**
+ * Tear a room down so a cancelled lesson's link stops working.
+ *
+ * Torn down through the adapter for the platform the room was *actually*
+ * created on — `meeting.provider`, not the booking's requested one, which can
+ * differ when the chosen platform was unconfigured and the room came from the
+ * development provider.
+ */
 async function releaseMeetingFor(booking) {
   if (!booking.meeting?.meetingId) return;
   try {
-    await getMeetingProvider().deleteMeeting({ meetingId: booking.meeting.meetingId });
+    await getMeetingProvider(booking.meeting.provider).deleteMeeting({
+      meetingId: booking.meeting.meetingId,
+    });
   } catch (error) {
     console.error(`[booking] meeting teardown failed for ${booking.reference}:`, error.message);
   }
@@ -470,7 +776,10 @@ export async function listBookings(actor, params = {}) {
       };
       break;
     case "CANCELLED":
-      query.status = { $in: CANCELLED_STATUSES };
+      // An expired hold belongs here too: from the learner's point of view a
+      // lesson that was cancelled and one whose payment lapsed are the same
+      // outcome, and leaving EXPIRED out of every scope would hide it.
+      query.status = { $in: [...CANCELLED_STATUSES, BOOKING_STATUS.EXPIRED] };
       break;
     case "AWAITING_REVIEW":
       query.status = BOOKING_STATUS.COMPLETED;
@@ -1000,7 +1309,7 @@ export async function rescheduleBooking(id, { startAt, durationMinutes, reason }
   if (booking.mode === LESSON_MODES.ONLINE) {
     if (booking.meeting?.meetingId) {
       try {
-        await getMeetingProvider().updateMeeting({
+        await getMeetingProvider(booking.meeting.provider).updateMeeting({
           meetingId: booking.meeting.meetingId,
           topic: `${booking.courseName} lesson`,
           startAt: booking.startAt,

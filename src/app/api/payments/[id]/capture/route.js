@@ -3,7 +3,7 @@ import { routeHandler, ok } from "@/lib/api";
 import { objectId } from "@/lib/validation/common";
 import { capturePayment } from "@/services/payment.service";
 import { confirmBookings } from "@/services/booking.service";
-import { MEETING_PROVIDERS, PERMISSIONS } from "@/constants";
+import { PERMISSIONS } from "@/constants";
 
 /**
  * Complete checkout and confirm the booking(s).
@@ -14,7 +14,10 @@ import { MEETING_PROVIDERS, PERMISSIONS } from "@/constants";
 export const POST = routeHandler(
   async ({ user, params, body }) => {
     const payment = await capturePayment(params.id, { card: body.card }, user);
-    const result = await confirmBookings(params.id, { meetingProvider: body.meetingProvider });
+    // No meeting provider is taken from the request: the platform the
+    // purchaser chose was recorded on the booking when it was created, and
+    // that is what the room is built on (§27, §42).
+    const result = await confirmBookings(params.id);
     return ok({ payment, ...result });
   },
   {
@@ -29,7 +32,6 @@ export const POST = routeHandler(
         cvc: z.string().regex(/^\d{3,4}$/, "Enter the 3 or 4 digit code."),
         postalCode: z.string().trim().max(10).optional(),
       }),
-      meetingProvider: z.enum(Object.values(MEETING_PROVIDERS)).optional(),
     }),
   },
 );
