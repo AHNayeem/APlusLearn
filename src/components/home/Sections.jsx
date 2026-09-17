@@ -2,9 +2,10 @@ import Link from "next/link";
 import * as Icons from "lucide-react";
 import {
   ShieldCheck, Video, MapPin, Wallet, Clock, BadgeCheck, ArrowRight, Check, Quote,
+  IdCard, Stamp, GraduationCap, School,
 } from "lucide-react";
 import { cn } from "@/lib/utils/cn";
-import { Badge, Button, Card, Rating, Reveal, RevealGroup, RevealItem } from "@/components/ui";
+import { Badge, Button, Rating, Reveal, RevealGroup, RevealItem } from "@/components/ui";
 import { StepCards } from "@/components/home/StepCards";
 import { StepArt } from "@/components/home/StepArt";
 import { formatRate, formatNumber } from "@/lib/utils/format";
@@ -292,14 +293,59 @@ export function PopularCourses({ courses = [] }) {
 
 // --- Find tutors by grade (§12) --------------------------------------------
 
+/**
+ * The Ontario stages, in the order a child moves through them (§12).
+ *
+ * Rendered as one ladder rather than three equal cards, because the stages
+ * hold seven, two and four grades — a three-column grid leaves the
+ * intermediate card two-thirds empty no matter how it is styled. Each stage
+ * keeps its own colour so the chips stay tellable apart, and the tile carries
+ * the range so a row reads before you reach the numbers.
+ */
+const GRADE_STAGES = [
+  {
+    stage: "ELEMENTARY",
+    label: "Elementary",
+    range: "K–6",
+    hint: "Reading fluency, number sense, and homework that stops being a fight.",
+    tile: "bg-brand-600",
+    chip: "bg-brand-50 text-brand-700 ring-brand-100 hover:bg-brand-600 hover:text-white hover:ring-brand-600",
+  },
+  {
+    stage: "MIDDLE",
+    label: "Intermediate",
+    range: "7–8",
+    hint: "Where algebra lands and small gaps start to compound.",
+    tile: "bg-plum-600",
+    chip: "bg-plum-50 text-plum-700 ring-plum-100 hover:bg-plum-600 hover:text-white hover:ring-plum-600",
+  },
+  {
+    stage: "SECONDARY",
+    label: "Secondary",
+    range: "9–12",
+    hint: "Course codes, exam prep, and the marks universities will see.",
+    tile: "bg-accent-500",
+    chip: "bg-accent-50 text-accent-700 ring-accent-100 hover:bg-accent-500 hover:text-white hover:ring-accent-500",
+  },
+];
+
+/**
+ * "Grade 9" printed thirteen times is noise; inside a row already labelled
+ * "Secondary · 9–12" the numeral alone is unambiguous. The full name stays on
+ * the link's accessible name, so nothing is lost to a screen reader.
+ */
+function gradeChipLabel(name) {
+  const digits = name.match(/\d+/);
+  if (digits) return digits[0];
+  return name
+    .split(/\s+/)
+    .map((word) => word[0])
+    .join("")
+    .toUpperCase();
+}
+
 export function TutorsByGrade({ grades = [] }) {
   if (!grades.length) return null;
-
-  const groups = [
-    { label: "Elementary", stage: "ELEMENTARY", hint: "Kindergarten to Grade 6" },
-    { label: "Intermediate", stage: "MIDDLE", hint: "Grades 7 and 8" },
-    { label: "Secondary", stage: "SECONDARY", hint: "Grades 9 to 12" },
-  ];
 
   return (
     <Section
@@ -307,32 +353,63 @@ export function TutorsByGrade({ grades = [] }) {
       title="Support that matches where your child actually is"
       description="A Grade 4 reading gap and a Grade 12 calculus gap need very different tutors. Start from the grade."
     >
-      <div className="grid gap-6 lg:grid-cols-3">
-        {groups.map((group) => {
-          const inGroup = grades.filter((g) => g.stage === group.stage);
-          if (!inGroup.length) return null;
+      <Reveal>
+        <div className="mx-auto max-w-3xl overflow-hidden rounded-2xl border border-ink-200/80 bg-white shadow-sm">
+          <ul className="divide-y divide-ink-100">
+            {GRADE_STAGES.map((stage) => {
+              const inStage = grades
+                .filter((grade) => grade.stage === stage.stage)
+                .sort((a, b) => a.level - b.level);
+              if (!inStage.length) return null;
 
-          return (
-            <Reveal key={group.stage}>
-              <Card className="h-full p-6">
-                <h3 className="text-base font-bold text-ink-900">{group.label}</h3>
-                <p className="mt-1 text-sm text-ink-500">{group.hint}</p>
-                <div className="mt-5 flex flex-wrap gap-2">
-                  {inGroup.map((grade) => (
-                    <Link
-                      key={grade.id}
-                      href={`/find-a-tutor?grade=${grade.slug}&province=ON`}
-                      className="rounded-lg bg-ink-100 px-3 py-1.5 text-xs font-semibold text-ink-700 transition-colors hover:bg-brand-100 hover:text-brand-700"
+              return (
+                <li
+                  key={stage.stage}
+                  className="flex flex-col gap-5 p-6 sm:p-7 lg:flex-row lg:items-center lg:gap-8"
+                >
+                  <div className="flex items-center gap-4 lg:w-[19rem] lg:shrink-0">
+                    <span
+                      className={cn(
+                        "flex size-14 shrink-0 items-center justify-center rounded-2xl",
+                        "text-sm font-extrabold tracking-tight text-white shadow-xs",
+                        stage.tile,
+                      )}
                     >
-                      {grade.name}
-                    </Link>
-                  ))}
-                </div>
-              </Card>
-            </Reveal>
-          );
-        })}
-      </div>
+                      {stage.range}
+                    </span>
+                    <span className="min-w-0">
+                      <h3 className="text-base font-bold tracking-tight text-ink-900">{stage.label}</h3>
+                      <p className="mt-1 text-xs leading-relaxed text-ink-500">{stage.hint}</p>
+                    </span>
+                  </div>
+
+                  <div className="flex flex-wrap gap-2">
+                    {inStage.map((grade) => (
+                      <Link
+                        key={grade.id}
+                        href={`/find-a-tutor?grade=${grade.slug}&province=ON`}
+                        aria-label={`Find ${grade.name} tutors`}
+                        className={cn(
+                          "inline-flex size-11 items-center justify-center rounded-2xl",
+                          "text-sm font-bold ring-1 ring-inset transition-colors duration-200",
+                          stage.chip,
+                        )}
+                      >
+                        <span aria-hidden="true">{gradeChipLabel(grade.name)}</span>
+                      </Link>
+                    ))}
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+
+          <p className="border-t border-ink-100 bg-canvas px-6 py-5 text-center text-xs leading-relaxed text-ink-500 sm:px-7">
+            Grade filters run against the courses each tutor has listed, so picking a grade only
+            returns people who actually teach at that level.
+          </p>
+        </div>
+      </Reveal>
     </Section>
   );
 }
@@ -390,6 +467,34 @@ export function WhyChoose() {
 
 // --- Verification (§12, §16) -----------------------------------------------
 
+/**
+ * Presentation for each check. Keyed by `VERIFICATION_TYPES` and looked up with
+ * a fallback, so adding a type to the domain still renders here rather than
+ * dropping silently — it just arrives in the default blue.
+ *
+ * Two families alternate down the list so neighbouring checks stay
+ * distinguishable, and the background check takes the accent because it is the
+ * one parents scan for first.
+ */
+const VERIFICATION_META = {
+  IDENTITY: { icon: IdCard, chip: "bg-brand-50 text-brand-600" },
+  OCT: { icon: Stamp, chip: "bg-plum-50 text-plum-600" },
+  EDUCATION: { icon: GraduationCap, chip: "bg-brand-50 text-brand-600" },
+  UNIVERSITY_STUDENT: { icon: School, chip: "bg-plum-50 text-plum-600" },
+  BACKGROUND_CHECK: { icon: ShieldCheck, chip: "bg-accent-50 text-accent-600" },
+};
+
+const VERIFICATION_FALLBACK = { icon: BadgeCheck, chip: "bg-brand-50 text-brand-600" };
+
+/**
+ * The stored labels all end in "Verified", which is worth saying on a tutor
+ * profile but turns into five identical words down a list. Here the green tick
+ * on the icon says it once per row, so the name can carry the difference.
+ */
+function checkName(type) {
+  return VERIFICATION_LABELS[type].replace(/ Verified$/, "");
+}
+
 export function VerificationSection() {
   const badges = Object.values(VERIFICATION_TYPES);
 
@@ -404,31 +509,71 @@ export function VerificationSection() {
         </Button>
       }
     >
-      <RevealGroup className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {badges.map((type) => (
-          <RevealItem key={type}>
-            <div className="h-full rounded-2xl border border-ink-200 bg-white p-5">
-              <Badge tone="success" icon={<BadgeCheck className="size-3.5" />}>
-                {VERIFICATION_LABELS[type]}
-              </Badge>
+      <div className="grid gap-6 lg:grid-cols-[minmax(0,21rem)_minmax(0,1fr)] lg:gap-8">
+        {/* The promise that used to be squeezed into the grid as a sixth tile.
+            It isn't a badge, so it no longer pretends to be one. */}
+        <Reveal>
+          <div className="flex h-full flex-col overflow-hidden rounded-2xl border border-ink-200/80 bg-white shadow-sm">
+            <div className="bg-brand-50 px-6 pt-7 sm:pt-8">
+              <StepArt name="verify" className="mx-auto max-w-[17rem]" />
+            </div>
+            <div className="flex flex-1 flex-col justify-center p-6 text-center sm:p-7">
+              <span className="mx-auto inline-flex items-center gap-1.5 rounded-md bg-brand-600 px-3 py-1.5 text-[11px] font-extrabold uppercase tracking-[0.16em] text-white shadow-xs">
+                <ShieldCheck className="size-3.5" aria-hidden="true" />
+                Before it goes live
+              </span>
+              <h3 className="mt-5 text-xl font-bold tracking-tight text-ink-900">
+                Unapproved tutors never appear in search
+              </h3>
               <p className="mt-3 text-sm leading-relaxed text-ink-500">
-                {VERIFICATION_DESCRIPTIONS[type]}
+                A profile stays invisible until our team has reviewed it. There is no way to skip
+                the queue by paying.
               </p>
             </div>
-          </RevealItem>
-        ))}
-        <RevealItem>
-          <div className="flex h-full flex-col justify-center rounded-2xl border border-dashed border-brand-300 bg-brand-50/50 p-5">
-            <p className="text-sm font-bold text-brand-800">
-              Unapproved tutors never appear in search
-            </p>
-            <p className="mt-2 text-sm leading-relaxed text-brand-700/80">
-              A profile stays invisible until our team has reviewed it. There is no way to skip the
-              queue by paying.
-            </p>
           </div>
-        </RevealItem>
-      </RevealGroup>
+        </Reveal>
+
+        {/* One panel, five rows — a record of what was checked, rather than
+            five marketing tiles that leave a hole in the grid. */}
+        <Reveal delay={0.08}>
+          <ul className="flex h-full flex-col divide-y divide-ink-100 overflow-hidden rounded-2xl border border-ink-200/80 bg-white shadow-sm">
+            {badges.map((type) => {
+              const { icon: CheckIcon, chip } = VERIFICATION_META[type] ?? VERIFICATION_FALLBACK;
+
+              return (
+                <li key={type} className="flex flex-1 items-start gap-4 p-5 sm:gap-5 sm:p-6">
+                  <span className="relative shrink-0">
+                    <span
+                      className={cn(
+                        "flex size-12 items-center justify-center rounded-2xl",
+                        chip,
+                      )}
+                    >
+                      <CheckIcon className="size-5.5" aria-hidden="true" />
+                    </span>
+                    <span
+                      className="absolute -right-1 -bottom-1 flex size-5 items-center justify-center rounded-full border-2 border-white bg-success-600"
+                      aria-hidden="true"
+                    >
+                      <Check className="size-2.5 text-white" strokeWidth={4} />
+                    </span>
+                  </span>
+
+                  <div className="min-w-0">
+                    <h3 className="text-base font-bold tracking-tight text-ink-900">
+                      {checkName(type)}
+                      <span className="sr-only"> verified</span>
+                    </h3>
+                    <p className="mt-1.5 text-sm leading-relaxed text-ink-500">
+                      {VERIFICATION_DESCRIPTIONS[type]}
+                    </p>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        </Reveal>
+      </div>
     </Section>
   );
 }
@@ -440,7 +585,7 @@ export function VerificationSection() {
  * way: a matched pair of cards for what differs, and one strip underneath for
  * what doesn't — rather than the same four reassurances printed twice.
  */
-const LESSON_MODES = [
+const LESSON_MODE_CARDS = [
   {
     art: "online",
     label: "Online",
@@ -496,7 +641,7 @@ export function LessonModes() {
       tone="muted"
     >
       <div className="grid gap-6 lg:grid-cols-2">
-        {LESSON_MODES.map((mode, index) => {
+        {LESSON_MODE_CARDS.map((mode, index) => {
           const ModeIcon = mode.icon;
 
           return (

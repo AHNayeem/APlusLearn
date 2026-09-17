@@ -92,7 +92,7 @@ Verified on a clean database: `npm run seed` → `npx eslint src scripts` (clean
 |---|---|---|
 | Hero search: province, grade, subject, course, code, mode, location | `src/components/search/HeroSearch.jsx` | Implemented |
 | Search without an account | `/find-a-tutor` is public; QA asserts anonymous search works | Implemented |
-| All 12 required sections | `src/components/home/Sections.jsx` + `Hero`, `FeaturedTutors`; centred section headers with the shared wave ornament (`Section`), illustrated steps via `StepCards` and the shared `StepArt` scene kit, which also draws the online / in-person pair | Implemented |
+| All 12 required sections | `src/components/home/Sections.jsx` + `Hero`, `FeaturedTutors`; centred section headers with the shared wave ornament (`Section`), illustrated steps via `StepCards` and the shared `StepArt` scene kit, which also draws the online / in-person pair; verification is one divided ledger panel and grades one K-12 ladder rather than ragged card grids | Implemented |
 | Primary CTAs | "Find a tutor" / "Become a tutor" in hero, header and footer | Implemented |
 
 ## 13. Canadian curriculum
