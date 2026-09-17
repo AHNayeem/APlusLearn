@@ -1,67 +1,132 @@
 import Link from "next/link";
 import * as Icons from "lucide-react";
 import {
-  Search, MessageSquare, CalendarCheck, TrendingUp, ShieldCheck, Video, MapPin,
-  Wallet, Clock, BadgeCheck, ArrowRight, Quote,
+  ShieldCheck, Video, MapPin, Wallet, Clock, BadgeCheck, ArrowRight, Check, Quote,
 } from "lucide-react";
 import { cn } from "@/lib/utils/cn";
 import { Badge, Button, Card, Rating, Reveal, RevealGroup, RevealItem } from "@/components/ui";
+import { StepCards } from "@/components/home/StepCards";
+import { StepArt } from "@/components/home/StepArt";
 import { formatRate, formatNumber } from "@/lib/utils/format";
 import { VERIFICATION_LABELS, VERIFICATION_DESCRIPTIONS, VERIFICATION_TYPES } from "@/constants";
 
-/** Shared section scaffolding so spacing and headings never drift (§30). */
-export function Section({ id, eyebrow, title, description, children, className, tone = "default", action }) {
+/**
+ * The wave that opens every marketing section (§30). Small, warm and the only
+ * ornament the section header carries — it marks the start of a chapter
+ * without competing with the heading under it.
+ */
+export function SectionWave({ className }) {
+  return (
+    <svg
+      viewBox="0 0 64 18"
+      fill="none"
+      aria-hidden="true"
+      focusable="false"
+      className={cn("h-[0.9rem] w-16", className)}
+    >
+      <path
+        d="M4 11c4.6-8.5 9.2-8.5 13.8 0s9.2 8.5 13.8 0 9.2-8.5 13.8 0 9.2 8.5 13.8 0"
+        stroke="currentColor"
+        strokeWidth="4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+/**
+ * Shared section scaffolding so spacing and headings never drift (§30).
+ *
+ * The header is centred by default — wave, eyebrow, heading, one line of
+ * supporting copy — and any `action` sits centred *below* the content, because
+ * a button pinned to the right of a centred heading reads as a mistake. Pass
+ * `align="start"` for the few layouts that genuinely need a left-hung header.
+ */
+export function Section({
+  id,
+  eyebrow,
+  title,
+  description,
+  children,
+  className,
+  tone = "default",
+  action,
+  align = "center",
+  ornament = true,
+}) {
+  const dark = tone === "dark";
+  const centered = align === "center";
+
+  const header = (eyebrow || title) && (
+    <Reveal className={cn("mb-10 lg:mb-14", centered && "text-center")}>
+      <div
+        className={cn(
+          centered ? "mx-auto flex max-w-3xl flex-col items-center" : "flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between",
+        )}
+      >
+        <div className={cn(centered ? "w-full" : "max-w-2xl")}>
+          {centered && ornament && (
+            <SectionWave className={cn("mx-auto", dark ? "text-accent-400" : "text-accent-500")} />
+          )}
+          {eyebrow && (
+            <p
+              className={cn(
+                centered
+                  ? "mt-4 text-base font-semibold"
+                  : "text-xs font-bold uppercase tracking-[0.12em]",
+                dark
+                  ? centered ? "text-brand-200" : "text-brand-300"
+                  : centered ? "text-ink-500" : "text-brand-600",
+              )}
+            >
+              {eyebrow}
+            </p>
+          )}
+          {title && (
+            <h2
+              className={cn(
+                "mt-2 font-extrabold tracking-tight",
+                centered ? "text-[1.85rem] leading-[1.15] sm:text-4xl lg:text-[2.6rem]" : "text-3xl sm:text-4xl",
+                dark ? "text-white" : "text-ink-900",
+              )}
+            >
+              {title}
+            </h2>
+          )}
+          {description && (
+            <p
+              className={cn(
+                "text-base leading-relaxed",
+                centered ? "mx-auto mt-4 max-w-2xl" : "mt-3",
+                dark ? "text-brand-100/80" : "text-ink-500",
+              )}
+            >
+              {description}
+            </p>
+          )}
+        </div>
+        {action && !centered && <div className="shrink-0">{action}</div>}
+      </div>
+    </Reveal>
+  );
+
   return (
     <section
       id={id}
       className={cn(
         "py-16 lg:py-24",
         tone === "muted" && "bg-white",
-        tone === "dark" && "bg-ink-900",
+        dark && "bg-ink-900",
         className,
       )}
     >
       <div className="container-page">
-        {(eyebrow || title) && (
-          <Reveal className="mb-10 lg:mb-14">
-            <div className="flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
-              <div className="max-w-2xl">
-                {eyebrow && (
-                  <p
-                    className={cn(
-                      "text-xs font-bold uppercase tracking-[0.12em]",
-                      tone === "dark" ? "text-brand-300" : "text-brand-600",
-                    )}
-                  >
-                    {eyebrow}
-                  </p>
-                )}
-                {title && (
-                  <h2
-                    className={cn(
-                      "mt-2 text-3xl font-extrabold tracking-tight sm:text-4xl",
-                      tone === "dark" && "text-white",
-                    )}
-                  >
-                    {title}
-                  </h2>
-                )}
-                {description && (
-                  <p
-                    className={cn(
-                      "mt-3 text-base leading-relaxed",
-                      tone === "dark" ? "text-brand-100/80" : "text-ink-500",
-                    )}
-                  >
-                    {description}
-                  </p>
-                )}
-              </div>
-              {action && <div className="shrink-0">{action}</div>}
-            </div>
-          </Reveal>
-        )}
+        {header}
         {children}
+        {action && centered && (
+          <Reveal className="mt-10 flex justify-center lg:mt-12">{action}</Reveal>
+        )}
       </div>
     </section>
   );
@@ -71,22 +136,22 @@ export function Section({ id, eyebrow, title, description, children, className, 
 
 const STEPS = [
   {
-    icon: Search,
+    art: "search",
     title: "Search your exact course",
     body: "Filter by province, grade and course code — MHF4U, not just “math”. Add your postal code if you want someone who can come to you.",
   },
   {
-    icon: MessageSquare,
+    art: "message",
     title: "Compare and message free",
     body: "Read verified reviews from families who actually booked. Ask a tutor about their approach before you spend anything.",
   },
   {
-    icon: CalendarCheck,
+    art: "calendar",
     title: "Book a time that works",
     body: "Pick a slot from the tutor's real calendar. Pay securely; your money is held until the lesson is done.",
   },
   {
-    icon: TrendingUp,
+    art: "progress",
     title: "Track progress, rebook easily",
     body: "See every lesson, receipt and review in one place. Rebook your tutor in two taps when it's working.",
   },
@@ -96,29 +161,16 @@ export function HowItWorks() {
   return (
     <Section
       id="how-it-works"
-      eyebrow="How it works"
+      eyebrow="Making tutoring simple for every family"
       title="From “we need help with MCV4U” to a booked lesson"
-      description="Four steps, no phone calls, no agency mark-up you can't see."
-      tone="muted"
+      description="Four steps, no phone calls, and no agency mark-up you can't see — you can do the first two without even making an account."
+      action={
+        <Button href="/find-a-tutor" size="lg" iconRight={<ArrowRight className="size-4" />}>
+          Start with your course code
+        </Button>
+      }
     >
-      <RevealGroup className="grid gap-6 md:grid-cols-2 lg:grid-cols-4">
-        {STEPS.map((step, index) => (
-          <RevealItem key={step.title}>
-            <div className="group relative h-full rounded-2xl border border-ink-200 bg-canvas p-6 transition-colors hover:border-brand-200">
-              <div className="flex items-center gap-3">
-                <span className="flex size-11 items-center justify-center rounded-xl bg-brand-600 text-white shadow-sm transition-transform duration-300 group-hover:scale-105 motion-reduce:group-hover:scale-100">
-                  <step.icon className="size-5" />
-                </span>
-                <span className="text-xs font-bold uppercase tracking-wide text-ink-400">
-                  Step {index + 1}
-                </span>
-              </div>
-              <h3 className="mt-5 text-base font-bold text-ink-900">{step.title}</h3>
-              <p className="mt-2 text-sm leading-relaxed text-ink-500">{step.body}</p>
-            </div>
-          </RevealItem>
-        ))}
-      </RevealGroup>
+      <StepCards steps={STEPS} columns={4} />
     </Section>
   );
 }
@@ -132,6 +184,7 @@ export function PopularSubjects({ subjects = [] }) {
     <Section
       eyebrow="Popular subjects"
       title="Help with the subjects families ask for most"
+      tone="muted"
       action={
         <Button href="/courses" variant="secondary" iconRight={<ArrowRight className="size-4" />}>
           Browse all courses
@@ -145,7 +198,7 @@ export function PopularSubjects({ subjects = [] }) {
             <RevealItem key={subject.id}>
               <Link
                 href={`/find-a-tutor?subject=${subject.slug}`}
-                className="group flex h-full flex-col rounded-2xl border border-ink-200 bg-white p-5 transition-all duration-200 hover:-translate-y-0.5 hover:border-brand-300 hover:shadow-lg motion-reduce:hover:translate-y-0"
+                className="group flex h-full flex-col rounded-2xl border border-ink-200 bg-canvas p-5 transition-all duration-200 hover:-translate-y-0.5 hover:border-brand-300 hover:shadow-lg motion-reduce:hover:translate-y-0"
               >
                 <span
                   className={cn(
@@ -382,66 +435,146 @@ export function VerificationSection() {
 
 // --- Online vs in person (§12, §27) ----------------------------------------
 
+/**
+ * The two modes share everything except the place, so the page says it that
+ * way: a matched pair of cards for what differs, and one strip underneath for
+ * what doesn't — rather than the same four reassurances printed twice.
+ */
+const LESSON_MODES = [
+  {
+    art: "online",
+    label: "Online",
+    icon: Video,
+    title: "Online lessons",
+    body:
+      "Zoom, Google Meet or Microsoft Teams — the link is generated when you book and sits on the lesson in your dashboard.",
+    points: [
+      "No travel time, so evening slots actually work",
+      "Access to tutors anywhere in the province",
+      "Screen sharing makes worked solutions easy to follow",
+      "Often a few dollars an hour cheaper",
+    ],
+    footnote: "Nothing to install for the student — the link opens in a browser.",
+    stage: "bg-brand-50",
+    pill: "bg-brand-600",
+    ring: "bg-brand-100",
+    tick: "text-brand-600",
+  },
+  {
+    art: "inperson",
+    label: "In person",
+    icon: MapPin,
+    title: "In-person lessons",
+    body:
+      "At your home, a public library, or another agreed location. Distance search shows approximately how far away each tutor is.",
+    points: [
+      "Easier for younger students to stay focused",
+      "Better for hands-on subjects and paper-based practice",
+      "Tutors set their own travel radius, so no long-distance surprises",
+      "Exact addresses are only shared once a lesson is confirmed",
+    ],
+    footnote: "Search by postal code to see who is genuinely nearby.",
+    stage: "bg-accent-50",
+    pill: "bg-accent-500",
+    ring: "bg-accent-100",
+    tick: "text-accent-600",
+  },
+];
+
+const LESSON_CONSTANTS = [
+  { icon: ShieldCheck, text: "The same verified tutors, either way" },
+  { icon: Wallet, text: "Payment held until the lesson is done" },
+  { icon: Clock, text: "Same free cancellation window" },
+];
+
 export function LessonModes() {
   return (
-    <Section eyebrow="Online or in person" title="Whichever actually fits your week" tone="muted">
+    <Section
+      eyebrow="Online or in person"
+      title="Whichever actually fits your week"
+      description="Same tutors, same protected payment, same booking. The only thing that changes is where the lesson happens — and you can switch between the two whenever you like."
+      tone="muted"
+    >
       <div className="grid gap-6 lg:grid-cols-2">
-        <Reveal>
-          <Card className="h-full overflow-hidden">
-            <div className="bg-brand-600 p-6 text-white">
-              <span className="flex size-11 items-center justify-center rounded-xl bg-white/15">
-                <Video className="size-5" />
-              </span>
-              <h3 className="mt-4 text-xl font-bold">Online lessons</h3>
-              <p className="mt-2 text-sm leading-relaxed text-brand-100">
-                Zoom, Google Meet or Microsoft Teams — the link is generated when you book and sits
-                on the lesson in your dashboard.
-              </p>
-            </div>
-            <ul className="space-y-3 p-6">
-              {[
-                "No travel time, so evening slots actually work",
-                "Access to tutors anywhere in the province",
-                "Screen sharing makes worked solutions easy to follow",
-                "Often a few dollars an hour cheaper",
-              ].map((item) => (
-                <li key={item} className="flex gap-2.5 text-sm text-ink-600">
-                  <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-brand-500" />
-                  {item}
-                </li>
-              ))}
-            </ul>
-          </Card>
-        </Reveal>
+        {LESSON_MODES.map((mode, index) => {
+          const ModeIcon = mode.icon;
 
-        <Reveal delay={0.08}>
-          <Card className="h-full overflow-hidden">
-            <div className="bg-accent-500 p-6 text-white">
-              <span className="flex size-11 items-center justify-center rounded-xl bg-white/20">
-                <MapPin className="size-5" />
-              </span>
-              <h3 className="mt-4 text-xl font-bold">In-person lessons</h3>
-              <p className="mt-2 text-sm leading-relaxed text-accent-50">
-                At your home, a public library, or another agreed location. Distance search shows
-                approximately how far away each tutor is.
-              </p>
-            </div>
-            <ul className="space-y-3 p-6">
-              {[
-                "Easier for younger students to stay focused",
-                "Better for hands-on subjects and paper-based practice",
-                "Tutors set their own travel radius, so no long-distance surprises",
-                "Exact addresses are only shared once a lesson is confirmed",
-              ].map((item) => (
-                <li key={item} className="flex gap-2.5 text-sm text-ink-600">
-                  <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-accent-500" />
-                  {item}
-                </li>
-              ))}
-            </ul>
-          </Card>
-        </Reveal>
+          return (
+            <Reveal key={mode.label} delay={index * 0.08}>
+              <article
+                className={cn(
+                  "group flex h-full flex-col overflow-hidden rounded-2xl border border-ink-200/80 bg-white",
+                  "shadow-sm transition duration-300 ease-out",
+                  "hover:-translate-y-1.5 hover:border-brand-200 hover:shadow-xl",
+                  "motion-reduce:transition-none motion-reduce:hover:translate-y-0",
+                )}
+              >
+                <div className={cn("px-6 pt-7 sm:pt-8", mode.stage)}>
+                  <StepArt
+                    name={mode.art}
+                    className="mx-auto max-w-[21rem] transition-transform duration-500 ease-out group-hover:-translate-y-1 motion-reduce:group-hover:translate-y-0"
+                  />
+                </div>
+
+                <div className="flex flex-1 flex-col p-6 text-center sm:p-7">
+                  <span
+                    className={cn(
+                      "mx-auto inline-flex items-center gap-1.5 rounded-md px-3 py-1.5",
+                      "text-[11px] font-extrabold uppercase tracking-[0.16em] text-white shadow-xs",
+                      mode.pill,
+                    )}
+                  >
+                    <ModeIcon className="size-3.5" aria-hidden="true" />
+                    {mode.label}
+                  </span>
+
+                  <h3 className="mt-5 text-xl font-bold tracking-tight text-ink-900">
+                    {mode.title}
+                  </h3>
+                  <p className="mt-3 text-sm leading-relaxed text-ink-500">{mode.body}</p>
+
+                  <ul className="mt-6 space-y-3 border-t border-ink-100 pt-6 text-left">
+                    {mode.points.map((point) => (
+                      <li key={point} className="flex gap-3 text-sm leading-relaxed text-ink-600">
+                        <span
+                          className={cn(
+                            "mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full",
+                            mode.ring,
+                          )}
+                        >
+                          <Check
+                            className={cn("size-3", mode.tick)}
+                            strokeWidth={3.2}
+                            aria-hidden="true"
+                          />
+                        </span>
+                        {point}
+                      </li>
+                    ))}
+                  </ul>
+
+                  <p className="mt-auto pt-6 text-xs leading-relaxed text-ink-400">
+                    {mode.footnote}
+                  </p>
+                </div>
+              </article>
+            </Reveal>
+          );
+        })}
       </div>
+
+      <Reveal delay={0.16} className="mt-6">
+        <ul className="grid gap-4 rounded-2xl border border-ink-200/80 bg-canvas p-6 sm:grid-cols-3">
+          {LESSON_CONSTANTS.map(({ icon: ConstantIcon, text }) => (
+            <li key={text} className="flex items-center gap-3 text-sm font-semibold text-ink-700">
+              <span className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-white text-brand-600 shadow-xs">
+                <ConstantIcon className="size-4" aria-hidden="true" />
+              </span>
+              {text}
+            </li>
+          ))}
+        </ul>
+      </Reveal>
     </Section>
   );
 }

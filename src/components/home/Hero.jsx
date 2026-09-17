@@ -47,12 +47,15 @@ export function Hero({
               The right tutor for{" "}
               <span className="relative inline-block">
                 {/* The bloom sits behind the words rather than under them, so
-                    the gradient type looks lit instead of underlined. */}
+                    the gradient type looks lit instead of underlined. The
+                    gradient stops no lighter than brand-500: on this ground
+                    brand-400 measures 2.7:1, under the 3:1 floor for large
+                    text. */}
                 <span
                   aria-hidden="true"
-                  className="pointer-events-none absolute -inset-x-6 -inset-y-3 -z-10 rounded-full bg-accent-300/40 blur-2xl"
+                  className="pointer-events-none absolute -inset-x-6 -inset-y-3 -z-10 rounded-full bg-accent-200/45 blur-2xl"
                 />
-                <span className="bg-gradient-to-r from-brand-700 via-brand-500 to-accent-500 bg-clip-text pb-[0.08em] text-transparent">
+                <span className="bg-gradient-to-r from-brand-800 via-brand-700 to-brand-500 bg-clip-text pb-[0.08em] text-transparent">
                   the exact course
                 </span>
               </span>{" "}
@@ -150,7 +153,10 @@ function HeroBackdrop() {
           top of the section and anchored onto the laptop and open book, then
           faded into the white the rest of the hero sits on. From `sm` up the
           frame is wide enough for the whole composition. */}
-      <div className="absolute inset-x-0 top-0 h-[46%] sm:inset-0 sm:h-auto">
+      {/* `overflow-hidden` matters: the image is scaled 105%, and on mobile
+          this frame is shorter than the section, so without a clip the
+          overscan bled past the fade as a hard-edged band. */}
+      <div className="absolute inset-x-0 top-0 h-[46%] overflow-hidden sm:inset-0 sm:h-auto">
         {/* `priority` because this is the LCP element on the homepage. */}
         <Image
           src={heroImage}
@@ -159,7 +165,7 @@ function HeroBackdrop() {
           priority
           sizes="100vw"
           placeholder="blur"
-          className="scale-105 object-cover object-[46%_62%] opacity-[0.28] brightness-[1.35] saturate-[0.55] blur-[2px] sm:object-[50%_58%]"
+          className="scale-105 object-cover object-[46%_62%] opacity-[0.26] brightness-[1.35] saturate-[0.4] blur-[2px] sm:object-[50%_58%]"
         />
         <div className="absolute inset-x-0 bottom-0 h-2/3 bg-gradient-to-b from-transparent to-mist sm:hidden" />
       </div>
@@ -181,7 +187,7 @@ function HeroBackdrop() {
       {/* Two soft blooms: the warm one behind the headline, picking up the
           lamp in the photo, and a cool brand one low and off-centre so the
           white never settles into grey. */}
-      <div className="absolute left-1/2 top-[12%] size-[20rem] -translate-x-1/2 rounded-full bg-accent-200/55 blur-[90px] animate-drift-a sm:size-[32rem] sm:blur-[120px]" />
+      <div className="absolute left-1/2 top-[12%] size-[20rem] -translate-x-1/2 rounded-full bg-accent-200/40 blur-[90px] animate-drift-a sm:size-[32rem] sm:blur-[120px]" />
       <div className="absolute -bottom-52 -left-24 hidden size-[32rem] rounded-full bg-brand-200/60 blur-[130px] animate-drift-b sm:block" />
 
       {/* Settle the foot of the section, so the seam against the next section
