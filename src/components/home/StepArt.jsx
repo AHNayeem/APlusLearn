@@ -532,6 +532,73 @@ function InPersonScene() {
   );
 }
 
+/**
+ * 10 — Decide: approve, reject or ask for more. The two chips are the whole
+ * point of the scene, so they sit on their own above the desk rather than
+ * inside the document panel.
+ */
+function DecideScene() {
+  return (
+    <>
+      <Blob flip />
+      <Plant x={46} scale={0.7} />
+
+      {/* the application, open for review */}
+      <Panel x={62} y={50} w={98} h={100} bar={false}>
+        <circle cx="26" cy="28" r="11" fill={C.softer} />
+        <Line x={44} y={20} w={38} h={6} fill={C.soft} />
+        <Line x={44} y={32} w={26} h={5} />
+        <Line x={16} y={54} w={66} h={5} />
+        <Line x={16} y={66} w={50} h={5} />
+        <rect x="16" y="80" width="28" height="9" rx="4.5" fill={C.accentSoft} />
+        <rect x="50" y="80" width="32" height="9" rx="4.5" fill={C.softer} />
+      </Panel>
+
+      {/* the decision itself */}
+      <CheckBadge x={182} y={62} r={17} />
+      <g transform="translate(182,110)">
+        <circle cx="0" cy="0" r="14" fill={C.accent} />
+        <path d="M-5-5 5 5M5-5-5 5" stroke={C.white} strokeWidth="3.4" strokeLinecap="round" />
+      </g>
+
+      <Desk />
+      <Mug x={166} />
+      <Figure x={252} y={104} shirt={C.shirtPlum} skin={C.skinDeep} hair={C.hairWarm} long flip />
+      <Arm d="M236 132c-18 4-28 11-30 22" skin={C.skinDeep} hand={[206, 154]} />
+    </>
+  );
+}
+
+/** 11 — Live: the approved profile, showing only the badges it earned. */
+function LiveScene() {
+  return (
+    <>
+      <Blob />
+      <Plant x={52} scale={0.72} />
+
+      {/* the profile card, exactly as a family meets it in search */}
+      <Panel x={94} y={38} w={122} h={92} bar={false}>
+        <circle cx="30" cy="32" r="17" fill={C.softer} />
+        <circle cx="30" cy="27" r="7" fill={C.shirt} />
+        <path d="M18 44c2-8 6-12 12-12s10 4 12 12Z" fill={C.shirt} />
+        <Line x={58} y={18} w={48} h={7} fill={C.soft} />
+        <Line x={58} y={32} w={32} h={5} />
+        <rect x="58" y="44" width="24" height="10" rx="5" fill={C.green} />
+        <rect x="86" y="44" width="18" height="10" rx="5" fill={C.plum} />
+        <Line x={16} y={66} w={90} h={5} />
+        <rect x="16" y="76" width="38" height="11" rx="5.5" fill={C.accent} />
+      </Panel>
+      <CheckBadge x={216} y={44} r={16} />
+
+      <Desk />
+      <Mug x={68} />
+      <Keyboard x={196} y={158} w={52} />
+      <Figure x={244} y={104} shirt={C.shirtDeep} flip />
+      <Arm d="M228 132c-18 5-30 12-34 22" hand={[194, 153]} />
+    </>
+  );
+}
+
 const SCENES = {
   search: SearchScene,
   message: MessageScene,
@@ -542,6 +609,8 @@ const SCENES = {
   teach: TeachScene,
   online: OnlineScene,
   inperson: InPersonScene,
+  decide: DecideScene,
+  live: LiveScene,
 };
 
 /**

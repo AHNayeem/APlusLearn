@@ -1,6 +1,7 @@
 import { ShieldCheck, UserCheck, School, GraduationCap, FileCheck, ArrowRight } from "lucide-react";
-import { Badge, Button, Card, CardBody, Reveal, RevealGroup, RevealItem } from "@/components/ui";
+import { Badge, Button, Card, CardBody, Reveal } from "@/components/ui";
 import { PageHero } from "@/components/marketing/PageHero";
+import { StepCards } from "@/components/home/StepCards";
 import { Section, Faq } from "@/components/home/Sections";
 import { VERIFICATION_TYPES, VERIFICATION_LABELS, VERIFICATION_DESCRIPTIONS } from "@/constants";
 
@@ -39,6 +40,29 @@ const BADGE_DETAIL = {
     why: "The standard schools and community organisations use for people working with children.",
   },
 };
+
+const APPROVAL_STEPS = [
+  {
+    art: "apply",
+    title: "They apply",
+    body: "Qualifications, the exact courses they teach, their rate and availability — plus documents for the badges they're applying for.",
+  },
+  {
+    art: "verify",
+    title: "We check the documents",
+    body: "A real person opens each one. OCT numbers are checked against the public register; degrees against transcripts.",
+  },
+  {
+    art: "decide",
+    title: "We decide",
+    body: "Approve, reject, or ask for more. Badges are granted individually — approval doesn't mean every badge.",
+  },
+  {
+    art: "live",
+    title: "The profile goes live",
+    body: "Only then does the tutor appear in search, showing exactly the badges they earned.",
+  },
+];
 
 const VERIFICATION_FAQS = [
   {
@@ -136,43 +160,12 @@ export default function VerificationPage() {
         </div>
       </Section>
 
-      <Section eyebrow="The process" title="How a tutor gets approved">
-        <RevealGroup className="grid gap-6 md:grid-cols-2 lg:grid-cols-4">
-          {[
-            {
-              step: "1",
-              title: "They apply",
-              body: "Qualifications, the exact courses they teach, their rate and availability — plus documents for the badges they're applying for.",
-            },
-            {
-              step: "2",
-              title: "We check the documents",
-              body: "A real person opens each one. OCT numbers are checked against the public register; degrees against transcripts.",
-            },
-            {
-              step: "3",
-              title: "We decide",
-              body: "Approve, reject, or ask for more. Badges are granted individually — approval doesn't mean every badge.",
-            },
-            {
-              step: "4",
-              title: "The profile goes live",
-              body: "Only then does the tutor appear in search, showing exactly the badges they earned.",
-            },
-          ].map((item) => (
-            <RevealItem key={item.step}>
-              <Card className="h-full">
-                <CardBody>
-                  <span className="flex size-9 items-center justify-center rounded-xl bg-brand-600 text-sm font-bold text-white">
-                    {item.step}
-                  </span>
-                  <h3 className="mt-4 text-base font-bold text-ink-900">{item.title}</h3>
-                  <p className="mt-2 text-sm leading-relaxed text-ink-500">{item.body}</p>
-                </CardBody>
-              </Card>
-            </RevealItem>
-          ))}
-        </RevealGroup>
+      <Section
+        eyebrow="Every tutor, every time"
+        title="How a tutor gets approved"
+        description="Four steps between an application and a profile a family can book. A person reads every document — nothing here is automatic, and nothing can be skipped."
+      >
+        <StepCards steps={APPROVAL_STEPS} />
 
         <Reveal className="mt-10">
           <Card className="border-brand-200 bg-brand-50/50">
