@@ -101,14 +101,12 @@ export default async function AdminReferralsPage({ searchParams }) {
           ) : (
             <Table>
               <THead>
-                <TR>
-                  <TH>When</TH>
-                  <TH>Referrer</TH>
-                  <TH>Joined</TH>
-                  <TH>Reward</TH>
-                  <TH>Status</TH>
-                  <TH />
-                </TR>
+                <TH>When</TH>
+                <TH>Referrer</TH>
+                <TH>Joined</TH>
+                <TH>Reward</TH>
+                <TH>Status</TH>
+                <TH />
               </THead>
               <TBody>
                 {items.map((referral) => (

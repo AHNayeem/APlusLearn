@@ -94,13 +94,11 @@ export default async function AdminSmsPage({ searchParams }) {
           ) : (
             <Table>
               <THead>
-                <TR>
-                  <TH>When</TH>
-                  <TH>To</TH>
-                  <TH>Recipient</TH>
-                  <TH>Message</TH>
-                  <TH>Outcome</TH>
-                </TR>
+                <TH>When</TH>
+                <TH>To</TH>
+                <TH>Recipient</TH>
+                <TH>Message</TH>
+                <TH>Outcome</TH>
               </THead>
               <TBody>
                 {items.length === 0 && <TableEmpty colSpan={5}>No messages.</TableEmpty>}

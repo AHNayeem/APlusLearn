@@ -65,14 +65,12 @@ export default async function AdminGroupsPage({ searchParams }) {
           ) : (
             <Table>
               <THead>
-                <TR>
-                  <TH>When</TH>
-                  <TH>Session</TH>
-                  <TH>Tutor</TH>
-                  <TH>Seats</TH>
-                  <TH>Seat price</TH>
-                  <TH>Status</TH>
-                </TR>
+                <TH>When</TH>
+                <TH>Session</TH>
+                <TH>Tutor</TH>
+                <TH>Seats</TH>
+                <TH>Seat price</TH>
+                <TH>Status</TH>
               </THead>
               <TBody>
                 {items.map((session) => (

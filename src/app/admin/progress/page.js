@@ -50,14 +50,12 @@ export default async function AdminProgressPage({ searchParams }) {
           ) : (
             <Table>
               <THead>
-                <TR>
-                  <TH>Shared</TH>
-                  <TH>Tutor</TH>
-                  <TH>Student</TH>
-                  <TH>Course</TH>
-                  <TH>Lessons</TH>
-                  <TH>Status</TH>
-                </TR>
+                <TH>Shared</TH>
+                <TH>Tutor</TH>
+                <TH>Student</TH>
+                <TH>Course</TH>
+                <TH>Lessons</TH>
+                <TH>Status</TH>
               </THead>
               <TBody>
                 {items.map((report) => (

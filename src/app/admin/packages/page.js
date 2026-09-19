@@ -80,15 +80,13 @@ export default async function AdminPackagesPage({ searchParams }) {
           ) : (
             <Table>
               <THead>
-                <TR>
-                  <TH>Bought</TH>
-                  <TH>Family</TH>
-                  <TH>Tutor</TH>
-                  <TH>Package</TH>
-                  <TH>Used</TH>
-                  <TH>Value</TH>
-                  <TH>Status</TH>
-                </TR>
+                <TH>Bought</TH>
+                <TH>Family</TH>
+                <TH>Tutor</TH>
+                <TH>Package</TH>
+                <TH>Used</TH>
+                <TH>Value</TH>
+                <TH>Status</TH>
               </THead>
               <TBody>
                 {items.map((purchase) => (

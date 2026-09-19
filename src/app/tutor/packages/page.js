@@ -76,13 +76,11 @@ export default async function TutorPackagesPage() {
             ) : (
               <Table>
                 <THead>
-                  <TR>
-                    <TH>Student</TH>
-                    <TH>Package</TH>
-                    <TH>Left</TH>
-                    <TH>Expires</TH>
-                    <TH>Status</TH>
-                  </TR>
+                  <TH>Student</TH>
+                  <TH>Package</TH>
+                  <TH>Left</TH>
+                  <TH>Expires</TH>
+                  <TH>Status</TH>
                 </THead>
                 <TBody>
                   {purchases.items.map((purchase) => (
