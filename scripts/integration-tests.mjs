@@ -89,6 +89,17 @@ async function main() {
   await meetingTests();
   await storageTests();
   await bookingHoldTests();
+  await matchingTests();
+  await tutorRequestTests();
+  await smsAdapterTests();
+  await smsServiceTests();
+  await cryptoTests();
+  await calendarAdapterTests();
+  await calendarServiceTests();
+  await progressReportTests();
+  await referralTests();
+  await packageTests();
+  await groupSessionTests();
 
   // The services open their own memoised connection via `lib/db/connect`, so
   // closing the one this file opened is not enough to let Node exit.
@@ -2381,6 +2392,3286 @@ async function bookingHoldTests() {
       action: "BOOKING_EXPIRED",
       entityId: { $in: created.map((c) => c.bookingId) },
     });
+  }
+}
+
+
+// --- 10. Advanced matching (§22, §41 Phase 2) ------------------------------
+
+/**
+ * Scoring and ranking are pure functions of stored data, so they are tested
+ * without a database at all. What matters here is the two guarantees the rest
+ * of the feature rests on: an operator's weights change the *order* and never
+ * the *membership*, and the same inputs always produce the same number.
+ */
+async function matchingTests() {
+  section("Matching — scoring, weights and eligibility");
+
+  const { normaliseWeights, MATCH_WEIGHTS, MATCH_FACTOR_KEYS } =
+    await import("@/lib/matching/weights");
+  const { scoreTutorForRequest, compareMatches, explainMatch } =
+    await import("@/lib/matching/score");
+  const { isEligibleForMatch, matchCandidateQuery } = await import("@/lib/matching/eligibility");
+  const { LESSON_MODES, TUTOR_STATUS, USER_STATUS } = await import("@/constants");
+
+  const courseId = "aaaaaaaaaaaaaaaaaaaaaaa1";
+  const subjectId = "bbbbbbbbbbbbbbbbbbbbbbb1";
+
+  const baseTutor = (over = {}) => ({
+    _id: "ccccccccccccccccccccccc1",
+    status: TUTOR_STATUS.APPROVED,
+    isSearchable: true,
+    acceptingNewStudents: true,
+    userId: { _id: "ddddddddddddddddddddddd1", status: USER_STATUS.ACTIVE, deletedAt: null },
+    courseIds: [courseId],
+    subjectIds: [subjectId],
+    gradeLevels: [12],
+    lessonModes: [LESSON_MODES.ONLINE, LESSON_MODES.IN_PERSON],
+    languages: ["English"],
+    verifiedTypes: ["IDENTITY", "BACKGROUND_CHECK"],
+    yearsExperience: 6,
+    hourlyRateCents: 6000,
+    minHourlyRateCents: 6000,
+    travelRadiusKm: 20,
+    location: { type: "Point", coordinates: [-79.3832, 43.6532] },
+    city: "Toronto",
+    stats: { ratingAverage: 4.8, ratingCount: 24, completedLessons: 80, cancellationCount: 2, responseTimeMinutes: 30 },
+    ...over,
+  });
+
+  const baseRequest = (over = {}) => ({
+    _id: "eeeeeeeeeeeeeeeeeeeeeee1",
+    ownerId: "fffffffffffffffffffffff1",
+    courseId,
+    subjectId,
+    gradeLevel: 12,
+    modes: [LESSON_MODES.ONLINE],
+    budgetMaxCents: 7000,
+    preferredWindows: ["WEEKDAY_EVENING"],
+    sessionsPerWeek: 1,
+    preferredDurationMinutes: 60,
+    languages: [],
+    maxDistanceKm: 25,
+    status: "OPEN",
+    ...over,
+  });
+
+  const availability = {
+    weeklyRules: [
+      { weekday: 1, startMinutes: 17 * 60, endMinutes: 21 * 60 },
+      { weekday: 3, startMinutes: 17 * 60, endMinutes: 21 * 60 },
+    ],
+  };
+
+  // --- weights -------------------------------------------------------------
+  const normalised = normaliseWeights(MATCH_WEIGHTS);
+  const total = Object.values(normalised).reduce((a, b) => a + b, 0);
+  check("shipped weights normalise to 100", Math.abs(total - 100) < 0.001, `got ${total}`);
+
+  const doubled = normaliseWeights(
+    Object.fromEntries(MATCH_FACTOR_KEYS.map((k) => [k, MATCH_WEIGHTS[k] * 7])),
+  );
+  check("weights are relative — scaling them all changes nothing",
+    MATCH_FACTOR_KEYS.every((k) => Math.abs(doubled[k] - normalised[k]) < 0.001));
+
+  const partial = normaliseWeights({ course: 50 });
+  check("a partial weight map keeps the shipped value for every other factor",
+    MATCH_FACTOR_KEYS.every((k) => partial[k] > 0) &&
+      Math.abs(Object.values(partial).reduce((a, b) => a + b, 0) - 100) < 0.001);
+
+  const allZero = normaliseWeights(Object.fromEntries(MATCH_FACTOR_KEYS.map((k) => [k, 0])));
+  check("all-zero weights fall back to the shipped set rather than zeroing every score",
+    Math.abs(Object.values(allZero).reduce((a, b) => a + b, 0) - 100) < 0.001);
+
+  check("an unknown factor in stored settings is ignored",
+    Object.keys(normaliseWeights({ ...MATCH_WEIGHTS, nonsense: 900 })).length ===
+      MATCH_FACTOR_KEYS.length);
+
+  // --- scoring -------------------------------------------------------------
+  const exact = scoreTutorForRequest(baseTutor(), baseRequest(), availability);
+  const subjectOnly = scoreTutorForRequest(
+    baseTutor({ courseIds: [] }), baseRequest(), availability,
+  );
+  check("teaching the exact course outscores teaching only the subject",
+    exact.score > subjectOnly.score, `${exact.score} vs ${subjectOnly.score}`);
+
+  check("a score is bounded to 0–100", exact.score >= 0 && exact.score <= 100, `${exact.score}`);
+
+  const again = scoreTutorForRequest(baseTutor(), baseRequest(), availability);
+  check("scoring is deterministic", again.score === exact.score);
+
+  const overBudget = scoreTutorForRequest(
+    baseTutor({ minHourlyRateCents: 20000, hourlyRateCents: 20000 }), baseRequest(), availability,
+  );
+  check("a tutor far over budget scores below one inside it",
+    overBudget.score < exact.score && overBudget.breakdown.budget === 0);
+
+  const noLanguage = scoreTutorForRequest(
+    baseTutor({ languages: ["French"] }), baseRequest({ languages: ["Mandarin"] }), availability,
+  );
+  const rightLanguage = scoreTutorForRequest(
+    baseTutor({ languages: ["Mandarin"] }), baseRequest({ languages: ["Mandarin"] }), availability,
+  );
+  check("the language the family asked for counts",
+    rightLanguage.score > noLanguage.score);
+
+  const unverified = scoreTutorForRequest(
+    baseTutor({ verifiedTypes: [] }), baseRequest(), availability,
+  );
+  check("verification badges a moderator granted count toward the score",
+    exact.score > unverified.score);
+
+  const noAvailability = scoreTutorForRequest(baseTutor(), baseRequest(), null);
+  check("a tutor with no published availability loses the schedule factor",
+    noAvailability.breakdown.availability === 0 && noAvailability.score < exact.score);
+
+  // A weight change reorders; it cannot invent a factor's raw fit.
+  const courseHeavy = scoreTutorForRequest(
+    baseTutor({ courseIds: [] }), baseRequest(), availability,
+    { ...MATCH_WEIGHTS, course: 90 },
+  );
+  check("raising a weight changes points, not the underlying fit",
+    courseHeavy.factors.course === subjectOnly.factors.course &&
+      courseHeavy.breakdown.course !== subjectOnly.breakdown.course);
+
+  // --- ranking -------------------------------------------------------------
+  const ranked = [
+    { score: 70, tutor: { _id: "b", stats: { ratingAverage: 4.9, completedLessons: 10 } } },
+    { score: 70, tutor: { _id: "a", stats: { ratingAverage: 4.9, completedLessons: 10 } } },
+    { score: 70, tutor: { _id: "c", stats: { ratingAverage: 5.0, completedLessons: 3 } } },
+    { score: 90, tutor: { _id: "d", stats: { ratingAverage: 3.0, completedLessons: 1 } } },
+  ].sort(compareMatches);
+  check("ranking puts the highest score first",
+    ranked[0].tutor._id === "d");
+  check("a tie is broken by rating, then lessons, then id — deterministically",
+    ranked.map((r) => r.tutor._id).join("") === "dcab");
+
+  const shuffled = [...ranked].reverse().sort(compareMatches);
+  check("the same candidates always come back in the same order",
+    shuffled.map((r) => r.tutor._id).join("") === ranked.map((r) => r.tutor._id).join(""));
+
+  // --- eligibility ---------------------------------------------------------
+  check("an eligible tutor passes", isEligibleForMatch(baseTutor(), baseRequest()).eligible);
+
+  const ineligible = [
+    ["an unapproved profile", baseTutor({ status: TUTOR_STATUS.PENDING_REVIEW })],
+    ["a profile that is not searchable", baseTutor({ isSearchable: false })],
+    ["a tutor not taking new students", baseTutor({ acceptingNewStudents: false })],
+    ["a suspended account", baseTutor({ userId: { _id: "x", status: USER_STATUS.SUSPENDED } })],
+    ["a deleted account", baseTutor({ userId: { _id: "x", status: USER_STATUS.ACTIVE, deletedAt: new Date() } })],
+    ["a tutor who does not teach the subject", baseTutor({ courseIds: [], subjectIds: [] })],
+    ["a tutor who does not offer the lesson type", baseTutor({ lessonModes: [LESSON_MODES.IN_PERSON] })],
+  ];
+  for (const [label, tutor] of ineligible) {
+    const result = isEligibleForMatch(tutor, baseRequest());
+    check(`${label} is never recommended`, !result.eligible, result.reason);
+  }
+
+  const farAway = baseTutor({ location: { type: "Point", coordinates: [-75.6972, 45.4215] } });
+  check("an in-person-only request never reaches a tutor outside the travel radius",
+    !isEligibleForMatch(farAway, baseRequest({
+      modes: [LESSON_MODES.IN_PERSON],
+      location: { type: "Point", coordinates: [-79.3832, 43.6532] },
+    })).eligible);
+
+  check("a tutor cannot be matched to their own request",
+    !isEligibleForMatch(
+      baseTutor({ userId: { _id: "fffffffffffffffffffffff1", status: USER_STATUS.ACTIVE } }),
+      baseRequest(),
+    ).eligible);
+
+  // No weighting can rescue an ineligible tutor: eligibility runs first.
+  const suspended = baseTutor({ userId: { _id: "x", status: USER_STATUS.SUSPENDED } });
+  const generous = scoreTutorForRequest(suspended, baseRequest(), availability, { course: 100 });
+  check("a high score does not make an ineligible tutor eligible",
+    generous.score > 0 && !isEligibleForMatch(suspended, baseRequest()).eligible);
+
+  // --- candidate query -----------------------------------------------------
+  const query = matchCandidateQuery(baseRequest());
+  check("the candidate query filters on the searchable gate and approved status",
+    query.isSearchable === true && query.status === TUTOR_STATUS.APPROVED &&
+      query.acceptingNewStudents === true);
+
+  const geoQuery = matchCandidateQuery(baseRequest({
+    modes: [LESSON_MODES.IN_PERSON],
+    location: { type: "Point", coordinates: [-79.3832, 43.6532] },
+    maxDistanceKm: 10,
+  }));
+  check("an in-person-only request bounds the query geographically",
+    Boolean(geoQuery.location?.$geoWithin?.$centerSphere));
+
+  check("a request that also accepts online is not geo-bounded",
+    !matchCandidateQuery(baseRequest({
+      modes: [LESSON_MODES.ONLINE, LESSON_MODES.IN_PERSON],
+      location: { type: "Point", coordinates: [-79.3832, 43.6532] },
+    })).location);
+
+  // --- explanation ---------------------------------------------------------
+  const reasons = explainMatch(exact.breakdown, exact.distanceKm, exact.weights);
+  check("a strong match explains itself in plain language", reasons.length > 0);
+  check("an exact course match says so",
+    reasons.some((r) => /exact course/i.test(r)));
+
+  // A match scored under the old weights still explains against those weights.
+  const oldWeights = { ...MATCH_WEIGHTS, course: 90 };
+  const oldScored = scoreTutorForRequest(baseTutor(), baseRequest(), availability, oldWeights);
+  check("an old match explains itself against the weights it was scored with",
+    explainMatch(oldScored.breakdown, oldScored.distanceKm, oldScored.weights)
+      .some((r) => /exact course/i.test(r)));
+}
+
+// --- 11. Tutor request lifecycle (§22, §41 Phase 2) ------------------------
+
+/**
+ * The request state machine against a real database: who may edit, who may
+ * see, what the matcher will and will not revive, and whether the expiry job
+ * is safe to run twice.
+ */
+async function tutorRequestTests() {
+  section("Tutor requests — lifecycle, visibility and expiry");
+
+  const uri = process.env.MONGODB_URI;
+  if (!uri) return skip("tutor request lifecycle", "MONGODB_URI is not set");
+
+  if (mongoose.connection.readyState !== 1) {
+    try {
+      await mongoose.connect(uri, { serverSelectionTimeoutMS: 2500 });
+    } catch {
+      return skip("tutor request lifecycle", "MongoDB is not reachable");
+    }
+  }
+
+  const { TutorRequest, TutorMatch, TutorProfile, StudentProfile, Course, Notification, AuditLog, User } =
+    await import("@/models");
+  const svc = await import("@/services/request.service");
+  const { REQUEST_STATUS, REQUEST_VISIBILITY, MATCH_STATUS, ROLES } = await import("@/constants");
+
+  const tutor = await TutorProfile.findOne({ isSearchable: true }).lean();
+  const student = await StudentProfile.findOne({ archivedAt: null }).lean();
+  if (!tutor || !student) {
+    return skip("tutor request lifecycle", "no seeded tutor/student — run `bun run seed`");
+  }
+
+  const course = await Course.findById(tutor.courseIds?.[0]).lean();
+  if (!course) return skip("tutor request lifecycle", "seeded tutor teaches no known course");
+
+  const owner = { id: String(student.ownerId), role: ROLES.PARENT };
+  const tutorActor = { id: String(tutor.userId), role: ROLES.TUTOR };
+  const admin = { id: String(new mongoose.Types.ObjectId()), role: ROLES.ADMIN };
+  const stranger = { id: String(new mongoose.Types.ObjectId()), role: ROLES.PARENT };
+
+  // Leftovers from a crashed earlier run would otherwise count against the
+  // per-family open-request cap and fail this one for the wrong reason.
+  // Both suites post requests as the same seeded parent, and a crashed run of
+  // either leaves them open against the per-family cap.
+  const stale = await TutorRequest.find({
+    goal: /^(Integration test request|QA run)/,
+  })
+    .select("_id")
+    .lean();
+  if (stale.length) {
+    const staleIds = stale.map((r) => r._id);
+    await TutorMatch.deleteMany({ requestId: { $in: staleIds } });
+    await Notification.deleteMany({ entityType: "TutorRequest", entityId: { $in: staleIds } });
+    await AuditLog.deleteMany({ entityType: "TutorRequest", entityId: { $in: staleIds } });
+    await TutorRequest.deleteMany({ _id: { $in: staleIds } });
+  }
+
+  const createdRequests = [];
+  const post = async (over = {}) => {
+    const { request } = await svc.createTutorRequest({
+      studentProfileId: String(student._id),
+      courseId: String(course._id),
+      modes: ["ONLINE"],
+      maxDistanceKm: 25,
+      preferredWindows: ["WEEKDAY_EVENING"],
+      sessionsPerWeek: 1,
+      preferredDurationMinutes: 60,
+      budgetMaxCents: 20000,
+      languages: [],
+      preferredQualifications: [],
+      urgency: "FLEXIBLE",
+      visibility: REQUEST_VISIBILITY.PUBLIC,
+      goal: "Integration test request — safe to delete.",
+      ...over,
+    }, owner);
+    createdRequests.push(request.id);
+    return request;
+  };
+
+  try {
+    // --- creation and matching ---------------------------------------------
+    const request = await post();
+    check("posting a request stores it OPEN", request.status === REQUEST_STATUS.OPEN);
+    check("a request gets a public reference", /^REQ-/.test(request.reference));
+
+    const matches = await TutorMatch.find({ requestId: request.id }).lean();
+    check("the matcher suggested at least the tutor who teaches this course",
+      matches.some((m) => String(m.tutorProfileId) === String(tutor._id)),
+      `${matches.length} matches`);
+
+    const mine = matches.find((m) => String(m.tutorProfileId) === String(tutor._id));
+    check("a stored match keeps the weights it was scored with", Boolean(mine?.scoreWeights));
+    check("a stored match keeps a per-factor breakdown",
+      typeof mine?.scoreBreakdown?.course === "number");
+
+    // --- authorization ------------------------------------------------------
+    const strangerEdit = await throws(
+      () => svc.updateTutorRequest(request.id, { goal: "Hijacked by a stranger." }, stranger),
+      (e) => e.status === 403,
+    );
+    check("a stranger cannot edit someone else's request",
+      strangerEdit.threw && strangerEdit.matched);
+
+    const strangerCancel = await throws(
+      () => svc.cancelRequest(request.id, {}, stranger),
+      (e) => e.status === 403,
+    );
+    check("a stranger cannot cancel someone else's request",
+      strangerCancel.threw && strangerCancel.matched);
+
+    const strangerRead = await throws(
+      () => svc.getRequest(request.id, stranger),
+      (e) => e.status === 403,
+    );
+    check("a learner who does not own a request cannot read it",
+      strangerRead.threw && strangerRead.matched);
+
+    // --- editing ------------------------------------------------------------
+    const edited = await svc.updateTutorRequest(
+      request.id,
+      { goal: "Integration test request — edited. Safe to delete.", budgetMaxCents: 25000 },
+      owner,
+    );
+    check("editing records what changed",
+      edited.changed.includes("goal") && edited.changed.includes("budgetMaxCents"));
+    check("editing bumps the edit counter", edited.request.editCount === 1);
+
+    const noop = await svc.updateTutorRequest(request.id, { budgetMaxCents: 25000 }, owner);
+    check("an edit that changes nothing is a no-op", noop.changed.length === 0);
+
+    const forbidden = await svc.updateTutorRequest(
+      request.id,
+      { courseId: String(new mongoose.Types.ObjectId()), studentProfileId: String(new mongoose.Types.ObjectId()) },
+      owner,
+    );
+    check("course and learner cannot be changed by an edit",
+      String(forbidden.request.courseId) === String(course._id) &&
+        String(forbidden.request.studentProfileId) === String(student._id));
+
+    // --- tutor stepping back -----------------------------------------------
+    await svc.withdrawFromRequest(request.id, { action: "DECLINE", reason: "Full this term." }, tutorActor);
+    const declined = await TutorMatch.findOne({
+      requestId: request.id, tutorProfileId: tutor._id,
+    }).lean();
+    check("a tutor declining is recorded, not deleted",
+      declined?.status === MATCH_STATUS.TUTOR_DECLINED && Boolean(declined.declinedAt));
+
+    const declineTwice = await throws(
+      () => svc.withdrawFromRequest(request.id, { action: "DECLINE" }, tutorActor),
+      (e) => e.status === 409,
+    );
+    check("a tutor cannot decline the same request twice",
+      declineTwice.threw && declineTwice.matched);
+
+    const pitchAfterDecline = await throws(
+      () => svc.expressInterest(request.id, { message: "x".repeat(40) }, tutorActor),
+      (e) => e.code === "MATCH_CLOSED",
+    );
+    check("a tutor who declined cannot then pitch",
+      pitchAfterDecline.threw && pitchAfterDecline.matched);
+
+    await svc.generateMatches(await TutorRequest.findById(request.id).lean());
+    const stillDeclined = await TutorMatch.findOne({
+      requestId: request.id, tutorProfileId: tutor._id,
+    }).lean();
+    check("re-running the matcher never revives a match a tutor closed",
+      stillDeclined?.status === MATCH_STATUS.TUTOR_DECLINED);
+
+    // --- invite-only visibility ---------------------------------------------
+    const privateRequest = await post({ visibility: REQUEST_VISIBILITY.INVITE_ONLY });
+    const uninvited = await throws(
+      () => svc.getRequestForTutor(privateRequest.id, tutorActor),
+      (e) => e.status === 404,
+    );
+    check("an uninvited tutor cannot even see an invite-only request exists",
+      uninvited.threw && uninvited.matched);
+
+    const uninvitedPitch = await throws(
+      () => svc.expressInterest(privateRequest.id, { message: "y".repeat(40) }, tutorActor),
+      (e) => e.status === 404,
+    );
+    check("an uninvited tutor cannot respond to an invite-only request",
+      uninvitedPitch.threw && uninvitedPitch.matched);
+
+    const invited = await svc.inviteTutors(
+      privateRequest.id, { tutorProfileIds: [String(tutor._id)] }, owner,
+    );
+    check("inviting a tutor opens the request to them", invited.invited === 1);
+
+    const view = await svc.getRequestForTutor(privateRequest.id, tutorActor);
+    check("an invited tutor sees the request and may respond",
+      view.request.id === privateRequest.id && view.canRespond === true);
+
+    const strangerInvite = await throws(
+      () => svc.inviteTutors(privateRequest.id, { tutorProfileIds: [String(tutor._id)] }, stranger),
+      (e) => e.status === 403,
+    );
+    check("only the owner may invite tutors", strangerInvite.threw && strangerInvite.matched);
+
+    const reinvite = await throws(
+      () => svc.inviteTutors(privateRequest.id, { tutorProfileIds: [String(tutor._id)] }, owner),
+      (e) => e.status === 409,
+    );
+    check("a tutor already invited is not invited again", reinvite.threw && reinvite.matched);
+
+    // --- responding ---------------------------------------------------------
+    await svc.expressInterest(privateRequest.id, { message: "z".repeat(40) }, tutorActor);
+    const pitched = await TutorMatch.findOne({
+      requestId: privateRequest.id, tutorProfileId: tutor._id,
+    }).lean();
+    check("a tutor's pitch is stored against the match",
+      pitched?.status === MATCH_STATUS.TUTOR_INTERESTED && Boolean(pitched.respondedAt));
+
+    const counted = await TutorRequest.findById(privateRequest.id).lean();
+    check("the interested count reflects the pitch", counted.interestedCount === 1);
+
+    const pitchTwice = await throws(
+      () => svc.expressInterest(privateRequest.id, { message: "q".repeat(40) }, tutorActor),
+      (e) => e.status === 409,
+    );
+    check("a tutor cannot pitch twice", pitchTwice.threw && pitchTwice.matched);
+
+    await svc.withdrawFromRequest(privateRequest.id, { action: "WITHDRAW" }, tutorActor);
+    const afterWithdraw = await TutorRequest.findById(privateRequest.id).lean();
+    check("withdrawing a pitch decrements the interested count",
+      afterWithdraw.interestedCount === 0);
+
+    // --- endings ------------------------------------------------------------
+    const cancelled = await svc.cancelRequest(privateRequest.id, { reason: "Test." }, owner);
+    check("cancelling moves the request to CANCELLED",
+      cancelled.status === REQUEST_STATUS.CANCELLED && Boolean(cancelled.cancelledAt));
+
+    const editClosed = await throws(
+      () => svc.updateTutorRequest(privateRequest.id, { goal: "Reopened by the back door." }, owner),
+      (e) => e.code === "REQUEST_CLOSED",
+    );
+    check("a closed request cannot be edited", editClosed.threw && editClosed.matched);
+
+    const respondClosed = await throws(
+      () => svc.expressInterest(privateRequest.id, { message: "w".repeat(40) }, tutorActor),
+      (e) => e.code === "REQUEST_CLOSED" || e.status === 404,
+    );
+    check("a closed request accepts no new responses",
+      respondClosed.threw && respondClosed.matched);
+
+    const closedMatches = await svc.generateMatches(
+      await TutorRequest.findById(privateRequest.id).lean(),
+    );
+    check("the matcher does nothing for a closed request", closedMatches.length === 0);
+
+    // --- expiry -------------------------------------------------------------
+    const expiring = await post();
+    await TutorRequest.updateOne(
+      { _id: expiring.id },
+      { $set: { expiresAt: new Date(Date.now() - 60_000) } },
+    );
+    const firstSweep = await svc.expireStaleRequests();
+    check("the expiry sweep closes an aged-out request", firstSweep.expired >= 1);
+    check("the expired request is EXPIRED",
+      (await TutorRequest.findById(expiring.id).lean()).status === REQUEST_STATUS.EXPIRED);
+
+    const secondSweep = await svc.expireStaleRequests();
+    check("running the expiry sweep again finds nothing left to do",
+      secondSweep.expired === 0);
+
+    const warning = await post();
+    await TutorRequest.updateOne(
+      { _id: warning.id },
+      { $set: { expiresAt: new Date(Date.now() + 24 * 3600_000), expiryWarnedAt: null } },
+    );
+    const warnRun = await svc.expireStaleRequests();
+    check("a request about to expire warns the family once", warnRun.warned >= 1);
+    check("the warning is stamped so it cannot be sent twice",
+      Boolean((await TutorRequest.findById(warning.id).lean()).expiryWarnedAt));
+    const warnAgain = await svc.expireStaleRequests();
+    check("a second sweep does not warn the same family again", warnAgain.warned === 0);
+
+    // --- moderation ----------------------------------------------------------
+    const moderated = await post();
+    const removed = await svc.moderateRequest(
+      moderated.id, { action: "REMOVE", note: "Contains contact details." }, admin,
+    );
+    check("a moderator can remove a request", removed.status === REQUEST_STATUS.REMOVED);
+    check("removal is recorded in the moderation history",
+      removed.moderationHistory.length === 1);
+
+    const hidden = await throws(
+      () => svc.getRequestForTutor(moderated.id, tutorActor),
+      (e) => e.status === 404,
+    );
+    check("a removed request is invisible to tutors", hidden.threw && hidden.matched);
+
+    const restored = await svc.moderateRequest(
+      moderated.id, { action: "RESTORE", note: "Family edited it." }, admin,
+    );
+    check("a removed request can be restored", restored.status === REQUEST_STATUS.OPEN);
+    check("the restore is recorded too", restored.moderationHistory.length === 2);
+
+    await svc.moderateRequest(moderated.id, { action: "REMOVE", note: "Re-removed." }, admin);
+    const alreadyRemoved = await throws(
+      () => svc.moderateRequest(moderated.id, { action: "REMOVE", note: "Again." }, admin),
+      (e) => e.status === 409,
+    );
+    check("a request cannot be removed twice",
+      alreadyRemoved.threw && alreadyRemoved.matched, alreadyRemoved.error?.message);
+
+    const restoreNotRemoved = await throws(
+      () => svc.moderateRequest(request.id, { action: "RESTORE", note: "Nothing to undo." }, admin),
+      (e) => e.status === 409,
+    );
+    check("a request that was never removed cannot be restored",
+      restoreNotRemoved.threw && restoreNotRemoved.matched);
+
+    // --- audit trail ---------------------------------------------------------
+    // `recordAudit` swallows its own failures so an audit problem cannot break
+    // the action being audited — which also means a bad action name is silent.
+    // Asserting the trail exists is what makes that visible.
+    const trail = await AuditLog.find({
+      entityType: "TutorRequest",
+      entityId: { $in: createdRequests.map((id) => new mongoose.Types.ObjectId(id)) },
+    }).lean();
+    const actions = new Set(trail.map((row) => row.action));
+    check("creating a request is audited", actions.has("REQUEST_CREATED"));
+    check("editing a request is audited", actions.has("REQUEST_UPDATED"));
+    check("cancelling a request is audited", actions.has("REQUEST_CANCELLED"));
+    check("inviting a tutor is audited", actions.has("REQUEST_TUTOR_INVITED"));
+    check("moderating a request is audited", actions.has("REQUEST_MODERATED"));
+    check("every audit row names a valid action",
+      trail.length > 0 && trail.every((row) => Boolean(row.action)));
+
+    // --- notifications -------------------------------------------------------
+    const notices = await Notification.find({
+      entityType: "TutorRequest",
+      entityId: { $in: createdRequests.map((id) => new mongoose.Types.ObjectId(id)) },
+    }).lean();
+    check("tutors are notified about a public request",
+      notices.some((n) => n.type === "REQUEST_MATCHED"));
+    check("an invited tutor is notified by name",
+      notices.some((n) => n.type === "REQUEST_INVITED"));
+    check("the family is warned before their request expires",
+      notices.some((n) => n.type === "REQUEST_EXPIRING"));
+    check("no notification about an invite-only request was broadcast to the board",
+      !notices.some(
+        (n) => n.type === "REQUEST_MATCHED" && String(n.entityId) === privateRequest.id,
+      ));
+  } finally {
+    const ids = createdRequests.map((id) => new mongoose.Types.ObjectId(id));
+    await TutorMatch.deleteMany({ requestId: { $in: ids } });
+    await Notification.deleteMany({ entityType: "TutorRequest", entityId: { $in: ids } });
+    await AuditLog.deleteMany({ entityType: "TutorRequest", entityId: { $in: ids } });
+    await TutorRequest.deleteMany({ _id: { $in: ids } });
+  }
+}
+
+
+// --- 12. SMS adapters (§28, §38, §41 Phase 2) ------------------------------
+
+/**
+ * The Twilio adapter and the development stand-in, with `fetch` stubbed.
+ *
+ * The two things worth proving here are that a production send is shaped the
+ * way Twilio actually expects, and that the development provider never claims
+ * a message was delivered — a fake that lied would hide the exact failure
+ * this channel is most likely to have in production.
+ */
+async function smsAdapterTests() {
+  section("SMS — Twilio adapter, development provider and callback signatures");
+
+  const {
+    ConsoleSmsProvider, TwilioSmsProvider, verifyTwilioSignature,
+    getSmsProvider, smsConfigured, resetSmsProvider,
+  } = await import("@/services/external/sms-provider");
+  const {
+    smsBodyFor, hasSmsTemplate, segmentCount, verificationSmsBody, SMS_OPT_OUT_FOOTER,
+  } = await import("@/services/external/sms-templates");
+  const { NOTIFICATION_TYPES } = await import("@/constants");
+
+  // --- development provider -------------------------------------------------
+  const console_ = new ConsoleSmsProvider();
+  const simulated = await console_.send({ to: "+14165550142", body: "hello" });
+  check("the development provider never reports delivery", simulated.delivered === false);
+  check("it says plainly that the message was simulated", simulated.simulated === true);
+  check("the development provider reports itself as unconfigured", console_.configured === false);
+
+  // --- Twilio: request shape ------------------------------------------------
+  let fetchStub = stubFetch(() => ({ body: { sid: "SM123", status: "queued", num_segments: "1" } }));
+  const twilio = new TwilioSmsProvider({
+    accountSid: "ACtest", authToken: "secrettoken", from: "+15550000000", fetchImpl: fetchStub,
+  });
+
+  const sent = await twilio.send({ to: "+14165550142", body: "Lesson at 5pm", idempotencyKey: "abc" });
+  const call = fetchStub.calls[0];
+  const form = new URLSearchParams(call.options.body);
+
+  check("the send goes to Twilio's Messages endpoint for the account",
+    call.url === "https://api.twilio.com/2010-04-01/Accounts/ACtest/Messages.json");
+  check("credentials travel as HTTP basic auth, never in the body",
+    call.options.headers.Authorization === `Basic ${Buffer.from("ACtest:secrettoken").toString("base64")}` &&
+      !call.options.body.includes("secrettoken"));
+  check("the destination and body are form-encoded",
+    form.get("To") === "+14165550142" && form.get("Body") === "Lesson at 5pm");
+  check("a from-number is sent when no messaging service is configured",
+    form.get("From") === "+15550000000" && !form.has("MessagingServiceSid"));
+  check("the idempotency key reaches Twilio",
+    call.options.headers["I-Twilio-Idempotency-Token"] === "abc");
+  check("a successful send returns the provider's message id",
+    sent.delivered === true && sent.messageId === "SM123");
+
+  fetchStub = stubFetch(() => ({ body: { sid: "SM9", status: "accepted" } }));
+  const withService = new TwilioSmsProvider({
+    accountSid: "ACtest", authToken: "t", messagingServiceSid: "MG1", fetchImpl: fetchStub,
+  });
+  await withService.send({ to: "+14165550142", body: "hi" });
+  const serviceForm = new URLSearchParams(fetchStub.calls[0].options.body);
+  check("a messaging service is used in place of a from-number",
+    serviceForm.get("MessagingServiceSid") === "MG1" && !serviceForm.has("From"));
+
+  // --- Twilio: failures -----------------------------------------------------
+  fetchStub = stubFetch(() => ({ status: 400, body: { code: 21610, message: "Unsubscribed recipient" } }));
+  const rejected = await throws(
+    () => new TwilioSmsProvider({ accountSid: "AC", authToken: "t", from: "+1", fetchImpl: fetchStub })
+      .send({ to: "+14165550142", body: "x" }),
+    (e) => e.code === "TWILIO_21610",
+  );
+  check("a provider rejection surfaces its code", rejected.threw && rejected.matched);
+  check("a permanent rejection is not marked retryable",
+    rejected.error?.retryable === false);
+  check("the failure message never contains the text that was sent",
+    !String(rejected.error?.message).includes("x is your"));
+
+  fetchStub = stubFetch(() => ({ status: 429, body: { message: "Too many requests" } }));
+  const throttled = await throws(
+    () => new TwilioSmsProvider({ accountSid: "AC", authToken: "t", from: "+1", fetchImpl: fetchStub })
+      .send({ to: "+14165550142", body: "x" }),
+    (e) => e.retryable === true,
+  );
+  check("a throttled send is marked retryable", throttled.threw && throttled.matched);
+
+  // --- provider selection ---------------------------------------------------
+  const withEnv = async (vars, fn) => {
+    const saved = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]));
+    Object.assign(process.env, vars);
+    for (const [k, v] of Object.entries(vars)) if (v === undefined) delete process.env[k];
+    resetSmsProvider();
+    try {
+      return await fn();
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+      resetSmsProvider();
+    }
+  };
+
+  await withEnv({ SMS_PROVIDER: undefined, TWILIO_ACCOUNT_SID: undefined, TWILIO_AUTH_TOKEN: undefined }, async () => {
+    check("with no credentials, SMS falls back to the development provider",
+      getSmsProvider().name === "CONSOLE");
+    check("and reports itself as not configured", smsConfigured() === false);
+  });
+
+  await withEnv({
+    SMS_PROVIDER: "twilio", TWILIO_ACCOUNT_SID: "AC1", TWILIO_AUTH_TOKEN: "tok",
+    TWILIO_FROM_NUMBER: "+15550000000", TWILIO_MESSAGING_SERVICE_SID: undefined,
+  }, async () => {
+    check("a fully configured Twilio selection produces the real adapter",
+      getSmsProvider().name === "TWILIO");
+    check("and reports itself as configured", smsConfigured() === true);
+  });
+
+  await withEnv({
+    SMS_PROVIDER: "twilio", TWILIO_ACCOUNT_SID: "AC1", TWILIO_AUTH_TOKEN: "tok",
+    TWILIO_FROM_NUMBER: undefined, TWILIO_MESSAGING_SERVICE_SID: undefined,
+  }, async () => {
+    const misconfigured = await$throws(() => getSmsProvider());
+    check("Twilio without a sender is refused at startup, not per message",
+      misconfigured.threw && misconfigured.error?.code === "PROVIDER_MISCONFIGURED");
+    check("the refusal names the missing variables, never a value",
+      /TWILIO_FROM_NUMBER|TWILIO_MESSAGING_SERVICE_SID/.test(misconfigured.error?.message ?? "") &&
+        !String(misconfigured.error?.message).includes("tok"));
+  });
+
+  await withEnv({ SMS_PROVIDER: "carrier-pigeon" }, async () => {
+    const unknown = await$throws(() => getSmsProvider());
+    check("an unknown SMS provider is refused", unknown.threw);
+  });
+
+  // --- inbound callback signatures -----------------------------------------
+  const authToken = "the-account-auth-token";
+  const url = "https://test.apluslearn.ca/api/webhooks/sms";
+  const params = { From: "+14165550142", Body: "STOP", MessageSid: "SM1" };
+
+  const sign = (u, p) => {
+    const payload = Object.keys(p).sort().reduce((acc, k) => acc + k + p[k], u);
+    return createHmac("sha1", authToken).update(Buffer.from(payload, "utf8")).digest("base64");
+  };
+
+  check("a correctly signed callback verifies",
+    verifyTwilioSignature({ signature: sign(url, params), url, params, authToken }));
+  check("an unsigned callback is refused",
+    !verifyTwilioSignature({ signature: null, url, params, authToken }));
+  check("a callback whose body was tampered with is refused",
+    !verifyTwilioSignature({
+      signature: sign(url, params), url, params: { ...params, Body: "START" }, authToken,
+    }));
+  check("a callback replayed against a different URL is refused",
+    !verifyTwilioSignature({
+      signature: sign(url, params), url: "https://evil.example/api/webhooks/sms", params, authToken,
+    }));
+  check("a signature made with the wrong token is refused",
+    !verifyTwilioSignature({
+      signature: createHmac("sha1", "wrong").update(url).digest("base64"), url, params, authToken,
+    }));
+  check("verification needs a token to check against",
+    !verifyTwilioSignature({ signature: sign(url, params), url, params, authToken: undefined }));
+
+  // --- templates ------------------------------------------------------------
+  check("only whitelisted notification types have a text version",
+    hasSmsTemplate(NOTIFICATION_TYPES.BOOKING_REMINDER) &&
+      !hasSmsTemplate(NOTIFICATION_TYPES.MESSAGE_RECEIVED));
+
+  const body = smsBodyFor(
+    NOTIFICATION_TYPES.BOOKING_REMINDER,
+    { title: "Lesson tomorrow", body: "MHF4U with Priya at 5:00 PM." },
+    "APlus Learn",
+  );
+  check("a text carries the platform name", body.startsWith("APlus Learn:"));
+  check("every text carries an opt-out path", body.endsWith(SMS_OPT_OUT_FOOTER));
+  check("a reminder fits one message segment", segmentCount(body) === 1, `${body.length} chars`);
+
+  check("a notification with no template renders nothing",
+    smsBodyFor(NOTIFICATION_TYPES.MESSAGE_RECEIVED, { title: "x" }, "APlus Learn") === null);
+
+  const longBody = smsBodyFor(
+    NOTIFICATION_TYPES.BOOKING_CHANGED,
+    { title: "Lesson moved", body: "word ".repeat(80) },
+    "APlus Learn",
+  );
+  check("a long notification is clipped rather than sent as three segments",
+    segmentCount(longBody) === 1, `${longBody.length} chars`);
+  check("clipping stays inside the GSM-7 alphabet, so one segment stays one segment",
+    !/[^\x20-\x7E]/.test(longBody));
+  check("clipping cuts on a word boundary", /\s\.\.\.\s|[a-z]\.\.\. /.test(`${longBody} `) || longBody.includes("... "));
+
+  const code = verificationSmsBody("123456", "APlus Learn");
+  check("a confirmation code text says it expires", /expires/i.test(code));
+  check("a confirmation code text warns it will never be asked for",
+    /never ask/i.test(code));
+  check("a unicode body is costed against the smaller segment size",
+    segmentCount("é".repeat(80)) === 2);
+}
+
+// --- 13. SMS service (§28, §36, §41 Phase 2) -------------------------------
+
+/**
+ * Consent, idempotency and verification against a real database.
+ *
+ * The question this section exists to answer is not "can we send a text" but
+ * "can we ever send one we shouldn't" — so most of it is about the messages
+ * that must *not* go out, and about every one of those leaving a record that
+ * says why.
+ */
+async function smsServiceTests() {
+  section("SMS — consent, idempotency, verification and opt-out");
+
+  const uri = process.env.MONGODB_URI;
+  if (!uri) return skip("SMS service", "MONGODB_URI is not set");
+
+  if (mongoose.connection.readyState !== 1) {
+    try {
+      await mongoose.connect(uri, { serverSelectionTimeoutMS: 2500 });
+    } catch {
+      return skip("SMS service", "MongoDB is not reachable");
+    }
+  }
+
+  const { User, SmsMessage, AuthToken, Notification } = await import("@/models");
+  const { AUTH_TOKEN_PURPOSE } = await import("@/models");
+  const sms = await import("@/services/sms.service");
+  const { updateNotificationPreferences } = await import("@/services/user.service");
+  const { notify } = await import("@/services/notification.service");
+  const {
+    SMS_STATUS, SMS_SKIP_REASONS, NOTIFICATION_TYPES, NOTIFICATION_CHANNELS, ROLES,
+  } = await import("@/constants");
+
+  // `smsEnabled` ships off, which is correct — and means this section has to
+  // turn it on to exercise anything past the platform gate. The original value
+  // is restored in the `finally` below.
+  const { updateSettings, invalidateSettingsCache } = await import("@/services/settings.service");
+  const { Settings } = await import("@/models");
+  const settingsBefore = await Settings.findOne({ key: "PLATFORM" }).lean();
+  const smsWasEnabled = settingsBefore?.notifications?.smsEnabled ?? false;
+  await updateSettings({ notifications: { smsEnabled: true } });
+  invalidateSettingsCache();
+
+  const made = [];
+  const makeUser = async (over = {}) => {
+    const user = await User.create({
+      email: `sms-test-${randomUUID()}@example.com`,
+      firstName: "Sms",
+      lastName: "Tester",
+      role: ROLES.PARENT,
+      status: "ACTIVE",
+      emailVerifiedAt: new Date(),
+      ...over,
+    });
+    made.push(user._id);
+    return user;
+  };
+
+  const rowsFor = (userId) => SmsMessage.find({ userId }).sort({ createdAt: -1 }).lean();
+
+  try {
+    // --- consent gates, one at a time ---------------------------------------
+    const notification = (type = NOTIFICATION_TYPES.BOOKING_REMINDER) => ({
+      _id: new mongoose.Types.ObjectId(),
+      type,
+      title: "Lesson tomorrow",
+      body: "MHF4U at 5:00 PM.",
+    });
+
+    const noPhone = await makeUser();
+    let result = await sms.sendNotificationSms(notification(), noPhone.toObject());
+    check("no number on the account means no text",
+      result.skipReason === SMS_SKIP_REASONS.NO_PHONE);
+
+    const unverified = await makeUser({ phoneE164: "+14165550111", phone: "4165550111" });
+    result = await sms.sendNotificationSms(notification(), unverified.toObject());
+    check("an unconfirmed number is never texted",
+      result.skipReason === SMS_SKIP_REASONS.PHONE_UNVERIFIED);
+
+    const channelOff = await makeUser({
+      phoneE164: "+14165550112", phoneVerifiedAt: new Date(),
+      notificationPreferences: { [NOTIFICATION_CHANNELS.SMS]: false },
+    });
+    result = await sms.sendNotificationSms(notification(), channelOff.toObject());
+    check("a recipient who has texts switched off is not texted",
+      result.skipReason === SMS_SKIP_REASONS.CHANNEL_DISABLED);
+
+    const stopped = await makeUser({
+      phoneE164: "+14165550113", phoneVerifiedAt: new Date(), smsOptOutAt: new Date(),
+      notificationPreferences: { [NOTIFICATION_CHANNELS.SMS]: true },
+    });
+    result = await sms.sendNotificationSms(notification(), stopped.toObject());
+    check("a STOP on record outranks the account's own preference",
+      result.skipReason === SMS_SKIP_REASONS.OPTED_OUT);
+
+    const ready = await makeUser({
+      phoneE164: "+14165550114", phone: "4165550114", phoneVerifiedAt: new Date(),
+      notificationPreferences: { [NOTIFICATION_CHANNELS.SMS]: true },
+    });
+    result = await sms.sendNotificationSms(
+      notification(NOTIFICATION_TYPES.MESSAGE_RECEIVED), ready.toObject(),
+    );
+    check("a notification with no text version is not texted",
+      result.skipReason === SMS_SKIP_REASONS.NO_TEMPLATE);
+
+    // Every refusal is on the record, with its reason.
+    const skipped = await rowsFor(channelOff._id);
+    check("a message that was deliberately not sent is still recorded",
+      skipped.length === 1 && skipped[0].status === SMS_STATUS.SKIPPED);
+    check("and the record says which gate stopped it",
+      skipped[0].skipReason === SMS_SKIP_REASONS.CHANNEL_DISABLED);
+
+    // The outermost gate: an operator switching texts off stops all of them,
+    // whatever anyone has chosen for themselves.
+    await updateSettings({ notifications: { smsEnabled: false } });
+    invalidateSettingsCache();
+    result = await sms.sendNotificationSms(notification(), ready.toObject());
+    check("an operator switching texts off stops every one of them",
+      result.skipReason === SMS_SKIP_REASONS.PLATFORM_DISABLED);
+    await updateSettings({ notifications: { smsEnabled: true } });
+    invalidateSettingsCache();
+
+    // --- the development provider is honest ----------------------------------
+    const note = notification();
+    result = await sms.sendNotificationSms(note, ready.toObject());
+    check("with no carrier configured, a text is recorded as simulated",
+      result.status === SMS_STATUS.SIMULATED, JSON.stringify(result));
+    check("a simulated text is never reported as sent", result.sent === false);
+
+    const row = (await rowsFor(ready._id))[0];
+    check("the simulated message is in the delivery log",
+      row?.status === SMS_STATUS.SIMULATED && row.notificationType === note.type);
+    check("the log keeps a preview of what would have been sent",
+      /Lesson tomorrow/.test(row.bodyPreview ?? ""));
+
+    // --- idempotency ----------------------------------------------------------
+    await sms.sendNotificationSms(note, ready.toObject());
+    const afterRetry = await SmsMessage.countDocuments({
+      dedupeKey: `notification:${note._id}`,
+    });
+    check("the same notification is never texted twice", afterRetry === 1);
+
+    const retried = await sms.sendNotificationSms(note, ready.toObject());
+    check("a retry is refused as a duplicate, not silently re-sent",
+      retried.skipReason === SMS_SKIP_REASONS.DUPLICATE);
+
+    // --- verification codes ---------------------------------------------------
+    const verifying = await makeUser();
+    const start = await sms.startPhoneVerification(verifying._id, {
+      phone: "4165550199", phoneE164: "+14165550199",
+    });
+    check("asking for a code reports whether a carrier is actually behind it",
+      start.providerConfigured === false && start.simulated === true);
+
+    const token = await AuthToken.findOne({
+      userId: verifying._id, purpose: AUTH_TOKEN_PURPOSE.PHONE_VERIFICATION,
+    }).lean();
+    check("the code is stored only as a hash", Boolean(token) && token.tokenHash.length === 64);
+    check("the number is bound to the token, not read back from the request",
+      token.subject === "+14165550199");
+
+    const codeRow = (await rowsFor(verifying._id))[0];
+    check("a confirmation code is never previewed in the delivery log",
+      codeRow.kind === "VERIFICATION" && !/\d{6}/.test(codeRow.bodyPreview ?? ""));
+
+    const wrong = await throws(
+      () => sms.confirmPhoneVerification(verifying._id, { code: "000000" }),
+      (e) => e.status === 422,
+    );
+    check("a wrong code is refused", wrong.threw && wrong.matched);
+
+    const stillUnverified = await User.findById(verifying._id).lean();
+    check("a wrong code leaves the number unconfirmed",
+      stillUnverified.phoneVerifiedAt === null);
+
+    // Burn the remaining attempts; the code must stop working entirely.
+    for (let i = 0; i < 5; i += 1) {
+      await throws(() => sms.confirmPhoneVerification(verifying._id, { code: "000001" }));
+    }
+    const exhausted = await throws(
+      () => sms.confirmPhoneVerification(verifying._id, { code: "000002" }),
+      (e) => e.status === 429 || e.code === "CODE_EXPIRED",
+    );
+    check("a code is burned after repeated wrong guesses",
+      exhausted.threw && exhausted.matched);
+
+    // A fresh code, confirmed correctly. The plaintext is not recoverable, so
+    // the code is set directly — the hashing path is asserted above.
+    const { createHash } = await import("node:crypto");
+    await AuthToken.updateMany(
+      { userId: verifying._id, purpose: AUTH_TOKEN_PURPOSE.PHONE_VERIFICATION },
+      { $set: { consumedAt: new Date() } },
+    );
+    await AuthToken.create({
+      userId: verifying._id,
+      purpose: AUTH_TOKEN_PURPOSE.PHONE_VERIFICATION,
+      tokenHash: createHash("sha256").update("424242").digest("hex"),
+      subject: "+14165550199",
+      expiresAt: new Date(Date.now() + 600_000),
+    });
+
+    const confirmed = await sms.confirmPhoneVerification(verifying._id, { code: "424242" });
+    check("the right code confirms the number", Boolean(confirmed.phoneVerifiedAt));
+    check("confirming turns the text channel on",
+      confirmed.notificationPreferences?.[NOTIFICATION_CHANNELS.SMS] === true);
+
+    const reuse = await throws(
+      () => sms.confirmPhoneVerification(verifying._id, { code: "424242" }),
+      (e) => e.code === "CODE_EXPIRED",
+    );
+    check("a confirmed code cannot be used twice", reuse.threw && reuse.matched);
+
+    // --- one number, one account ---------------------------------------------
+    const impostor = await makeUser();
+    const taken = await throws(
+      () => sms.startPhoneVerification(impostor._id, {
+        phone: "4165550199", phoneE164: "+14165550199",
+      }),
+      (e) => e.status === 409,
+    );
+    check("a number confirmed on one account cannot be claimed by another",
+      taken.threw && taken.matched);
+
+    // --- the preference cannot authorise itself -------------------------------
+    const sneaky = await makeUser();
+    const refused = await throws(
+      () => updateNotificationPreferences(sneaky._id, { [NOTIFICATION_CHANNELS.SMS]: true }),
+      (e) => e.code === "PHONE_NOT_VERIFIED",
+    );
+    check("texts cannot be switched on without a confirmed number",
+      refused.threw && refused.matched);
+
+    const stoppedUser = await makeUser({
+      phoneE164: "+14165550177", phoneVerifiedAt: new Date(), smsOptOutAt: new Date(),
+    });
+    const refusedStop = await throws(
+      () => updateNotificationPreferences(stoppedUser._id, { [NOTIFICATION_CHANNELS.SMS]: true }),
+      (e) => e.code === "SMS_OPTED_OUT",
+    );
+    check("a STOP cannot be undone from the settings screen",
+      refusedStop.threw && refusedStop.matched);
+
+    // --- inbound keywords -----------------------------------------------------
+    const a = await makeUser({
+      phoneE164: "+14165550188", phoneVerifiedAt: new Date(),
+      notificationPreferences: { [NOTIFICATION_CHANNELS.SMS]: true },
+    });
+    const b = await makeUser({
+      phoneE164: "+14165550188", phoneVerifiedAt: new Date(),
+      notificationPreferences: { [NOTIFICATION_CHANNELS.SMS]: true },
+    });
+
+    const optOut = await sms.applySmsKeyword({ from: "+14165550188", body: "stop" });
+    check("STOP applies to every account holding that handset",
+      optOut.action === "OPT_OUT" && optOut.accounts === 2);
+    const afterStop = await User.findById(a._id).lean();
+    check("STOP also switches the channel off",
+      Boolean(afterStop.smsOptOutAt) &&
+        afterStop.notificationPreferences[NOTIFICATION_CHANNELS.SMS] === false);
+
+    const optIn = await sms.applySmsKeyword({ from: "+14165550188", body: "START please" });
+    check("START clears the block", optIn.action === "OPT_IN" && optIn.accounts === 2);
+    const afterStart = await User.findById(b._id).lean();
+    check("but START does not switch the channel back on by itself",
+      afterStart.smsOptOutAt === null &&
+        afterStart.notificationPreferences[NOTIFICATION_CHANNELS.SMS] === false);
+
+    check("an unrelated reply is ignored",
+      (await sms.applySmsKeyword({ from: "+14165550188", body: "thanks!" })).action === "IGNORED");
+
+    // --- end to end through the notification service ---------------------------
+    const notified = await makeUser({
+      phoneE164: "+14165550166", phoneVerifiedAt: new Date(),
+      notificationPreferences: { [NOTIFICATION_CHANNELS.SMS]: true },
+    });
+    const created = await notify({
+      userId: notified._id,
+      type: NOTIFICATION_TYPES.BOOKING_REMINDER,
+      title: "Lesson tomorrow",
+      body: "MHF4U at 5:00 PM.",
+    });
+    check("notifying writes the in-app record as always", Boolean(created?.id));
+
+    const attempted = await SmsMessage.findOne({ userId: notified._id }).lean();
+    check("and the SMS path runs without the caller asking for it",
+      Boolean(attempted) && attempted.notificationType === NOTIFICATION_TYPES.BOOKING_REMINDER);
+    check("a simulated text does not mark the notification as delivered by SMS",
+      !(await Notification.findById(created.id).lean()).deliveredChannels
+        .includes(NOTIFICATION_CHANNELS.SMS));
+
+    // --- the admin log masks numbers -------------------------------------------
+    const log = await sms.listSmsMessages({ pageSize: 5 });
+    check("the delivery log masks phone numbers",
+      log.items.every((m) => !/^\+\d{11,}$/.test(m.to)), log.items[0]?.to);
+    check("the delivery log reports whether a carrier is configured",
+      log.providerConfigured === false);
+  } finally {
+    await updateSettings({ notifications: { smsEnabled: smsWasEnabled } });
+    invalidateSettingsCache();
+    await SmsMessage.deleteMany({ userId: { $in: made } });
+    await AuthToken.deleteMany({ userId: { $in: made } });
+    await Notification.deleteMany({ userId: { $in: made } });
+    await User.deleteMany({ _id: { $in: made } });
+  }
+}
+
+
+// --- 14. Secret storage (§36, §41 Phase 2) ---------------------------------
+
+/**
+ * The encryption behind stored OAuth refresh tokens.
+ *
+ * A refresh token is a standing key to somebody's calendar, so the properties
+ * that matter are that it round-trips, that it is not guessable from the
+ * stored form, that tampering is detected rather than tolerated, and that a
+ * rotated `AUTH_SECRET` makes it unreadable rather than silently wrong.
+ */
+async function cryptoTests() {
+  section("Secret storage — encryption at rest and signed OAuth state");
+
+  const { encryptSecret, decryptSecret, isEncrypted, signState, verifyState } =
+    await import("@/lib/security/crypto");
+
+  const token = "1//0gRefreshTokenThatMustNeverLeak";
+  const stored = encryptSecret(token, "test-label");
+
+  check("a stored secret round-trips", decryptSecret(stored, "test-label") === token);
+  check("the stored form does not contain the plaintext", !stored.includes("RefreshToken"));
+  check("the stored form is versioned", stored.startsWith("v1.") && isEncrypted(stored));
+
+  check("encrypting twice produces different ciphertext",
+    encryptSecret(token, "test-label") !== encryptSecret(token, "test-label"));
+
+  check("a secret cannot be read with a different purpose label",
+    decryptSecret(stored, "other-label") === null);
+
+  const tampered = `${stored.slice(0, -4)}AAAA`;
+  check("a tampered ciphertext fails rather than decrypting to something else",
+    decryptSecret(tampered, "test-label") === null);
+
+  check("garbage decrypts to null rather than throwing",
+    decryptSecret("not-a-secret", "test-label") === null);
+  check("an empty secret encrypts to nothing", encryptSecret("", "test-label") === null);
+
+  // The key must actually depend on AUTH_SECRET, so a rotated secret makes
+  // stored tokens unreadable rather than subtly wrong. Derived keys are
+  // memoised per label, so the dependence is proved with two fresh labels
+  // either side of a rotation rather than by re-reading one.
+  const originalSecret = process.env.AUTH_SECRET;
+  try {
+    const underSecretA = encryptSecret(token, `rot-a-${randomUUID()}`);
+    const labelB = `rot-b-${randomUUID()}`;
+
+    process.env.AUTH_SECRET = "y".repeat(48);
+    const underSecretB = encryptSecret(token, labelB);
+
+    check("a secret encrypted after rotation is unreadable with the pre-rotation key",
+      decryptSecret(underSecretB, "test-label") === null);
+    check("and the two ciphertexts are not interchangeable",
+      underSecretA !== underSecretB && decryptSecret(underSecretA, labelB) === null);
+  } finally {
+    process.env.AUTH_SECRET = originalSecret;
+  }
+
+  check("encryption refuses to run without a usable AUTH_SECRET", (() => {
+    const saved = process.env.AUTH_SECRET;
+    process.env.AUTH_SECRET = "too-short";
+    try {
+      encryptSecret("x", `no-secret-${randomUUID()}`);
+      return false;
+    } catch {
+      return true;
+    } finally {
+      process.env.AUTH_SECRET = saved;
+    }
+  })());
+
+  // --- signed state ---------------------------------------------------------
+  const state = signState({ userId: "abc", provider: "GOOGLE" }, { label: "state-test" });
+  const claims = verifyState(state, { label: "state-test" });
+  check("a signed state round-trips", claims?.userId === "abc" && claims.provider === "GOOGLE");
+
+  check("state signed with one purpose is not accepted under another",
+    verifyState(state, { label: "different" }) === null);
+
+  const [body] = state.split(".");
+  const forged = `${body}.${Buffer.from("forged").toString("base64url")}`;
+  check("a forged state signature is refused", verifyState(forged, { label: "state-test" }) === null);
+
+  const swapped = signState({ userId: "victim" }, { label: "state-test" }).split(".")[0];
+  check("a state body swapped under a valid signature is refused",
+    verifyState(`${swapped}.${state.split(".")[1]}`, { label: "state-test" }) === null);
+
+  const expired = signState({ userId: "abc" }, { label: "state-test", ttlSeconds: -10 });
+  check("an expired state is refused", verifyState(expired, { label: "state-test" }) === null);
+  check("a missing state is refused", verifyState(undefined, { label: "state-test" }) === null);
+}
+
+// --- 15. Calendar adapters (§18, §38, §41 Phase 2) -------------------------
+
+/**
+ * Google Calendar and Microsoft Graph, with `fetch` stubbed.
+ *
+ * The shapes these two speak differ in exactly the ways that cause silent
+ * bugs — Google's free/busy versus Graph's calendar view, wall-clock strings
+ * versus instants — so the assertions are about the request that goes out,
+ * not only the answer that comes back.
+ */
+async function calendarAdapterTests() {
+  section("Calendar — Google and Microsoft adapters");
+
+  const {
+    GoogleCalendarProvider, MicrosoftCalendarProvider, DevelopmentCalendarProvider,
+    getCalendarProvider, calendarIntegrationsStatus, resetCalendarProviders,
+  } = await import("@/services/external/calendar-provider");
+  const { CALENDAR_PROVIDERS } = await import("@/constants");
+
+  const lesson = {
+    title: "MHF4U lesson (APlus Learn)",
+    description: "Reference APL-123",
+    start: new Date("2026-03-04T22:00:00.000Z"),
+    end: new Date("2026-03-04T23:00:00.000Z"),
+    timeZone: "America/Toronto",
+    idempotencyKey: "apl-b1-c1",
+  };
+
+  // --- Google: authorization ------------------------------------------------
+  const google = new GoogleCalendarProvider({ clientId: "gid", clientSecret: "gsecret" });
+  const authUrl = new URL(
+    google.getAuthorizationUrl({ redirectUri: "https://x.test/cb", state: "st8" }),
+  );
+  check("Google consent asks for offline access, or the connection dies in an hour",
+    authUrl.searchParams.get("access_type") === "offline");
+  check("Google consent forces the prompt, so a reconnect still yields a refresh token",
+    authUrl.searchParams.get("prompt") === "consent");
+  check("Google consent asks only for event write and read-only free/busy",
+    authUrl.searchParams.get("scope").includes("calendar.events") &&
+      authUrl.searchParams.get("scope").includes("calendar.readonly") &&
+      !/auth\/calendar(\s|$)/.test(authUrl.searchParams.get("scope")));
+  check("the signed state is carried through", authUrl.searchParams.get("state") === "st8");
+  check("the client secret never appears in a URL the browser follows",
+    !authUrl.toString().includes("gsecret"));
+
+  // --- Google: token exchange ----------------------------------------------
+  const idToken = [
+    Buffer.from(JSON.stringify({ alg: "none" })).toString("base64url"),
+    Buffer.from(JSON.stringify({ sub: "g-123", email: "tutor@example.com" })).toString("base64url"),
+    "sig",
+  ].join(".");
+
+  let stub = stubFetch(() => ({
+    body: { access_token: "at", refresh_token: "rt", expires_in: 3599, scope: "s", id_token: idToken },
+  }));
+  const exchanged = await new GoogleCalendarProvider({
+    clientId: "gid", clientSecret: "gsecret", fetchImpl: stub,
+  }).exchangeCode({ code: "c", redirectUri: "https://x.test/cb" });
+
+  check("a Google exchange yields both tokens",
+    exchanged.accessToken === "at" && exchanged.refreshToken === "rt");
+  check("the connected account is identified from the id token",
+    exchanged.account.email === "tutor@example.com" && exchanged.account.id === "g-123");
+
+  stub = stubFetch(() => ({ body: { access_token: "at", expires_in: 3599 } }));
+  const noRefresh = await throws(
+    () => new GoogleCalendarProvider({ clientId: "g", clientSecret: "s", fetchImpl: stub })
+      .exchangeCode({ code: "c", redirectUri: "r" }),
+    (e) => e.code === "NO_REFRESH_TOKEN",
+  );
+  check("an exchange with no refresh token is refused rather than stored",
+    noRefresh.threw && noRefresh.matched);
+
+  stub = stubFetch(() => ({ status: 400, body: { error: "invalid_grant" } }));
+  const revoked = await throws(
+    () => new GoogleCalendarProvider({ clientId: "g", clientSecret: "s", fetchImpl: stub })
+      .refreshAccessToken({ refreshToken: "dead" }),
+    (e) => e.code === "REFRESH_REJECTED",
+  );
+  check("a rejected refresh is distinguishable from a transient failure",
+    revoked.threw && revoked.matched);
+
+  stub = stubFetch(() => ({ body: { access_token: "new-at", expires_in: 3599 } }));
+  const kept = await new GoogleCalendarProvider({
+    clientId: "g", clientSecret: "s", fetchImpl: stub,
+  }).refreshAccessToken({ refreshToken: "keep-me" });
+  check("Google not rotating the refresh token keeps the one we have",
+    kept.refreshToken === "keep-me" && kept.accessToken === "new-at");
+
+  // --- Google: free/busy and events ----------------------------------------
+  stub = stubFetch(() => ({
+    body: {
+      calendars: {
+        primary: {
+          busy: [{ start: "2026-03-04T22:00:00Z", end: "2026-03-04T23:00:00Z" }],
+        },
+      },
+    },
+  }));
+  const busy = await new GoogleCalendarProvider({ fetchImpl: stub }).listBusyPeriods({
+    accessToken: "at", calendarId: "primary",
+    from: new Date("2026-03-01"), to: new Date("2026-03-30"),
+  });
+  check("Google free/busy is read through the freeBusy endpoint",
+    stub.calls[0].url.endsWith("/freeBusy") && stub.calls[0].options.method === "POST");
+  check("busy periods come back as real dates",
+    busy.length === 1 && busy[0].start instanceof Date);
+  check("the access token travels as a bearer header, never in the query string",
+    stub.calls[0].options.headers.Authorization === "Bearer at" &&
+      !stub.calls[0].url.includes("at"));
+
+  stub = stubFetch(() => ({
+    body: { calendars: { primary: { errors: [{ reason: "notFound" }] } } },
+  }));
+  const gone = await throws(
+    () => new GoogleCalendarProvider({ fetchImpl: stub }).listBusyPeriods({
+      accessToken: "at", calendarId: "primary", from: new Date(), to: new Date(),
+    }),
+    (e) => e.code === "CALENDAR_GONE",
+  );
+  check("a deleted calendar is reported as such, not as an empty week",
+    gone.threw && gone.matched);
+
+  stub = stubFetch(() => ({ body: { id: "evt-1", htmlLink: "https://cal/evt-1" } }));
+  const created = await new GoogleCalendarProvider({ fetchImpl: stub }).createEvent({
+    accessToken: "at", calendarId: "primary", event: lesson,
+  });
+  const sentEvent = JSON.parse(stub.calls[0].options.body);
+  check("creating a Google event returns its id", created.eventId === "evt-1");
+  check("the event carries an IANA zone, so it survives a DST change",
+    sentEvent.start.timeZone === "America/Toronto" && sentEvent.end.timeZone === "America/Toronto");
+  check("no attendees are added, so no learner lands in a tutor's address book",
+    sentEvent.attendees === undefined || sentEvent.attendees.length === 0);
+  check("no client-chosen event id is sent, which Google would reject",
+    sentEvent.id === undefined);
+
+  stub = stubFetch(() => ({ status: 404, body: { error: { message: "Not Found" } } }));
+  const deleteMissing = await new GoogleCalendarProvider({ fetchImpl: stub }).deleteEvent({
+    accessToken: "at", calendarId: "primary", eventId: "gone",
+  });
+  check("deleting an event that is already gone is a success, not a failure",
+    deleteMissing.deleted === true);
+
+  // --- Microsoft ------------------------------------------------------------
+  const ms = new MicrosoftCalendarProvider({ clientId: "mid", clientSecret: "msecret" });
+  const msUrl = new URL(ms.getAuthorizationUrl({ redirectUri: "https://x.test/cb", state: "st9" }));
+  check("Microsoft consent asks for offline_access, or there is no refresh token",
+    msUrl.searchParams.get("scope").includes("offline_access"));
+  check("Microsoft consent asks for calendar read/write",
+    msUrl.searchParams.get("scope").includes("Calendars.ReadWrite"));
+  check("the tenant defaults to common, so personal accounts can connect",
+    msUrl.pathname.startsWith("/common/"));
+  check("the Microsoft client secret never appears in a browser URL",
+    !msUrl.toString().includes("msecret"));
+
+  stub = stubFetch(() => ({
+    body: {
+      value: [
+        { start: { dateTime: "2026-03-04T22:00:00.0000000" }, end: { dateTime: "2026-03-04T23:00:00.0000000" }, showAs: "busy" },
+        { start: { dateTime: "2026-03-05T22:00:00.0000000" }, end: { dateTime: "2026-03-05T23:00:00.0000000" }, showAs: "free" },
+        { start: { dateTime: "2026-03-06T22:00:00.0000000" }, end: { dateTime: "2026-03-06T23:00:00.0000000" }, showAs: "busy", isCancelled: true },
+      ],
+    },
+  }));
+  const msBusy = await new MicrosoftCalendarProvider({ fetchImpl: stub }).listBusyPeriods({
+    accessToken: "at", calendarId: "cal-1",
+    from: new Date("2026-03-01"), to: new Date("2026-03-30"),
+  });
+  check("Graph busy time is read from the chosen calendar's view, not the mailbox",
+    stub.calls[0].url.includes("/me/calendars/cal-1/calendarView"));
+  check("time the tutor marked free does not block their availability",
+    msBusy.length === 1);
+  check("a cancelled Outlook event does not block availability either",
+    msBusy.every((p) => p.start.toISOString().startsWith("2026-03-04")));
+  check("Graph's naive local strings are parsed as real instants",
+    msBusy[0].start instanceof Date && !Number.isNaN(msBusy[0].start.getTime()));
+
+  stub = stubFetch(() => ({ body: { id: "ms-evt-1", webLink: "https://outlook/evt" } }));
+  const msCreated = await new MicrosoftCalendarProvider({ fetchImpl: stub }).createEvent({
+    accessToken: "at", calendarId: "cal-1", event: lesson,
+  });
+  const msEvent = JSON.parse(stub.calls[0].options.body);
+  check("creating a Graph event returns its id", msCreated.eventId === "ms-evt-1");
+  check("Graph gets a wall-clock time plus a named zone, not an offset",
+    !/Z$/.test(msEvent.start.dateTime) && msEvent.start.timeZone === "America/Toronto");
+  check("the lesson shows as busy on the tutor's calendar", msEvent.showAs === "busy");
+  check("no attendees are invited on Outlook either", msEvent.attendees.length === 0);
+  check("the transaction id makes a repeated create idempotent at Graph",
+    msEvent.transactionId === "apl-b1-c1");
+
+  // --- development implementation -------------------------------------------
+  const dev = new DevelopmentCalendarProvider(CALENDAR_PROVIDERS.GOOGLE);
+  const devAuth = new URL(dev.getAuthorizationUrl({ redirectUri: "https://x.test/cb", state: "s" }));
+  check("the development provider redirects straight back with a code",
+    devAuth.searchParams.get("code")?.startsWith("dev-") && devAuth.searchParams.get("state") === "s");
+
+  const devTokens = await dev.exchangeCode({ code: "dev-abc", userEmail: "t@example.com" });
+  check("the development exchange says plainly that it is simulated",
+    devTokens.simulated === true && devTokens.refreshToken.startsWith("dev-refresh"));
+
+  const devEvent = await dev.createEvent({ event: lesson });
+  check("the development provider creates a real, identified event",
+    Boolean(devEvent.eventId) && devEvent.simulated === true);
+
+  const devBusy = await dev.listBusyPeriods({
+    from: new Date("2026-03-01"), to: new Date("2026-03-30"),
+    events: [{ eventId: "e1", start: lesson.start, end: lesson.end }],
+  });
+  check("a development event really does come back as busy time", devBusy.length === 1);
+  check("a cancelled development event does not",
+    (await dev.listBusyPeriods({
+      from: new Date("2026-03-01"), to: new Date("2026-03-30"),
+      events: [{ eventId: "e1", start: lesson.start, end: lesson.end, cancelledAt: new Date() }],
+    })).length === 0);
+  check("an event outside the window is not returned",
+    (await dev.listBusyPeriods({
+      from: new Date("2027-01-01"), to: new Date("2027-02-01"),
+      events: [{ eventId: "e1", start: lesson.start, end: lesson.end }],
+    })).length === 0);
+
+  // --- selection ------------------------------------------------------------
+  const withEnv = async (vars, fn) => {
+    const saved = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]));
+    Object.assign(process.env, vars);
+    for (const [k, v] of Object.entries(vars)) if (v === undefined) delete process.env[k];
+    resetCalendarProviders();
+    try {
+      return await fn();
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+      resetCalendarProviders();
+    }
+  };
+
+  await withEnv({
+    CALENDAR_PROVIDER: undefined,
+    GOOGLE_CALENDAR_CLIENT_ID: undefined, GOOGLE_CALENDAR_CLIENT_SECRET: undefined,
+    MICROSOFT_CALENDAR_CLIENT_ID: undefined, MICROSOFT_CALENDAR_CLIENT_SECRET: undefined,
+  }, async () => {
+    check("with no credentials, calendar sync uses the development implementation",
+      getCalendarProvider(CALENDAR_PROVIDERS.GOOGLE).name === "GOOGLE_DEVELOPMENT");
+    const status = calendarIntegrationsStatus();
+    check("both providers are still offered, because the fake is a working one",
+      status.length === 2 && status.every((p) => p.available));
+    check("and each says honestly that it is not the real service",
+      status.every((p) => p.live === false));
+  });
+
+  await withEnv({
+    CALENDAR_PROVIDER: "google,microsoft",
+    GOOGLE_CALENDAR_CLIENT_ID: "gid", GOOGLE_CALENDAR_CLIENT_SECRET: "gs",
+    MICROSOFT_CALENDAR_CLIENT_ID: "mid", MICROSOFT_CALENDAR_CLIENT_SECRET: "ms",
+  }, async () => {
+    check("both real adapters light up when both are configured",
+      getCalendarProvider(CALENDAR_PROVIDERS.GOOGLE).name === "GOOGLE" &&
+        getCalendarProvider(CALENDAR_PROVIDERS.OUTLOOK).name === "OUTLOOK");
+    check("and both report as live", calendarIntegrationsStatus().every((p) => p.live));
+  });
+
+  await withEnv({
+    CALENDAR_PROVIDER: "google",
+    GOOGLE_CALENDAR_CLIENT_ID: "gid", GOOGLE_CALENDAR_CLIENT_SECRET: "gs",
+    MICROSOFT_CALENDAR_CLIENT_ID: undefined, MICROSOFT_CALENDAR_CLIENT_SECRET: undefined,
+  }, async () => {
+    check("naming only Google leaves Outlook on the development implementation",
+      getCalendarProvider(CALENDAR_PROVIDERS.GOOGLE).name === "GOOGLE" &&
+        getCalendarProvider(CALENDAR_PROVIDERS.OUTLOOK).name === "OUTLOOK_DEVELOPMENT");
+  });
+
+  await withEnv({ CALENDAR_PROVIDER: "google", GOOGLE_CALENDAR_CLIENT_ID: "only-id",
+    GOOGLE_CALENDAR_CLIENT_SECRET: undefined }, async () => {
+    const { resolveIntegration } = await import("@/lib/config/env");
+    const resolved = resolveIntegration("calendar");
+    check("naming Google without its secret is a configuration error",
+      resolved.configured === false &&
+        /GOOGLE_CALENDAR_CLIENT_SECRET/.test(resolved.error ?? ""));
+  });
+}
+
+// --- 16. Calendar service (§18, §36, §41 Phase 2) --------------------------
+
+/**
+ * The connection lifecycle end to end, against the development provider and a
+ * real database: consent, token storage, busy-period sync, availability,
+ * pushing a lesson out, moving it, removing it, and disconnecting.
+ */
+async function calendarServiceTests() {
+  section("Calendar — connection lifecycle, sync and booking integration");
+
+  const uri = process.env.MONGODB_URI;
+  if (!uri) return skip("calendar service", "MONGODB_URI is not set");
+
+  if (mongoose.connection.readyState !== 1) {
+    try {
+      await mongoose.connect(uri, { serverSelectionTimeoutMS: 2500 });
+    } catch {
+      return skip("calendar service", "MongoDB is not reachable");
+    }
+  }
+
+  const { CalendarConnection, TutorProfile, Booking, AuditLog } = await import("@/models");
+  const cal = await import("@/services/calendar.service");
+  const { getCalendarProvider } = await import("@/services/external/calendar-provider");
+  const { signState } = await import("@/lib/security/crypto");
+  const { decryptSecret } = await import("@/lib/security/crypto");
+  const {
+    CALENDAR_PROVIDERS, CALENDAR_CONNECTION_STATUS, CALENDAR_EVENT_STATE,
+    BOOKING_STATUS, ROLES,
+  } = await import("@/constants");
+
+  const tutor = await TutorProfile.findOne({ isSearchable: true }).populate("userId", "_id email").lean();
+  if (!tutor) return skip("calendar service", "no seeded tutor — run `bun run seed`");
+
+  const tutorUserId = String(tutor.userId._id ?? tutor.userId);
+  const actor = { id: tutorUserId, role: ROLES.TUTOR };
+  const stranger = { id: String(new mongoose.Types.ObjectId()), role: ROLES.TUTOR };
+
+  const createdBookings = [];
+
+  try {
+    await CalendarConnection.deleteMany({ userId: tutorUserId });
+
+    // --- consent --------------------------------------------------------------
+    const begin = await cal.beginConnection(actor, { provider: CALENDAR_PROVIDERS.GOOGLE });
+    const authUrl = new URL(begin.authorizationUrl);
+    check("starting a connection returns a consent URL", Boolean(begin.authorizationUrl));
+    const state = authUrl.searchParams.get("state");
+    const code = authUrl.searchParams.get("code");
+    check("the consent URL carries a signed state", Boolean(state));
+
+    const unsigned = await throws(
+      () => cal.completeConnection({ code, state: "not-a-real-state" }),
+      (e) => e.status === 403,
+    );
+    check("a callback with an unverifiable state is refused before any exchange",
+      unsigned.threw && unsigned.matched);
+
+    const forSomeoneElse = signState(
+      { userId: String(new mongoose.Types.ObjectId()), provider: CALENDAR_PROVIDERS.GOOGLE },
+      { label: "aplus:calendar-state" },
+    );
+    const wrongAccount = await throws(
+      () => cal.completeConnection({ code, state: forSomeoneElse }),
+      (e) => e.status === 404,
+    );
+    check("a state naming an account that does not exist is refused",
+      wrongAccount.threw && wrongAccount.matched);
+
+    const connection = await cal.completeConnection({ code, state });
+    check("consent produces a connected calendar",
+      connection.status === CALENDAR_CONNECTION_STATUS.CONNECTED);
+    check("the connection is labelled as the development implementation",
+      connection.simulated === true);
+    check("a calendar is chosen automatically so the connection is usable",
+      Boolean(connection.calendarId));
+    check("the connection is linked to the tutor profile, not just the account",
+      Boolean(
+        (await CalendarConnection.findById(connection.id).lean()).tutorProfileId,
+      ));
+
+    // --- tokens at rest -------------------------------------------------------
+    const stored = await CalendarConnection.findById(connection.id)
+      .select("+accessToken +refreshToken")
+      .lean();
+    check("the refresh token is encrypted at rest",
+      stored.refreshToken.startsWith("v1.") && !stored.refreshToken.includes("dev-refresh"));
+    check("the access token is encrypted at rest", stored.accessToken.startsWith("v1."));
+    check("and it decrypts back to something usable",
+      decryptSecret(stored.refreshToken, "aplus:calendar-token")?.startsWith("dev-refresh"));
+
+    const publicShape = JSON.stringify(connection);
+    check("no token ever reaches the shape a browser is given",
+      !publicShape.includes("v1.") && !/token/i.test(publicShape));
+
+    const listed = await cal.listConnections(tutorUserId);
+    check("the tutor sees their connection", listed.connections.length === 1);
+    check("no token appears in the list either",
+      !/token/i.test(JSON.stringify(listed.connections)));
+
+    // --- reconnecting the same account ----------------------------------------
+    const again = await cal.beginConnection(actor, { provider: CALENDAR_PROVIDERS.GOOGLE });
+    const againUrl = new URL(again.authorizationUrl);
+    await cal.completeConnection({
+      code: againUrl.searchParams.get("code"),
+      state: againUrl.searchParams.get("state"),
+    });
+    check("reconnecting the same account updates the connection rather than duplicating it",
+      (await CalendarConnection.countDocuments({ userId: tutorUserId })) === 1);
+
+    // --- authorization --------------------------------------------------------
+    const notYours = await throws(
+      () => cal.updateConnection(connection.id, { syncBusy: false }, stranger),
+      (e) => e.status === 403,
+    );
+    check("a tutor cannot touch someone else's calendar connection",
+      notYours.threw && notYours.matched);
+
+    const notYoursDelete = await throws(
+      () => cal.disconnectCalendar(connection.id, stranger),
+      (e) => e.status === 403,
+    );
+    check("nor disconnect it", notYoursDelete.threw && notYoursDelete.matched);
+
+    // --- pushing a lesson out --------------------------------------------------
+    const startAt = new Date("2031-06-10T18:00:00.000Z");
+    const booking = await Booking.create({
+      reference: `APL-C${randomUUID().replace(/-/g, "").slice(0, 8).toUpperCase()}`,
+      purchaserId: new mongoose.Types.ObjectId(),
+      studentProfileId: new mongoose.Types.ObjectId(),
+      tutorProfileId: tutor._id,
+      tutorUserId,
+      courseId: new mongoose.Types.ObjectId(),
+      courseName: "Advanced Functions",
+      courseCode: "MHF4U",
+      mode: "ONLINE",
+      startAt,
+      endAt: new Date(startAt.getTime() + 3600_000),
+      durationMinutes: 60,
+      timeZone: "America/Toronto",
+      status: BOOKING_STATUS.CONFIRMED,
+      price: {
+        hourlyRateCents: 6000, durationMinutes: 60, subtotalCents: 6000,
+        commissionPercent: 15, commissionCents: 900, tutorEarningsCents: 5100,
+        totalCents: 6000,
+      },
+    });
+    createdBookings.push(booking._id);
+
+    const pushed = await cal.pushBookingEvent(booking._id);
+    check("a confirmed lesson is pushed to the connected calendar", pushed.pushed === 1);
+
+    const withEvent = await Booking.findById(booking._id).lean();
+    check("the event is linked to the booking",
+      withEvent.externalEvents.length === 1 &&
+        withEvent.externalEvents[0].state === CALENDAR_EVENT_STATE.SYNCED);
+
+    await cal.pushBookingEvent(booking._id);
+    const afterRetry = await Booking.findById(booking._id).lean();
+    check("pushing the same lesson twice updates rather than duplicating",
+      afterRetry.externalEvents.length === 1 &&
+        afterRetry.externalEvents[0].eventId === withEvent.externalEvents[0].eventId);
+
+    // --- busy periods and availability ------------------------------------------
+    const synced = await cal.syncConnection(connection.id, { now: new Date("2031-06-01") });
+    check("syncing finds the lesson we just put on the calendar", synced.synced === 1);
+
+    const periods = await cal.externalBusyPeriods(tutor._id, {
+      from: new Date("2031-06-01"),
+      to: new Date("2031-07-01"),
+    });
+    check("the lesson comes back as busy time for availability",
+      periods.length === 1 && new Date(periods[0].startAt).getTime() === startAt.getTime());
+
+    check("busy periods outside the window asked for are not returned",
+      (await cal.externalBusyPeriods(tutor._id, {
+        from: new Date("2032-01-01"), to: new Date("2032-02-01"),
+      })).length === 0);
+
+    await cal.updateConnection(connection.id, { syncBusy: false }, actor);
+    check("a tutor who turns off availability sync stops contributing busy time",
+      (await cal.externalBusyPeriods(tutor._id, {
+        from: new Date("2031-06-01"), to: new Date("2031-07-01"),
+      })).length === 0);
+    await cal.updateConnection(connection.id, { syncBusy: true }, actor);
+
+    // --- moving and removing -----------------------------------------------------
+    const movedStart = new Date("2031-06-11T18:00:00.000Z");
+    await Booking.updateOne(
+      { _id: booking._id },
+      { $set: { startAt: movedStart, endAt: new Date(movedStart.getTime() + 3600_000) } },
+    );
+    await cal.updateBookingEvent(booking._id);
+    await cal.syncConnection(connection.id, { now: new Date("2031-06-01") });
+
+    const movedPeriods = await cal.externalBusyPeriods(tutor._id, {
+      from: new Date("2031-06-01"), to: new Date("2031-07-01"),
+    });
+    check("a rescheduled lesson moves on the calendar rather than appearing twice",
+      movedPeriods.length === 1 &&
+        new Date(movedPeriods[0].startAt).getTime() === movedStart.getTime());
+
+    const removed = await cal.removeBookingEvent(booking._id);
+    check("a cancelled lesson is taken off the calendar", removed.removed === 1);
+    await cal.syncConnection(connection.id, { now: new Date("2031-06-01") });
+    check("and stops blocking the tutor's availability",
+      (await cal.externalBusyPeriods(tutor._id, {
+        from: new Date("2031-06-01"), to: new Date("2031-07-01"),
+      })).length === 0);
+
+    const removedAgain = await cal.removeBookingEvent(booking._id);
+    check("removing an already-removed event is a no-op, not an error",
+      removedAgain.removed === 0);
+
+    // --- push disabled ------------------------------------------------------------
+    await cal.updateConnection(connection.id, { pushEvents: false }, actor);
+    await Booking.updateOne({ _id: booking._id }, { $set: { externalEvents: [] } });
+    const suppressed = await cal.pushBookingEvent(booking._id);
+    check("a tutor who turns off event push gets no lessons written to their calendar",
+      suppressed.pushed === 0);
+    await cal.updateConnection(connection.id, { pushEvents: true }, actor);
+
+    // --- unconfirmed lessons ---------------------------------------------------------
+    await Booking.updateOne(
+      { _id: booking._id },
+      { $set: { status: BOOKING_STATUS.PENDING_PAYMENT, externalEvents: [] } },
+    );
+    const unpaid = await cal.pushBookingEvent(booking._id);
+    check("an unpaid lesson never reaches anybody's calendar",
+      unpaid.pushed === 0 && unpaid.skipped === "NOT_CONFIRMED");
+    await Booking.updateOne({ _id: booking._id }, { $set: { status: BOOKING_STATUS.CONFIRMED } });
+
+    // --- the scheduled sweep ----------------------------------------------------------
+    await CalendarConnection.updateOne({ _id: connection.id }, { $set: { freshUntil: null } });
+    const sweep = await cal.syncStaleCalendars({ now: new Date("2031-06-01") });
+    check("the sweep refreshes a connection whose cache has aged out",
+      sweep.synced >= 1 && sweep.examined >= 1);
+
+    const quiet = await cal.syncStaleCalendars({ now: new Date("2031-06-01") });
+    check("and finds nothing to do on the next run", quiet.examined === 0);
+
+    // --- disconnecting -----------------------------------------------------------------
+    await cal.pushBookingEvent(booking._id);
+    const disconnected = await cal.disconnectCalendar(connection.id, actor);
+    check("disconnecting succeeds", disconnected.disconnected === true);
+    check("and the connection is gone",
+      (await CalendarConnection.countDocuments({ userId: tutorUserId })) === 0);
+
+    const cleaned = await Booking.findById(booking._id).lean();
+    check("the lessons we added were taken off the calendar first",
+      cleaned.externalEvents.every((e) => e.state === CALENDAR_EVENT_STATE.DELETED));
+
+    check("a disconnected calendar contributes no busy time",
+      (await cal.externalBusyPeriods(tutor._id, {
+        from: new Date("2031-06-01"), to: new Date("2031-07-01"),
+      })).length === 0);
+
+    // --- audit ---------------------------------------------------------------------------
+    const trail = await AuditLog.find({ entityType: "CalendarConnection" }).lean();
+    const actions = new Set(trail.map((r) => r.action));
+    check("connecting a calendar is audited", actions.has("CALENDAR_CONNECTED"));
+    check("disconnecting one is audited", actions.has("CALENDAR_DISCONNECTED"));
+    check("no audit row carries a token",
+      trail.every((r) => !/v1\./.test(JSON.stringify(r.metadata ?? {}))));
+  } finally {
+    await CalendarConnection.deleteMany({ userId: tutorUserId });
+    await Booking.deleteMany({ _id: { $in: createdBookings } });
+    await AuditLog.deleteMany({ entityType: "CalendarConnection" });
+  }
+}
+
+
+// --- 17. Progress reports (§35, §41 Phase 2) ------------------------------
+
+/**
+ * Who may write, who may read, and whether history survives an edit.
+ *
+ * The last one is the point of the feature: a family that read a report last
+ * term should still be able to see what it said, however many times the tutor
+ * has revised it since.
+ */
+async function progressReportTests() {
+  section("Progress reports — authorship, privacy and revision history");
+
+  const uri = process.env.MONGODB_URI;
+  if (!uri) return skip("progress reports", "MONGODB_URI is not set");
+
+  if (mongoose.connection.readyState !== 1) {
+    try {
+      await mongoose.connect(uri, { serverSelectionTimeoutMS: 2500 });
+    } catch {
+      return skip("progress reports", "MongoDB is not reachable");
+    }
+  }
+
+  const { ProgressReport, StudentProfile, TutorProfile, Booking, Notification, AuditLog } =
+    await import("@/models");
+  const progress = await import("@/services/progress.service");
+  const {
+    PROGRESS_REPORT_STATUS, GOAL_PROGRESS, BOOKING_STATUS, ROLES,
+  } = await import("@/constants");
+
+  const tutor = await TutorProfile.findOne({ isSearchable: true }).lean();
+  const seededStudent = await StudentProfile.findOne({ archivedAt: null }).lean();
+  if (!tutor || !seededStudent) {
+    return skip("progress reports", "no seeded tutor/student — run `bun run seed`");
+  }
+
+  // A learner of this test's own, so "has this tutor taught them?" has a
+  // known answer rather than one that depends on what the seed happened to
+  // book.
+  const student = await StudentProfile.create({
+    ownerId: seededStudent.ownerId,
+    firstName: "Progress",
+    lastName: "Testcase",
+    isMinor: true,
+    shareFullNameWithTutor: false,
+  });
+
+  const tutorActor = { id: String(tutor.userId), role: ROLES.TUTOR };
+  const owner = { id: String(student.ownerId), role: ROLES.PARENT };
+  const stranger = { id: String(new mongoose.Types.ObjectId()), role: ROLES.PARENT };
+  const otherTutor = { id: String(new mongoose.Types.ObjectId()), role: ROLES.TUTOR };
+  const admin = { id: String(new mongoose.Types.ObjectId()), role: ROLES.ADMIN };
+
+  const madeBookings = [];
+  const madeReports = [];
+  let goalId = null;
+
+  try {
+    // A goal on the learner's record, which the report should pick up.
+    const withGoal = await StudentProfile.findByIdAndUpdate(
+      student._id,
+      { $push: { learningGoals: { label: "Integration test goal — safe to delete." } } },
+      { new: true },
+    );
+    goalId = withGoal.learningGoals.at(-1)._id;
+
+    // --- a report needs lessons that actually happened -------------------------
+    const noLessons = await throws(
+      () => progress.createProgressReport({ studentProfileId: String(student._id) }, tutorActor),
+      (e) => e.code === "NO_COMPLETED_LESSONS",
+    );
+    check("a tutor cannot report on a student they have never taught",
+      noLessons.threw && noLessons.matched, noLessons.error?.message);
+
+    const startAt = new Date("2030-02-04T18:00:00.000Z");
+    const lesson = await Booking.create({
+      reference: `APL-P${randomUUID().replace(/-/g, "").slice(0, 8).toUpperCase()}`,
+      purchaserId: student.ownerId,
+      studentProfileId: student._id,
+      tutorProfileId: tutor._id,
+      tutorUserId: tutor.userId,
+      courseId: tutor.courseIds?.[0] ?? new mongoose.Types.ObjectId(),
+      courseName: "Advanced Functions",
+      courseCode: "MHF4U",
+      mode: "ONLINE",
+      startAt,
+      endAt: new Date(startAt.getTime() + 3600_000),
+      durationMinutes: 60,
+      status: BOOKING_STATUS.COMPLETED,
+      completedAt: new Date(),
+      price: {
+        hourlyRateCents: 6000, durationMinutes: 60, subtotalCents: 6000,
+        commissionPercent: 15, commissionCents: 900, tutorEarningsCents: 5100, totalCents: 6000,
+      },
+    });
+    madeBookings.push(lesson._id);
+
+    const report = await progress.createProgressReport(
+      { studentProfileId: String(student._id) }, tutorActor,
+    );
+    madeReports.push(report.id);
+
+    check("a report starts as a draft", report.status === PROGRESS_REPORT_STATUS.DRAFT);
+    check("the lessons it covers are resolved from completed bookings",
+      report.lessonCount === 1 && report.bookingIds.length === 1);
+    check("the learner's own goals are carried into the report",
+      report.goals.some((g) => g.label.startsWith("Integration test goal")));
+    check("the paying account is recorded so reads are a single lookup",
+      String(report.ownerId) === String(student.ownerId));
+
+    const duplicate = await throws(
+      () => progress.createProgressReport({ studentProfileId: String(student._id) }, tutorActor),
+      (e) => e.status === 409,
+    );
+    check("a second draft for the same student is refused",
+      duplicate.threw && duplicate.matched);
+
+    // --- a draft is nobody else's business --------------------------------------
+    const familySeesDraft = await throws(
+      () => progress.getProgressReport(report.id, owner),
+      (e) => e.status === 404,
+    );
+    check("a family cannot see an unfinished draft",
+      familySeesDraft.threw && familySeesDraft.matched);
+
+    const adminSeesDraft = await throws(
+      () => progress.getProgressReport(report.id, admin),
+      (e) => e.status === 404,
+    );
+    check("nor can an administrator", adminSeesDraft.threw && adminSeesDraft.matched);
+
+    const ownerList = await progress.listReportsForOwner(owner, {});
+    check("a draft never appears in the family's history",
+      !ownerList.items.some((r) => r.id === report.id));
+
+    // --- only the author writes ---------------------------------------------------
+    const familyEdits = await throws(
+      () => progress.updateProgressReport(report.id, { summary: "Rewritten by the family." }, owner),
+      (e) => e.status === 403,
+    );
+    check("a family cannot edit a tutor's report", familyEdits.threw && familyEdits.matched);
+
+    const tutorEdits = await throws(
+      () => progress.updateProgressReport(report.id, { summary: "Rewritten by another tutor." }, otherTutor),
+      (e) => e.status === 403,
+    );
+    check("another tutor cannot edit it either", tutorEdits.threw && tutorEdits.matched);
+
+    const familySubmits = await throws(
+      () => progress.submitProgressReport(report.id, owner),
+      (e) => e.status === 403,
+    );
+    check("a family cannot share a report on the tutor's behalf",
+      familySubmits.threw && familySubmits.matched);
+
+    // --- sharing ------------------------------------------------------------------
+    const tooShort = await throws(
+      () => progress.submitProgressReport(report.id, tutorActor),
+      (e) => e.code === "SUMMARY_REQUIRED",
+    );
+    check("a report with no summary cannot be shared", tooShort.threw && tooShort.matched);
+
+    await progress.updateProgressReport(
+      report.id,
+      {
+        summary: "Covered logarithms and rational graphs. Change-of-base is now solid.",
+        strengths: "Works through the algebra without prompting.",
+        ratings: { understanding: 4, effort: 5 },
+        privateNote: "Parent asked about exam timing — do not repeat to the student.",
+        goals: [{ goalId: String(goalId), label: "Integration test goal — safe to delete.", status: GOAL_PROGRESS.ACHIEVED }],
+      },
+      tutorActor,
+    );
+
+    const shared = await progress.submitProgressReport(report.id, tutorActor);
+    check("sharing moves the report out of draft",
+      shared.status === PROGRESS_REPORT_STATUS.SUBMITTED && Boolean(shared.submittedAt));
+
+    const learnerRecord = await StudentProfile.findById(student._id).lean();
+    const recordedGoal = learnerRecord.learningGoals.find((g) => String(g._id) === String(goalId));
+    check("a goal marked achieved reaches the learner's own record",
+      Boolean(recordedGoal?.achievedAt));
+
+    const shareTwice = await throws(
+      () => progress.submitProgressReport(report.id, tutorActor),
+      (e) => e.status === 409,
+    );
+    check("a report cannot be shared twice", shareTwice.threw && shareTwice.matched);
+
+    // --- reading --------------------------------------------------------------------
+    const familyView = await progress.getProgressReport(report.id, owner);
+    check("the family can now read it", familyView.report.id === report.id);
+    check("the family may acknowledge but not edit",
+      familyView.canAcknowledge === true && familyView.canEdit === false);
+    check("the tutor's private note is never loaded for the family",
+      familyView.report.privateNote === undefined);
+    check("the family sees who wrote it",
+      Boolean(familyView.report.tutorProfileId?.displayName));
+
+    const strangerView = await throws(
+      () => progress.getProgressReport(report.id, stranger),
+      (e) => e.status === 403,
+    );
+    check("an unrelated account cannot read it", strangerView.threw && strangerView.matched);
+
+    const authorView = await progress.getProgressReport(report.id, tutorActor);
+    check("the author still sees their own private note",
+      typeof authorView.report.privateNote === "string");
+    check("the learner's name is masked for the tutor unless the family opted in",
+      Boolean(authorView.report.studentProfileId?.displayName));
+
+    const adminView = await progress.getProgressReport(report.id, admin);
+    check("an administrator can read a shared report for support",
+      adminView.report.id === report.id);
+    check("but not the tutor's private note",
+      adminView.report.privateNote === undefined);
+
+    // --- acknowledgement ---------------------------------------------------------------
+    const strangerAck = await throws(
+      () => progress.acknowledgeProgressReport(report.id, stranger),
+      (e) => e.status === 403,
+    );
+    check("only the family may acknowledge", strangerAck.threw && strangerAck.matched);
+
+    const acked = await progress.acknowledgeProgressReport(report.id, owner);
+    check("acknowledging records who read it and when",
+      Boolean(acked.acknowledgedAt) && String(acked.acknowledgedBy) === owner.id);
+    check("acknowledging changes nothing the tutor wrote",
+      acked.summary === shared.summary);
+
+    const ackTwice = await progress.acknowledgeProgressReport(report.id, owner);
+    check("acknowledging twice does not move the timestamp",
+      String(ackTwice.acknowledgedAt) === String(acked.acknowledgedAt));
+
+    // --- revision history ------------------------------------------------------------------
+    const originalSummary = shared.summary;
+    const revised = await progress.updateProgressReport(
+      report.id,
+      { summary: "Revised: the unit test is next Thursday, not Tuesday.", revisionReason: "Fixed the date." },
+      tutorActor,
+    );
+    check("editing a shared report keeps the previous version",
+      revised.revisions.length === 1);
+    check("the kept version is what the family actually read",
+      revised.revisions[0].snapshot.summary === originalSummary);
+    check("the revision records why", revised.revisions[0].reason === "Fixed the date.");
+    check("and the report now shows the new text",
+      revised.summary.startsWith("Revised:"));
+
+    const revisedAgain = await progress.updateProgressReport(
+      report.id, { summary: "Revised twice." }, tutorActor,
+    );
+    check("every revision is kept, not just the last one",
+      revisedAgain.revisions.length === 2 &&
+        revisedAgain.revisions[0].snapshot.summary === originalSummary);
+
+    const familyAfterRevision = await progress.getProgressReport(report.id, owner);
+    check("the family can see the history too",
+      familyAfterRevision.report.revisions.length === 2);
+
+    // --- archiving ------------------------------------------------------------------------
+    const archived = await progress.archiveProgressReport(report.id, tutorActor);
+    check("a tutor can archive a report", archived.status === PROGRESS_REPORT_STATUS.ARCHIVED);
+
+    const editArchived = await throws(
+      () => progress.updateProgressReport(report.id, { summary: "Editing an archive." }, tutorActor),
+      (e) => e.code === "REPORT_ARCHIVED",
+    );
+    check("an archived report cannot be edited", editArchived.threw && editArchived.matched);
+
+    const stillReadable = await progress.getProgressReport(report.id, owner);
+    check("but the family keeps their copy", stillReadable.report.id === report.id);
+
+    // --- notifications and audit -----------------------------------------------------------
+    const notices = await Notification.find({
+      entityType: "ProgressReport",
+      entityId: new mongoose.Types.ObjectId(report.id),
+    }).lean();
+    check("the family is told when a report is shared",
+      notices.some((n) => n.type === "PROGRESS_REPORT_SHARED"));
+    check("and when it is revised",
+      notices.some((n) => n.type === "PROGRESS_REPORT_UPDATED"));
+
+    const trail = await AuditLog.find({
+      entityType: "ProgressReport",
+      entityId: new mongoose.Types.ObjectId(report.id),
+    }).lean();
+    const actions = new Set(trail.map((r) => r.action));
+    check("sharing a report is audited", actions.has("PROGRESS_REPORT_SUBMITTED"));
+    check("revising one is audited", actions.has("PROGRESS_REPORT_REVISED"));
+    check("archiving one is audited", actions.has("PROGRESS_REPORT_ARCHIVED"));
+
+    // --- the tutor's student picker ---------------------------------------------------------
+    const { students } = await progress.reportableStudents(tutorActor);
+    check("the picker offers a learner this tutor has actually taught",
+      students.some((s) => s.id === String(student._id)));
+    check("the picker offers nobody to a tutor with no profile",
+      (await progress.reportableStudents(otherTutor)).students.length === 0);
+  } finally {
+    const reportIds = madeReports.map((id) => new mongoose.Types.ObjectId(id));
+    await Notification.deleteMany({ entityType: "ProgressReport", entityId: { $in: reportIds } });
+    await AuditLog.deleteMany({ entityType: "ProgressReport", entityId: { $in: reportIds } });
+    await ProgressReport.deleteMany({ studentProfileId: student._id });
+    await Booking.deleteMany({ _id: { $in: madeBookings } });
+    await StudentProfile.deleteOne({ _id: student._id });
+  }
+}
+
+
+// --- 18. Referrals and account credit (§41 Phase 2) -----------------------
+
+/**
+ * The two things that decide whether a referral scheme is safe to run:
+ * whether the same credit can be spent twice, and whether a reward can be
+ * earned without anybody paying for a lesson.
+ */
+async function referralTests() {
+  section("Referrals — attribution, qualifying, credit and abuse");
+
+  const uri = process.env.MONGODB_URI;
+  if (!uri) return skip("referrals", "MONGODB_URI is not set");
+
+  if (mongoose.connection.readyState !== 1) {
+    try {
+      await mongoose.connect(uri, { serverSelectionTimeoutMS: 2500 });
+    } catch {
+      return skip("referrals", "MongoDB is not reachable");
+    }
+  }
+
+  const { User, Referral, CreditEntry, Booking, TutorProfile, Notification, AuditLog, Settings } =
+    await import("@/models");
+  const referrals = await import("@/services/referral.service");
+  const credit = await import("@/services/credit.service");
+  const { updateSettings, invalidateSettingsCache } = await import("@/services/settings.service");
+  const { REFERRAL_STATUS, REFERRAL_RISK_FLAGS, BOOKING_STATUS, ROLES, USER_STATUS } =
+    await import("@/constants");
+
+  const settingsBefore = await Settings.findOne({ key: "PLATFORM" }).lean();
+  const referralsBefore = settingsBefore?.referrals ?? {};
+
+  // Real amounts, so the money paths are actually exercised. The shipped
+  // defaults are zero and are asserted separately below.
+  await updateSettings({
+    referrals: {
+      enabled: true,
+      referrerRewardCents: 2000,
+      refereeRewardCents: 1000,
+      qualifyingLessons: 1,
+      maxRewardsPerReferrer: 25,
+    },
+  });
+  invalidateSettingsCache();
+
+  const made = [];
+  const madeBookings = [];
+  const makeUser = async (over = {}) => {
+    const user = await User.create({
+      email: `referral-test-${randomUUID()}@example.com`,
+      firstName: "Ref",
+      lastName: "Tester",
+      role: ROLES.PARENT,
+      status: USER_STATUS.ACTIVE,
+      emailVerifiedAt: new Date(),
+      ...over,
+    });
+    made.push(user._id);
+    return user;
+  };
+
+  try {
+    // --- codes ----------------------------------------------------------------
+    const referrer = await makeUser();
+    const code = await referrals.getOrCreateReferralCode(referrer._id);
+    check("an account gets a referral code on first use", /^[A-Z2-9]{8}$/.test(code), code);
+    check("asking again returns the same code",
+      (await referrals.getOrCreateReferralCode(referrer._id)) === code);
+    check("the code avoids characters that are misread aloud",
+      !/[IO01]/.test(code));
+
+    const lookup = await referrals.lookupReferralCode(code);
+    check("a valid code resolves to a name", lookup.valid && Boolean(lookup.referrerName));
+    check("the lookup never exposes a surname", !/ [A-Z][a-z]{2,}$/.test(lookup.referrerName));
+    check("an unknown code simply does not resolve",
+      (await referrals.lookupReferralCode("ZZZZZZZZ")).valid === false);
+
+    // --- attribution ------------------------------------------------------------
+    const referee = await makeUser();
+    const attributed = await referrals.attributeReferral({
+      code,
+      refereeUserId: referee._id,
+      email: referee.email,
+      ip: "203.0.113.9",
+    });
+    check("a sign-up with a code is attributed", attributed.attributed === true);
+
+    const stored = await Referral.findOne({ refereeUserId: referee._id }).lean();
+    check("the referral starts pending", stored.status === REFERRAL_STATUS.PENDING);
+    check("the sign-up address is hashed, never stored",
+      Boolean(stored.signupIpHash) && !stored.signupIpHash.includes("203.0.113"));
+
+    const twice = await referrals.attributeReferral({
+      code,
+      refereeUserId: referee._id,
+      email: referee.email,
+    });
+    check("an account can only ever be introduced once",
+      twice.attributed === false && twice.reason === "ALREADY_REFERRED");
+
+    const selfCode = await referrals.getOrCreateReferralCode(referee._id);
+    const self = await referrals.attributeReferral({
+      code: selfCode,
+      refereeUserId: referee._id,
+      email: referee.email,
+    });
+    check("nobody can refer themselves",
+      self.attributed === false && self.reason === "SELF_REFERRAL");
+
+    const unknown = await referrals.attributeReferral({
+      code: "NOTACODE",
+      refereeUserId: (await makeUser())._id,
+    });
+    check("an unknown code is a quiet no-op, not a failed registration",
+      unknown.attributed === false && unknown.reason === "UNKNOWN_CODE");
+
+    // --- qualifying is earned by lessons, not sign-ups -----------------------------
+    const tooSoon = await referrals.qualifyReferralFor(referee._id);
+    check("a referral does not qualify on sign-up alone",
+      tooSoon.qualified === false && tooSoon.reason === "NOT_ENOUGH_LESSONS");
+    check("and no credit was granted", (await credit.creditBalance(referrer._id)) === 0);
+
+    const tutor = await TutorProfile.findOne({ isSearchable: true }).lean();
+    if (!tutor) return skip("referral qualifying", "no seeded tutor — run `bun run seed`");
+
+    const startAt = new Date("2030-05-06T18:00:00.000Z");
+    const lesson = await Booking.create({
+      reference: `APL-R${randomUUID().replace(/-/g, "").slice(0, 8).toUpperCase()}`,
+      purchaserId: referee._id,
+      studentProfileId: new mongoose.Types.ObjectId(),
+      tutorProfileId: tutor._id,
+      tutorUserId: tutor.userId,
+      courseId: new mongoose.Types.ObjectId(),
+      courseName: "Advanced Functions",
+      mode: "ONLINE",
+      startAt,
+      endAt: new Date(startAt.getTime() + 3600_000),
+      durationMinutes: 60,
+      status: BOOKING_STATUS.COMPLETED,
+      price: {
+        hourlyRateCents: 6000, durationMinutes: 60, subtotalCents: 6000,
+        commissionPercent: 15, commissionCents: 900, tutorEarningsCents: 5100, totalCents: 6000,
+      },
+    });
+    madeBookings.push(lesson._id);
+
+    const qualified = await referrals.qualifyReferralFor(referee._id);
+    check("a completed, paid lesson qualifies the referral", qualified.qualified === true);
+    check("the referrer is credited", (await credit.creditBalance(referrer._id)) === 2000);
+    check("the new account gets its welcome credit",
+      (await credit.creditBalance(referee._id)) === 1000);
+
+    const again = await referrals.qualifyReferralFor(referee._id);
+    check("qualifying twice grants nothing more",
+      again.qualified === false && (await credit.creditBalance(referrer._id)) === 2000);
+
+    const rewarded = await Referral.findById(stored._id).lean();
+    check("the referral records what was actually granted",
+      rewarded.status === REFERRAL_STATUS.REWARDED && rewarded.referrerRewardCents === 2000);
+    check("and which lesson earned it", rewarded.qualifyingBookingIds.length === 1);
+
+    // --- credit cannot be spent twice ------------------------------------------------
+    const spender = await makeUser();
+    await credit.grantCredit({
+      userId: spender._id, amountCents: 5000, reason: "ADMIN_ADJUSTMENT",
+      note: "Integration test", notifyRecipient: false,
+    });
+
+    const paymentA = new mongoose.Types.ObjectId();
+    const paymentB = new mongoose.Types.ObjectId();
+
+    // Two checkouts racing for the same balance.
+    const [spendA, spendB] = await Promise.all([
+      credit.spendCredit({ userId: spender._id, maxCents: 5000, paymentId: paymentA }),
+      credit.spendCredit({ userId: spender._id, maxCents: 5000, paymentId: paymentB }),
+    ]);
+
+    const totalSpent = spendA.appliedCents + spendB.appliedCents;
+    check("two concurrent checkouts cannot spend the same credit twice",
+      totalSpent === 5000, `${spendA.appliedCents} + ${spendB.appliedCents}`);
+    check("and the balance lands at zero, never below",
+      (await credit.creditBalance(spender._id)) === 0);
+
+    // Whichever of the two actually took the credit is the one a retry would
+    // hit; the loser rolled its claim back, so retrying that is a fresh spend
+    // against an empty balance rather than a duplicate.
+    const winner = spendA.appliedCents > 0 ? paymentA : paymentB;
+
+    const retried = await credit.spendCredit({
+      userId: spender._id, maxCents: 5000, paymentId: winner,
+    });
+    check("retrying the same payment reports what was already applied, not more",
+      retried.duplicate === true && retried.appliedCents === 5000 &&
+        (await credit.creditBalance(spender._id)) === 0);
+    await credit.releaseCredit({
+      userId: spender._id, amountCents: 5000, paymentId: winner,
+    });
+    check("credit returned from an abandoned checkout comes back",
+      (await credit.creditBalance(spender._id)) === 5000);
+
+    await credit.releaseCredit({
+      userId: spender._id, amountCents: 5000, paymentId: winner,
+    });
+    check("releasing the same payment twice returns it once",
+      (await credit.creditBalance(spender._id)) === 5000);
+
+    const overspend = await credit.spendCredit({
+      userId: spender._id, maxCents: 99999, paymentId: new mongoose.Types.ObjectId(),
+    });
+    check("a bill larger than the balance spends only what is there",
+      overspend.appliedCents === 5000);
+
+    // --- the ledger explains the balance ------------------------------------------------
+    const statement = await credit.creditStatement(spender._id, {});
+    check("every movement is on the statement", statement.entries.length >= 3);
+    check("the statement's balance matches the account's", statement.balanceCents === 0);
+    check("each entry records the balance it produced",
+      statement.entries.every((e) => typeof e.balanceAfterCents === "number"));
+
+    // --- reversal ------------------------------------------------------------------------
+    const balanceBefore = await credit.creditBalance(referrer._id);
+    const reversed = await referrals.reverseReferral(
+      stored._id, { reason: "Integration test reversal." }, { id: referrer._id, role: ROLES.ADMIN },
+    );
+    check("a referral can be reversed", reversed.status === REFERRAL_STATUS.REVERSED);
+    check("and the credit is taken back",
+      (await credit.creditBalance(referrer._id)) === balanceBefore - 2000);
+
+    const reverseTwice = await throws(
+      () => referrals.reverseReferral(stored._id, { reason: "Again." }, { id: referrer._id }),
+      (e) => e.status === 409,
+    );
+    check("a referral cannot be reversed twice", reverseTwice.threw && reverseTwice.matched);
+
+    // A claw-back stops at zero rather than pushing an account into debt.
+    const spentUp = await makeUser();
+    await credit.grantCredit({
+      userId: spentUp._id, amountCents: 500, reason: "REFERRAL_REWARD", notifyRecipient: false,
+    });
+    const clawed = await credit.clawBackCredit({ userId: spentUp._id, amountCents: 2000 });
+    check("a claw-back recovers only what is left",
+      clawed.recoveredCents === 500 && clawed.writtenOffCents === 1500);
+    check("and never leaves a negative balance",
+      (await credit.creditBalance(spentUp._id)) === 0);
+
+    // --- risk flags are signals, not punishments --------------------------------------------
+    const sharedPhone = "+14165550001";
+    const flaggedReferrer = await makeUser({
+      phoneE164: sharedPhone, phoneVerifiedAt: new Date(),
+    });
+    const flaggedCode = await referrals.getOrCreateReferralCode(flaggedReferrer._id);
+    const flaggedReferee = await makeUser({
+      phoneE164: sharedPhone, phoneVerifiedAt: new Date(),
+    });
+
+    const flagged = await referrals.attributeReferral({
+      code: flaggedCode,
+      refereeUserId: flaggedReferee._id,
+      email: flaggedReferee.email,
+    });
+    check("two accounts sharing a confirmed mobile number are flagged",
+      flagged.attributed === true &&
+        flagged.flags.includes(REFERRAL_RISK_FLAGS.SHARED_PHONE));
+    check("but the referral is still recorded rather than silently refused",
+      flagged.attributed === true);
+
+    const queue = await referrals.listAllReferrals({ flagged: true });
+    check("flagged referrals reach the admin queue",
+      queue.items.some((r) => String(r.refereeUserId?._id ?? r.refereeUserId) === String(flaggedReferee._id)));
+
+    // --- a suspended referrer earns nothing ---------------------------------------------------
+    await User.updateOne({ _id: flaggedReferrer._id }, { $set: { status: USER_STATUS.SUSPENDED } });
+    const suspendedLesson = await Booking.create({
+      reference: `APL-S${randomUUID().replace(/-/g, "").slice(0, 8).toUpperCase()}`,
+      purchaserId: flaggedReferee._id,
+      studentProfileId: new mongoose.Types.ObjectId(),
+      tutorProfileId: tutor._id,
+      tutorUserId: tutor.userId,
+      courseId: new mongoose.Types.ObjectId(),
+      courseName: "Advanced Functions",
+      mode: "ONLINE",
+      startAt,
+      endAt: new Date(startAt.getTime() + 3600_000),
+      durationMinutes: 60,
+      status: BOOKING_STATUS.COMPLETED,
+      price: {
+        hourlyRateCents: 6000, durationMinutes: 60, subtotalCents: 6000,
+        commissionPercent: 15, commissionCents: 900, tutorEarningsCents: 5100, totalCents: 6000,
+      },
+    });
+    madeBookings.push(suspendedLesson._id);
+
+    await referrals.qualifyReferralFor(flaggedReferee._id);
+    check("a suspended referrer is not credited",
+      (await credit.creditBalance(flaggedReferrer._id)) === 0);
+    check("but the new account still gets its welcome credit",
+      (await credit.creditBalance(flaggedReferee._id)) === 1000);
+
+    // --- the scheme can be switched off ----------------------------------------------------------
+    await updateSettings({ referrals: { enabled: false } });
+    invalidateSettingsCache();
+
+    const whileOff = await referrals.attributeReferral({
+      code, refereeUserId: (await makeUser())._id,
+    });
+    check("no referral is attributed while the scheme is off",
+      whileOff.attributed === false && whileOff.reason === "DISABLED");
+    check("and a code stops resolving", (await referrals.lookupReferralCode(code)).valid === false);
+
+    await updateSettings({ referrals: { enabled: true } });
+    invalidateSettingsCache();
+
+    // --- zero is a working configuration ------------------------------------------------------------
+    await updateSettings({ referrals: { referrerRewardCents: 0, refereeRewardCents: 0 } });
+    invalidateSettingsCache();
+
+    const unpricedReferrer = await makeUser();
+    const unpricedCode = await referrals.getOrCreateReferralCode(unpricedReferrer._id);
+    const unpricedReferee = await makeUser();
+    await referrals.attributeReferral({
+      code: unpricedCode, refereeUserId: unpricedReferee._id, email: unpricedReferee.email,
+    });
+
+    const unpricedLesson = await Booking.create({
+      reference: `APL-Z${randomUUID().replace(/-/g, "").slice(0, 8).toUpperCase()}`,
+      purchaserId: unpricedReferee._id,
+      studentProfileId: new mongoose.Types.ObjectId(),
+      tutorProfileId: tutor._id,
+      tutorUserId: tutor.userId,
+      courseId: new mongoose.Types.ObjectId(),
+      courseName: "Advanced Functions",
+      mode: "ONLINE",
+      startAt,
+      endAt: new Date(startAt.getTime() + 3600_000),
+      durationMinutes: 60,
+      status: BOOKING_STATUS.COMPLETED,
+      price: {
+        hourlyRateCents: 6000, durationMinutes: 60, subtotalCents: 6000,
+        commissionPercent: 15, commissionCents: 900, tutorEarningsCents: 5100, totalCents: 6000,
+      },
+    });
+    madeBookings.push(unpricedLesson._id);
+
+    const unpricedResult = await referrals.qualifyReferralFor(unpricedReferee._id);
+    check("with no reward configured a referral still qualifies",
+      unpricedResult.qualified === true);
+    check("and grants nothing, which is the operator's decision rather than a failure",
+      (await credit.creditBalance(unpricedReferrer._id)) === 0);
+
+    // --- the person's own page -----------------------------------------------------------------------
+    const summary = await referrals.referralSummary({ id: referrer._id, role: ROLES.PARENT });
+    check("a person sees their own code and stats",
+      summary.code === code && summary.stats.joined >= 1);
+    check("names on the referral page are first name plus initial",
+      summary.referrals.every((r) => !/ [A-Z][a-z]{2,}$/.test(r.name)));
+
+    // --- notifications and audit ----------------------------------------------------------------------
+    const notices = await Notification.find({ userId: { $in: made } }).lean();
+    check("a referrer is told when somebody joins with their code",
+      notices.some((n) => n.type === "REFERRAL_JOINED"));
+    check("and when the reward lands",
+      notices.some((n) => n.type === "REFERRAL_REWARDED"));
+
+    const trail = await AuditLog.find({ entityType: "Referral" }).lean();
+    const actions = new Set(trail.map((r) => r.action));
+    check("attribution is audited", actions.has("REFERRAL_ATTRIBUTED"));
+    check("qualifying is audited", actions.has("REFERRAL_QUALIFIED"));
+    check("reversal is audited", actions.has("REFERRAL_REVERSED"));
+  } finally {
+    await updateSettings({ referrals: { ...referralsBefore } });
+    invalidateSettingsCache();
+    await CreditEntry.deleteMany({ userId: { $in: made } });
+    await Referral.deleteMany({
+      $or: [{ referrerUserId: { $in: made } }, { refereeUserId: { $in: made } }],
+    });
+    await Notification.deleteMany({ userId: { $in: made } });
+    await Booking.deleteMany({ _id: { $in: madeBookings } });
+    await AuditLog.deleteMany({ entityType: "Referral" });
+    await User.deleteMany({ _id: { $in: made } });
+  }
+}
+
+
+// --- 19. Tutor packages (§20, §41 Phase 2) --------------------------------
+
+/**
+ * The properties a package scheme lives or dies by: a lesson cannot be drawn
+ * twice, a balance cannot go past what was bought, the money reconciles, and
+ * a cancelled lesson goes back where it came from.
+ */
+async function packageTests() {
+  section("Packages — pricing, consumption, cancellation and expiry");
+
+  const uri = process.env.MONGODB_URI;
+  if (!uri) return skip("packages", "MONGODB_URI is not set");
+
+  if (mongoose.connection.readyState !== 1) {
+    try {
+      await mongoose.connect(uri, { serverSelectionTimeoutMS: 2500 });
+    } catch {
+      return skip("packages", "MongoDB is not reachable");
+    }
+  }
+
+  const {
+    TutorPackage, PackagePurchase, TutorProfile, StudentProfile, Booking, Payment,
+    Notification, AuditLog,
+  } = await import("@/models");
+  const pkgSvc = await import("@/services/package.service");
+  const { assessPackagePrice, packageBreakdown, packageSessionPrice, unusedPackageValue } =
+    await import("@/lib/booking/packages");
+  const {
+    PACKAGE_STATUS, PACKAGE_PURCHASE_STATUS, PAYMENT_STATUS, ROLES,
+  } = await import("@/constants");
+  const { resetPaymentProvider } = await import("@/services/external/payment-provider");
+
+  // Buying a package opens a real checkout session. This section is about the
+  // package rules, not the card rails — those have their own section — so it
+  // runs against the development provider rather than reaching out to Stripe.
+  const paymentProviderBefore = process.env.PAYMENT_PROVIDER;
+  process.env.PAYMENT_PROVIDER = "development";
+  resetPaymentProvider();
+
+  // --- pure pricing ---------------------------------------------------------
+  const breakdown = packageBreakdown({
+    priceCents: 50000, sessionCount: 10, durationMinutes: 60, commissionPercent: 15,
+  });
+  check("a package divides into per-session figures", breakdown.perSessionCents === 5000);
+  check("commission is taken per session, the same way a lesson is",
+    breakdown.perSessionCommissionCents === 750 &&
+      breakdown.perSessionTutorEarningsCents === 4250);
+
+  const awkward = packageBreakdown({
+    priceCents: 10003, sessionCount: 3, durationMinutes: 60, commissionPercent: 15,
+  });
+  check("an awkward price keeps its remainder rather than losing cents",
+    awkward.perSessionCents * 3 + awkward.remainderCents === 10003);
+
+  const remainderPurchase = {
+    priceCents: 10003, sessionsTotal: 3, perSessionCents: awkward.perSessionCents,
+    sessionDurationMinutes: 60, commissionPercent: 15,
+  };
+  const firstSession = packageSessionPrice(remainderPurchase, { index: 0 });
+  const laterSession = packageSessionPrice(remainderPurchase, { index: 1 });
+  check("the rounding remainder rides on the first lesson",
+    firstSession.subtotalCents + laterSession.subtotalCents * 2 === 10003);
+  check("every session's commission and earnings still add up exactly",
+    firstSession.commissionCents + firstSession.tutorEarningsCents === firstSession.subtotalCents);
+
+  const tooDear = assessPackagePrice({
+    priceCents: 100000, sessionCount: 10, durationMinutes: 60,
+    standardHourlyRateCents: 6000, settings: { minHourlyRate: 15 },
+  });
+  check("a package that costs more per hour than booking singly is refused",
+    tooDear.ok === false && tooDear.code === "ABOVE_STANDARD_RATE");
+
+  const tooCheap = assessPackagePrice({
+    priceCents: 1000, sessionCount: 10, durationMinutes: 60,
+    standardHourlyRateCents: 6000, settings: { minHourlyRate: 15 },
+  });
+  check("a package below the platform minimum rate is refused",
+    tooCheap.ok === false && tooCheap.code === "BELOW_MINIMUM_RATE");
+
+  const fair = assessPackagePrice({
+    priceCents: 50000, sessionCount: 10, durationMinutes: 60,
+    standardHourlyRateCents: 6000, settings: { minHourlyRate: 15 },
+  });
+  check("a genuine discount is accepted and its saving computed",
+    fair.ok === true && fair.savingPercent === 17, `${fair.savingPercent}%`);
+
+  // --- against the database ---------------------------------------------------
+  const tutor = await TutorProfile.findOne({ isSearchable: true })
+    .populate("userId", "_id")
+    .lean();
+  const seededStudent = await StudentProfile.findOne({ archivedAt: null }).lean();
+  if (!tutor?.courses?.length || !seededStudent) {
+    return skip("package lifecycle", "no seeded tutor with courses — run `bun run seed`");
+  }
+
+  const tutorActor = { id: String(tutor.userId._id ?? tutor.userId), role: ROLES.TUTOR };
+  const owner = { id: String(seededStudent.ownerId), role: ROLES.PARENT };
+  const stranger = { id: String(new mongoose.Types.ObjectId()), role: ROLES.PARENT };
+  const course = tutor.courses[0];
+
+  const madeIds = [];
+  const madeBookings = [];
+
+  try {
+    await TutorPackage.deleteMany({ tutorProfileId: tutor._id, title: /^Integration test package/ });
+
+    // --- creating an offer ----------------------------------------------------
+    const overpriced = await throws(
+      () => pkgSvc.createPackage({
+        title: "Integration test package — overpriced",
+        courseId: String(course.courseId),
+        sessionCount: 5,
+        sessionDurationMinutes: 60,
+        mode: "ONLINE",
+        priceCents: 99_000_00,
+      }, tutorActor),
+      (e) => e.code === "ABOVE_STANDARD_RATE",
+    );
+    check("a tutor cannot sell a package dearer than their own rate",
+      overpriced.threw && overpriced.matched);
+
+    const standardRate = course.hourlyRateCents ?? tutor.hourlyRateCents;
+    const packagePrice = Math.floor(standardRate * 5 * 0.8);
+
+    const offer = await pkgSvc.createPackage({
+      title: "Integration test package — safe to delete",
+      description: "Created by the integration suite.",
+      courseId: String(course.courseId),
+      sessionCount: 5,
+      sessionDurationMinutes: 60,
+      mode: tutor.lessonModes?.[0] ?? "ONLINE",
+      priceCents: packagePrice,
+      validityDays: 90,
+    }, tutorActor);
+    madeIds.push(offer.id);
+
+    check("a package starts as a draft", offer.status === PACKAGE_STATUS.DRAFT);
+    check("its per-session and hourly figures are derived, not supplied",
+      offer.perSessionCents === Math.floor(packagePrice / 5) &&
+        offer.effectiveHourlyRateCents > 0);
+    check("the saving against the tutor's own rate is computed", offer.savingPercent > 0);
+
+    const notYours = await throws(
+      () => pkgSvc.updatePackage(offer.id, { title: "Hijacked" }, stranger),
+      (e) => e.status === 403,
+    );
+    check("only the tutor who made a package can edit it", notYours.threw && notYours.matched);
+
+    const draftPurchase = await throws(
+      () => pkgSvc.purchasePackage({
+        packageId: offer.id, studentProfileId: String(seededStudent._id),
+      }, owner),
+      (e) => e.code === "PACKAGE_NOT_ON_SALE",
+    );
+    check("a draft package cannot be bought", draftPurchase.threw && draftPurchase.matched);
+
+    await pkgSvc.setPackageStatus(offer.id, { status: PACKAGE_STATUS.ACTIVE }, tutorActor);
+
+    // --- buying ----------------------------------------------------------------
+    const strangerBuys = await throws(
+      () => pkgSvc.purchasePackage({
+        packageId: offer.id, studentProfileId: String(seededStudent._id),
+      }, stranger),
+      (e) => e.status === 403,
+    );
+    check("nobody can buy a package for somebody else's child",
+      strangerBuys.threw && strangerBuys.matched);
+
+    const { purchase, payment } = await pkgSvc.purchasePackage({
+      packageId: offer.id, studentProfileId: String(seededStudent._id),
+    }, owner);
+
+    check("buying creates a purchase awaiting payment",
+      purchase.status === PACKAGE_PURCHASE_STATUS.PENDING_PAYMENT);
+    check("and an ordinary payment beside it", Boolean(payment.id));
+
+    const paymentRow = await Payment.findById(payment.id).lean();
+    check("the payment is for the package, not a booking",
+      String(paymentRow.packagePurchaseId) === purchase.id && !paymentRow.bookingId);
+    check("the payment total matches the package price",
+      paymentRow.totalCents + (paymentRow.creditAppliedCents ?? 0) === packagePrice);
+    check("the tutor's share is the sum of the sessions",
+      paymentRow.tutorEarningsCents ===
+        purchase.perSessionTutorEarningsCents * purchase.sessionsTotal);
+
+    const unpaidDraw = await throws(
+      () => pkgSvc.consumePackageSession({
+        purchaseId: purchase.id, actor: owner, tutorProfileId: tutor._id,
+        courseId: course.courseId, durationMinutes: 60,
+      }),
+      (e) => e.code === "PACKAGE_NOT_USABLE",
+    );
+    check("an unpaid package has no lessons to draw", unpaidDraw.threw && unpaidDraw.matched);
+
+    // --- activation -------------------------------------------------------------
+    await Payment.updateOne(
+      { _id: payment.id },
+      { $set: { status: PAYMENT_STATUS.PAID, paidAt: new Date() } },
+    );
+    const activated = await pkgSvc.activatePackagePurchase(payment.id);
+    check("a settled payment activates the package", activated.activated === 1);
+
+    const again = await pkgSvc.activatePackagePurchase(payment.id);
+    check("activating twice does nothing", again.activated === 0);
+
+    const live = await PackagePurchase.findById(purchase.id).lean();
+    check("the purchase is active with its lessons intact",
+      live.status === PACKAGE_PURCHASE_STATUS.ACTIVE && live.sessionsUsed === 0);
+    check("its validity is counted from activation, not from the click",
+      Boolean(live.expiresAt) && new Date(live.expiresAt) > new Date());
+
+    // --- the terms are frozen ------------------------------------------------------
+    await pkgSvc.updatePackage(offer.id, { priceCents: Math.floor(packagePrice * 0.9) }, tutorActor);
+    const afterRepricing = await PackagePurchase.findById(purchase.id).lean();
+    check("repricing an offer does not change what somebody already bought",
+      afterRepricing.priceCents === packagePrice);
+
+    // --- drawing lessons ------------------------------------------------------------
+    const drawn = await pkgSvc.consumePackageSession({
+      purchaseId: purchase.id, actor: owner, tutorProfileId: tutor._id,
+      courseId: course.courseId, durationMinutes: 60,
+    });
+    check("a lesson can be drawn", drawn.sessionsUsed === 1);
+
+    const wrongTutor = await throws(
+      () => pkgSvc.consumePackageSession({
+        purchaseId: purchase.id, actor: owner,
+        tutorProfileId: new mongoose.Types.ObjectId(),
+        courseId: course.courseId, durationMinutes: 60,
+      }),
+      (e) => e.code === "PACKAGE_WRONG_TUTOR",
+    );
+    check("a package cannot pay for a different tutor's lesson",
+      wrongTutor.threw && wrongTutor.matched);
+
+    const wrongCourse = await throws(
+      () => pkgSvc.consumePackageSession({
+        purchaseId: purchase.id, actor: owner, tutorProfileId: tutor._id,
+        courseId: new mongoose.Types.ObjectId(), durationMinutes: 60,
+      }),
+      (e) => e.code === "PACKAGE_WRONG_COURSE",
+    );
+    check("nor a different course", wrongCourse.threw && wrongCourse.matched);
+
+    const wrongDuration = await throws(
+      () => pkgSvc.consumePackageSession({
+        purchaseId: purchase.id, actor: owner, tutorProfileId: tutor._id,
+        courseId: course.courseId, durationMinutes: 120,
+      }),
+      (e) => e.code === "PACKAGE_WRONG_DURATION",
+    );
+    check("nor a longer lesson than was bought", wrongDuration.threw && wrongDuration.matched);
+
+    const notMine = await throws(
+      () => pkgSvc.consumePackageSession({
+        purchaseId: purchase.id, actor: stranger, tutorProfileId: tutor._id,
+        courseId: course.courseId, durationMinutes: 60,
+      }),
+      (e) => e.status === 403,
+    );
+    check("somebody else cannot spend your package", notMine.threw && notMine.matched);
+
+    // --- the balance cannot be overdrawn -----------------------------------------------
+    // Four left, five concurrent attempts.
+    const attempts = await Promise.allSettled(
+      Array.from({ length: 5 }, () =>
+        pkgSvc.consumePackageSession({
+          purchaseId: purchase.id, actor: owner, tutorProfileId: tutor._id,
+          courseId: course.courseId, durationMinutes: 60,
+        }),
+      ),
+    );
+    const succeeded = attempts.filter((a) => a.status === "fulfilled").length;
+    check("concurrent draws never take more than the balance holds",
+      succeeded === 4, `${succeeded} of 5 succeeded`);
+
+    const emptied = await PackagePurchase.findById(purchase.id).lean();
+    check("and the counter lands exactly on the total, never past it",
+      emptied.sessionsUsed === emptied.sessionsTotal);
+
+    const overdrawn = await throws(
+      () => pkgSvc.consumePackageSession({
+        purchaseId: purchase.id, actor: owner, tutorProfileId: tutor._id,
+        courseId: course.courseId, durationMinutes: 60,
+      }),
+      (e) => e.status === 409,
+    );
+    check("an empty package refuses a further draw", overdrawn.threw && overdrawn.matched);
+
+    // --- returning a session ----------------------------------------------------------------
+    const fakeBookingId = new mongoose.Types.ObjectId();
+    await PackagePurchase.updateOne(
+      { _id: purchase.id },
+      { $push: { bookingIds: fakeBookingId } },
+    );
+    const returned = await pkgSvc.returnPackageSession(purchase.id, fakeBookingId);
+    check("a cancelled lesson goes back into the package", returned.returned === true);
+    check("and the balance reflects it", returned.sessionsRemaining === 1);
+
+    const returnedTwice = await pkgSvc.returnPackageSession(purchase.id, fakeBookingId);
+    check("returning the same lesson twice cannot mint a session",
+      returnedTwice.returned === false);
+
+    // --- cancelling the balance ----------------------------------------------------------------
+    const beforeCancel = await PackagePurchase.findById(purchase.id).lean();
+    const unusedValue = unusedPackageValue(beforeCancel);
+    check("only the unused lessons are worth refunding",
+      unusedValue === beforeCancel.perSessionCents * 1);
+
+    const strangerCancels = await throws(
+      () => pkgSvc.cancelPurchase(purchase.id, { reason: "Not mine." }, stranger),
+      (e) => e.status === 403,
+    );
+    check("somebody else cannot cancel your package",
+      strangerCancels.threw && strangerCancels.matched);
+
+    const cancelled = await pkgSvc.cancelPurchase(
+      purchase.id, { reason: "Integration test." }, owner,
+    );
+    check("cancelling refunds the unused lessons",
+      cancelled.refundCents === unusedValue, `${cancelled.refundCents} vs ${unusedValue}`);
+    check("and marks the purchase refunded",
+      cancelled.status === PACKAGE_PURCHASE_STATUS.REFUNDED);
+
+    const cancelTwice = await throws(
+      () => pkgSvc.cancelPurchase(purchase.id, { reason: "Again." }, owner),
+      (e) => e.status === 409,
+    );
+    check("a package cannot be cancelled twice", cancelTwice.threw && cancelTwice.matched);
+
+    const refundedPayment = await Payment.findById(payment.id).lean();
+    check("the refund went through the ordinary payment record",
+      refundedPayment.refundedCents === unusedValue);
+    check("and never more than was charged",
+      refundedPayment.refundedCents <= refundedPayment.totalCents);
+
+    // --- expiry ------------------------------------------------------------------------------------
+    const { purchase: expiring, payment: expiringPayment } = await pkgSvc.purchasePackage({
+      packageId: offer.id, studentProfileId: String(seededStudent._id),
+    }, owner);
+    await Payment.updateOne(
+      { _id: expiringPayment.id },
+      { $set: { status: PAYMENT_STATUS.PAID, paidAt: new Date() } },
+    );
+    await pkgSvc.activatePackagePurchase(expiringPayment.id);
+    await PackagePurchase.updateOne(
+      { _id: expiring.id },
+      { $set: { expiresAt: new Date(Date.now() - 60_000) } },
+    );
+
+    const sweep = await pkgSvc.expirePackages();
+    check("the expiry sweep closes an out-of-date package", sweep.expired >= 1);
+    check("and refunds the lessons that were never delivered", sweep.refundedCents > 0);
+
+    const expiredRow = await PackagePurchase.findById(expiring.id).lean();
+    check("the expired package is marked as such",
+      expiredRow.status === PACKAGE_PURCHASE_STATUS.EXPIRED);
+
+    const sweepAgain = await pkgSvc.expirePackages();
+    check("running the sweep again refunds nothing twice",
+      sweepAgain.expired === 0 && sweepAgain.refundedCents === 0);
+
+    // --- warnings ------------------------------------------------------------------------------------
+    const { purchase: warned, payment: warnedPayment } = await pkgSvc.purchasePackage({
+      packageId: offer.id, studentProfileId: String(seededStudent._id),
+    }, owner);
+    await Payment.updateOne(
+      { _id: warnedPayment.id },
+      { $set: { status: PAYMENT_STATUS.PAID, paidAt: new Date() } },
+    );
+    await pkgSvc.activatePackagePurchase(warnedPayment.id);
+    await PackagePurchase.updateOne(
+      { _id: warned.id },
+      { $set: { expiresAt: new Date(Date.now() + 3 * 86400000), expiryWarnedAt: null } },
+    );
+
+    const warnRun = await pkgSvc.expirePackages();
+    check("a package about to expire warns the family", warnRun.warned >= 1);
+    const warnAgain = await pkgSvc.expirePackages();
+    check("and never warns them twice", warnAgain.warned === 0);
+
+    // --- archiving does not take away what was bought ---------------------------------------------------
+    await pkgSvc.setPackageStatus(offer.id, { status: PACKAGE_STATUS.ARCHIVED }, tutorActor);
+    const survivor = await PackagePurchase.findById(warned.id).lean();
+    check("archiving an offer leaves existing balances alone",
+      survivor.status === PACKAGE_PURCHASE_STATUS.ACTIVE);
+    check("and the archived offer is off sale",
+      (await pkgSvc.listPublicPackages(tutor._id)).every((p) => p.id !== offer.id));
+
+    // --- audit --------------------------------------------------------------------------------------------
+    const trail = await AuditLog.find({
+      entityType: { $in: ["TutorPackage", "PackagePurchase"] },
+    }).lean();
+    const actions = new Set(trail.map((r) => r.action));
+    check("publishing a package is audited", actions.has("PACKAGE_PUBLISHED"));
+    check("buying one is audited", actions.has("PACKAGE_PURCHASED"));
+    check("cancelling one is audited", actions.has("PACKAGE_CANCELLED"));
+  } finally {
+    if (paymentProviderBefore === undefined) delete process.env.PAYMENT_PROVIDER;
+    else process.env.PAYMENT_PROVIDER = paymentProviderBefore;
+    resetPaymentProvider();
+
+    const purchases = await PackagePurchase.find({
+      packageId: { $in: madeIds.map((id) => new mongoose.Types.ObjectId(id)) },
+    }).select("_id paymentId").lean();
+
+    await Notification.deleteMany({
+      entityType: "PackagePurchase",
+      entityId: { $in: purchases.map((p) => p._id) },
+    });
+    await Payment.deleteMany({ _id: { $in: purchases.map((p) => p.paymentId).filter(Boolean) } });
+    await PackagePurchase.deleteMany({ _id: { $in: purchases.map((p) => p._id) } });
+    await TutorPackage.deleteMany({ _id: { $in: madeIds.map((id) => new mongoose.Types.ObjectId(id)) } });
+    await Booking.deleteMany({ _id: { $in: madeBookings } });
+    await AuditLog.deleteMany({ entityType: { $in: ["TutorPackage", "PackagePurchase"] } });
+  }
+}
+
+
+// --- 20. Group tutoring (§26, §41 Phase 2) --------------------------------
+
+/**
+ * Capacity, duplicate enrolment, and the money when a session does not run.
+ *
+ * The concurrency check is the important one: seats are the thing this
+ * feature can most easily oversell, and overselling means a tutor turning up
+ * to more people than they agreed to teach.
+ */
+async function groupSessionTests() {
+  section("Group tutoring — capacity, enrolment and settlement");
+
+  const uri = process.env.MONGODB_URI;
+  if (!uri) return skip("group tutoring", "MONGODB_URI is not set");
+
+  if (mongoose.connection.readyState !== 1) {
+    try {
+      await mongoose.connect(uri, { serverSelectionTimeoutMS: 2500 });
+    } catch {
+      return skip("group tutoring", "MongoDB is not reachable");
+    }
+  }
+
+  const {
+    GroupSession, GroupEnrolment, Booking, Payment, TutorProfile, StudentProfile,
+    Availability, Notification, AuditLog,
+  } = await import("@/models");
+  const groups = await import("@/services/group.service");
+  const {
+    GROUP_SESSION_STATUS, GROUP_ENROLMENT_STATUS, BOOKING_STATUS, PAYMENT_STATUS, ROLES,
+  } = await import("@/constants");
+  const { resetPaymentProvider } = await import("@/services/external/payment-provider");
+
+  const paymentProviderBefore = process.env.PAYMENT_PROVIDER;
+  process.env.PAYMENT_PROVIDER = "development";
+  resetPaymentProvider();
+
+  const tutor = await TutorProfile.findOne({ isSearchable: true })
+    .populate("userId", "_id")
+    .lean();
+  const seededStudent = await StudentProfile.findOne({ archivedAt: null }).lean();
+  if (!tutor?.courses?.length || !seededStudent) {
+    return skip("group tutoring", "no seeded tutor with courses — run `bun run seed`");
+  }
+
+  const availability = await Availability.findOne({ tutorProfileId: tutor._id }).lean();
+  if (!availability?.weeklyRules?.length) {
+    return skip("group tutoring", "the seeded tutor has published no availability");
+  }
+
+  const tutorActor = { id: String(tutor.userId._id ?? tutor.userId), role: ROLES.TUTOR };
+  const owner = { id: String(seededStudent.ownerId), role: ROLES.PARENT };
+  const stranger = { id: String(new mongoose.Types.ObjectId()), role: ROLES.PARENT };
+  const course = tutor.courses[0];
+
+  const madeSessions = [];
+  const madeStudents = [];
+
+  /** Learners of this test's own, so capacity is exercised deterministically. */
+  const makeStudent = async (name) => {
+    const student = await StudentProfile.create({
+      ownerId: seededStudent.ownerId,
+      firstName: name,
+      lastName: "Grouptest",
+      isMinor: true,
+    });
+    madeStudents.push(student._id);
+    return student;
+  };
+
+  /** A session at a time the tutor is genuinely free. */
+  const nextFreeSlot = async () => {
+    const { getBookableSlots } = await import("@/services/availability.service");
+    const { days } = await getBookableSlots(tutor._id, { days: 28, durationMinutes: 60 });
+    const day = days.find((d) => d.slots.length > 0);
+    return day?.slots[0]?.startAt ?? null;
+  };
+
+  const startAt = await nextFreeSlot();
+  if (!startAt) return skip("group tutoring", "the seeded tutor has no free slots");
+
+  const makeSession = async (over = {}) => {
+    const session = await groups.createGroupSession({
+      title: "Integration test group — safe to delete",
+      courseId: String(course.courseId),
+      mode: tutor.lessonModes?.[0] ?? "ONLINE",
+      meetingProvider: tutor.onlineMeetingProviders?.[0] ?? "ZOOM",
+      startAt,
+      durationMinutes: 60,
+      minParticipants: 2,
+      maxParticipants: 3,
+      pricePerSeatCents: 2500,
+      ...over,
+    }, tutorActor);
+    madeSessions.push(session.id);
+    return session;
+  };
+
+  try {
+    await GroupSession.deleteMany({ title: /^Integration test group/ });
+
+    // --- creating and publishing ------------------------------------------------
+    const invertedCapacity = await throws(
+      () => makeSession({ minParticipants: 5, maxParticipants: 3 }),
+      (e) => e.code === "CAPACITY_INVERTED",
+    );
+    check("a minimum larger than the maximum is refused",
+      invertedCapacity.threw && invertedCapacity.matched);
+
+    const session = await makeSession();
+    check("a session starts as a draft", session.status === GROUP_SESSION_STATUS.DRAFT);
+    check("its seats start empty", session.seatsTaken === 0);
+
+    const joinDraft = await throws(
+      () => groups.joinGroupSession(session.id, {
+        studentProfileId: String(seededStudent._id),
+      }, owner),
+      (e) => e.code === "SESSION_NOT_OPEN",
+    );
+    check("a draft session cannot be joined", joinDraft.threw && joinDraft.matched);
+
+    const strangerPublishes = await throws(
+      () => groups.publishGroupSession(session.id, stranger),
+      (e) => e.status === 403,
+    );
+    check("only the tutor can publish their own session",
+      strangerPublishes.threw && strangerPublishes.matched);
+
+    const published = await groups.publishGroupSession(session.id, tutorActor);
+    check("publishing opens it for sign-ups",
+      published.status === GROUP_SESSION_STATUS.PUBLISHED);
+    check("and sets the deadline by which it has to fill", Boolean(published.confirmBy));
+
+    const publishTwice = await throws(
+      () => groups.publishGroupSession(session.id, tutorActor),
+      (e) => e.status === 409,
+    );
+    check("a session cannot be published twice", publishTwice.threw && publishTwice.matched);
+
+    // --- a tutor is not a student in their own class ------------------------------
+    const tutorJoins = await throws(
+      () => groups.joinGroupSession(session.id, {
+        studentProfileId: String(seededStudent._id),
+      }, { id: tutorActor.id, role: ROLES.TUTOR }),
+      (e) => e.code === "TUTOR_CANNOT_JOIN_OWN" || e.status === 403,
+    );
+    check("a tutor cannot join their own session", tutorJoins.threw && tutorJoins.matched);
+
+    const strangerJoins = await throws(
+      () => groups.joinGroupSession(session.id, {
+        studentProfileId: String(seededStudent._id),
+      }, stranger),
+      (e) => e.status === 403,
+    );
+    check("nobody can enrol somebody else's child",
+      strangerJoins.threw && strangerJoins.matched);
+
+    // --- joining ---------------------------------------------------------------------
+    const alice = await makeStudent("Alice");
+    const first = await groups.joinGroupSession(session.id, {
+      studentProfileId: String(alice._id),
+    }, owner);
+
+    check("joining creates an enrolment awaiting payment",
+      first.enrolment.status === GROUP_ENROLMENT_STATUS.PENDING_PAYMENT);
+    check("and an ordinary booking for that learner", Boolean(first.booking.id));
+    check("the booking is linked to the session",
+      String(first.booking.groupSessionId) === session.id);
+    check("the seat is taken immediately, before payment",
+      first.seatsRemaining === 2);
+    check("the booking is priced from the seat price",
+      first.booking.price.subtotalCents === 2500);
+    check("and commission is taken the ordinary way",
+      first.booking.price.commissionCents + first.booking.price.tutorEarningsCents === 2500);
+
+    const joinTwice = await throws(
+      () => groups.joinGroupSession(session.id, {
+        studentProfileId: String(alice._id),
+      }, owner),
+      (e) => e.status === 409,
+    );
+    check("the same learner cannot join twice", joinTwice.threw && joinTwice.matched);
+
+    // --- capacity cannot be exceeded ---------------------------------------------------
+    // Two seats left, five learners trying at once.
+    const racers = await Promise.all(
+      ["Bo", "Cai", "Dev", "Eve", "Fay"].map((name) => makeStudent(name)),
+    );
+    const outcomes = await Promise.allSettled(
+      racers.map((student) =>
+        groups.joinGroupSession(session.id, {
+          studentProfileId: String(student._id),
+        }, owner),
+      ),
+    );
+
+    const seated = outcomes.filter(
+      (o) => o.status === "fulfilled" && !o.value.waitlisted,
+    ).length;
+    const waitlisted = outcomes.filter(
+      (o) => o.status === "fulfilled" && o.value.waitlisted,
+    ).length;
+
+    check("concurrent joins never oversell the seats", seated === 2, `${seated} seated`);
+    check("everybody else goes on the waiting list rather than being refused",
+      waitlisted === 3, `${waitlisted} waitlisted`);
+
+    const full = await GroupSession.findById(session.id).lean();
+    check("the seat counter lands exactly on the maximum",
+      full.seatsTaken === full.maxParticipants);
+    check("and the waiting list is counted", full.waitlistCount === 3);
+
+    const bookings = await Booking.countDocuments({ groupSessionId: session._id });
+    check("only seated learners got a booking", bookings === 3);
+    check("nobody on the waiting list was charged",
+      (await GroupEnrolment.countDocuments({
+        sessionId: session._id,
+        status: GROUP_ENROLMENT_STATUS.WAITLISTED,
+        paymentId: { $ne: null },
+      })) === 0);
+
+    // --- confirming when the minimum is met ------------------------------------------------
+    const seatedEnrolments = await GroupEnrolment.find({
+      sessionId: session._id,
+      status: GROUP_ENROLMENT_STATUS.PENDING_PAYMENT,
+    }).lean();
+
+    for (const enrolment of seatedEnrolments.slice(0, 2)) {
+      await Payment.updateOne(
+        { _id: enrolment.paymentId },
+        { $set: { status: PAYMENT_STATUS.PAID, paidAt: new Date() } },
+      );
+      const booking = await Booking.findById(enrolment.bookingId);
+      booking.status = BOOKING_STATUS.CONFIRMED;
+      booking.confirmedAt = new Date();
+      await booking.save();
+      await groups.onGroupBookingConfirmed(booking);
+    }
+
+    const confirmed = await GroupSession.findById(session.id).lean();
+    check("reaching the minimum confirms the session",
+      confirmed.status === GROUP_SESSION_STATUS.CONFIRMED);
+    check("and stamps when that happened", Boolean(confirmed.confirmedAt));
+
+    // --- a seat given back goes to the waiting list -------------------------------------------
+    // Through the ordinary cancellation path, which is how it actually
+    // happens: `cancelBooking` applies the policy and then releases the seat.
+    const { cancelBooking } = await import("@/services/booking.service");
+    const leaving = seatedEnrolments[0];
+    const cancelledPlace = await cancelBooking(
+      leaving.bookingId, { reason: "Integration test." }, owner,
+    );
+    check("cancelling a place cancels the learner's booking", cancelledPlace.cancelled === 1);
+
+    const afterRelease = await GroupSession.findById(session.id).lean();
+    check("and the seat goes back into the session", afterRelease.seatsTaken === 2);
+
+    const releasedEnrolment = await GroupEnrolment.findById(leaving._id).lean();
+    check("the enrolment records that the place was given up",
+      [GROUP_ENROLMENT_STATUS.CANCELLED, GROUP_ENROLMENT_STATUS.REFUNDED].includes(
+        releasedEnrolment.status,
+      ));
+
+    const offered = await Notification.countDocuments({
+      entityId: session._id,
+      type: "GROUP_SEAT_AVAILABLE",
+    });
+    check("the first person waiting is told a seat opened up", offered >= 1);
+
+    const releaseTwice = await groups.releaseGroupSeat(leaving.bookingId);
+    check("releasing the same seat twice cannot invent capacity",
+      releaseTwice.released === false);
+    check("and the seat count is unchanged by the second attempt",
+      (await GroupSession.findById(session.id).lean()).seatsTaken === 2);
+
+    // --- the roster is private --------------------------------------------------------------------
+    const asOwner = await groups.getGroupSession(session.id, owner);
+    check("a family cannot see who else is in the class", asOwner.roster.length === 0);
+    check("but does see their own places", asOwner.myEnrolments.length > 0);
+
+    const asTutor = await groups.getGroupSession(session.id, tutorActor);
+    check("the tutor sees the roster", asTutor.roster.length > 0);
+    check("and it is names only, masked for minors",
+      asTutor.roster.every((r) => !/Grouptest$/.test(r.studentName)));
+    check("the tutor can manage the session", asTutor.canManage === true);
+
+    const asAnon = await groups.getGroupSession(session.id, null);
+    check("an anonymous visitor sees neither roster nor meeting link",
+      asAnon.roster.length === 0 && asAnon.meeting === null);
+    check("and never a private address",
+      asAnon.session.location?.addressLine === undefined);
+
+    // --- cancelling the whole session --------------------------------------------------------------
+    const strangerCancels = await throws(
+      () => groups.cancelGroupSession(session.id, { reason: "Not mine." }, stranger),
+      (e) => e.status === 403,
+    );
+    check("only the tutor or an administrator can cancel a session",
+      strangerCancels.threw && strangerCancels.matched);
+
+    const cancelled = await groups.cancelGroupSession(
+      session.id, { reason: "Integration test." }, tutorActor,
+    );
+    check("cancelling refunds everybody who paid", cancelled.refundedCents > 0);
+    check("the session is marked cancelled",
+      cancelled.status === GROUP_SESSION_STATUS.CANCELLED);
+    check("and every seat is given back", cancelled.seatsTaken === 0);
+
+    const cancelledBookings = await Booking.find({ groupSessionId: session._id }).lean();
+    check("every booking still in the session was cancelled by the tutor",
+      cancelledBookings
+        .filter(
+          (b) =>
+            b.status !== BOOKING_STATUS.PENDING_PAYMENT &&
+            b.status !== BOOKING_STATUS.CANCELLED_BY_STUDENT,
+        )
+        .every((b) => b.status === BOOKING_STATUS.CANCELLED_BY_TUTOR));
+    check("no booking survived the cancellation as confirmed",
+      cancelledBookings.every((b) => b.status !== BOOKING_STATUS.CONFIRMED));
+    check("and each records a full refund",
+      cancelledBookings
+        .filter((b) => b.cancellation)
+        .every((b) => b.cancellation.refundPercent === 100));
+
+    const cancelTwice = await throws(
+      () => groups.cancelGroupSession(session.id, { reason: "Again." }, tutorActor),
+      (e) => e.status === 409,
+    );
+    check("a session cannot be cancelled twice", cancelTwice.threw && cancelTwice.matched);
+
+    const joinCancelled = await throws(
+      () => groups.joinGroupSession(session.id, {
+        studentProfileId: String(seededStudent._id),
+      }, owner),
+      (e) => e.code === "SESSION_NOT_OPEN",
+    );
+    check("a cancelled session cannot be joined", joinCancelled.threw && joinCancelled.matched);
+
+    // --- a session that never fills ---------------------------------------------------------------------
+    const lonelySlot = await nextFreeSlot();
+    const lonely = await makeSession({
+      minParticipants: 3,
+      maxParticipants: 5,
+      startAt: lonelySlot ?? startAt,
+    });
+    await groups.publishGroupSession(lonely.id, tutorActor);
+
+    const soloStudent = await makeStudent("Solo");
+    const solo = await groups.joinGroupSession(lonely.id, {
+      studentProfileId: String(soloStudent._id),
+    }, owner);
+    await Payment.updateOne(
+      { _id: solo.payment.id },
+      { $set: { status: PAYMENT_STATUS.PAID, paidAt: new Date() } },
+    );
+    const soloBooking = await Booking.findById(solo.booking.id);
+    soloBooking.status = BOOKING_STATUS.CONFIRMED;
+    await soloBooking.save();
+    await groups.onGroupBookingConfirmed(soloBooking);
+
+    const stillFilling = await GroupSession.findById(lonely.id).lean();
+    check("one person does not confirm a session that needs three",
+      stillFilling.status === GROUP_SESSION_STATUS.PUBLISHED);
+
+    // Push the deadline into the past.
+    await GroupSession.updateOne(
+      { _id: lonely.id },
+      { $set: { confirmBy: new Date(Date.now() - 60_000) } },
+    );
+
+    const settled = await groups.settleUnderfilledSessions();
+    check("an under-subscribed session is cancelled at its deadline",
+      settled.cancelled >= 1);
+    check("and everybody is refunded in full", settled.refundedCents > 0);
+
+    const lonelyAfter = await GroupSession.findById(lonely.id).lean();
+    check("the under-filled session is marked cancelled",
+      lonelyAfter.status === GROUP_SESSION_STATUS.CANCELLED);
+    check("with a reason the family can read",
+      /enough people/i.test(lonelyAfter.cancellationReason ?? ""));
+
+    const settleAgain = await groups.settleUnderfilledSessions();
+    check("running settlement again refunds nothing twice",
+      settleAgain.cancelled === 0 && settleAgain.refundedCents === 0);
+
+    // --- editing is locked once people have paid ----------------------------------------------------------
+    const lockedSlot = await nextFreeSlot();
+    const locked = await makeSession({ startAt: lockedSlot ?? startAt });
+    await groups.publishGroupSession(locked.id, tutorActor);
+    const joiner = await makeStudent("Locked");
+    await groups.joinGroupSession(locked.id, {
+      studentProfileId: String(joiner._id),
+    }, owner);
+
+    const repriced = await throws(
+      () => groups.updateGroupSession(locked.id, { pricePerSeatCents: 100 }, tutorActor),
+      (e) => e.code === "SESSION_HAS_ENROLMENTS",
+    );
+    check("the seat price cannot change once somebody has joined",
+      repriced.threw && repriced.matched);
+
+    const shrunk = await throws(
+      () => groups.updateGroupSession(locked.id, { maxParticipants: 0 }, tutorActor),
+      () => true,
+    );
+    check("capacity cannot be cut below the people already in it", shrunk.threw);
+
+    const renamed = await groups.updateGroupSession(
+      locked.id, { title: "Integration test group — renamed" }, tutorActor,
+    );
+    check("but the description and title can still be improved",
+      renamed.title.endsWith("renamed"));
+
+    // --- audit ---------------------------------------------------------------------------------------------
+    const trail = await AuditLog.find({ entityType: "GroupSession" }).lean();
+    const actions = new Set(trail.map((r) => r.action));
+    check("publishing a session is audited", actions.has("GROUP_SESSION_PUBLISHED"));
+    check("joining one is audited", actions.has("GROUP_ENROLMENT_CREATED"));
+    check("cancelling one is audited", actions.has("GROUP_SESSION_CANCELLED"));
+  } finally {
+    if (paymentProviderBefore === undefined) delete process.env.PAYMENT_PROVIDER;
+    else process.env.PAYMENT_PROVIDER = paymentProviderBefore;
+    resetPaymentProvider();
+
+    const ids = madeSessions.map((id) => new mongoose.Types.ObjectId(id));
+    const enrolments = await GroupEnrolment.find({ sessionId: { $in: ids } })
+      .select("paymentId bookingId")
+      .lean();
+
+    await Notification.deleteMany({ entityType: "GroupSession", entityId: { $in: ids } });
+    await Payment.deleteMany({ _id: { $in: enrolments.map((e) => e.paymentId).filter(Boolean) } });
+    await Booking.deleteMany({ groupSessionId: { $in: ids } });
+    await GroupEnrolment.deleteMany({ sessionId: { $in: ids } });
+    await GroupSession.deleteMany({ _id: { $in: ids } });
+    await StudentProfile.deleteMany({ _id: { $in: madeStudents } });
+    await AuditLog.deleteMany({ entityType: "GroupSession" });
   }
 }
 

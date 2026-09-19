@@ -9,7 +9,7 @@ export const POST = routeHandler(
   async ({ user, params, body }) => ok({ request: await closeRequest(params.id, body, user) }),
   {
     feature: FEATURES.TUTOR_REQUESTS,
-    permission: PERMISSIONS.REQUEST_VIEW,
+    permission: PERMISSIONS.REQUEST_EDIT,
     paramsSchema: z.object({ id: objectId }),
     bodySchema: closeRequestSchema,
   },

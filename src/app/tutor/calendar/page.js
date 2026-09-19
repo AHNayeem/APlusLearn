@@ -3,10 +3,11 @@ import { enforceRole } from "@/lib/auth/guards";
 import { ROLES } from "@/constants";
 import { getTutorProfileByUserId } from "@/services/tutor.service";
 import { getTutorCalendar, getOrCreateAvailability } from "@/services/availability.service";
-import { calendarIntegrationsStatus } from "@/services/external/calendar-provider";
-import { Alert, Button, EmptyState } from "@/components/ui";
+import { listConnections } from "@/services/calendar.service";
+import { Button, EmptyState } from "@/components/ui";
 import { DashboardPage, PageHeader } from "@/components/layout/DashboardShell";
 import { TutorCalendar } from "@/components/calendar/TutorCalendar";
+import { CalendarConnections } from "@/components/calendar/CalendarConnections";
 
 export const metadata = { title: "Calendar" };
 export const dynamic = "force-dynamic";
@@ -31,8 +32,10 @@ export default async function TutorCalendarPage({ searchParams }) {
 
   const { from } = await searchParams;
   await getOrCreateAvailability(profile.id, user.id, profile.timeZone);
-  const calendar = await getTutorCalendar(profile.id, { from, days: 7 });
-  const integrations = calendarIntegrationsStatus();
+  const [calendar, calendarSync] = await Promise.all([
+    getTutorCalendar(profile.id, { from, days: 7 }),
+    listConnections(user.id),
+  ]);
 
   return (
     <DashboardPage>
@@ -41,19 +44,16 @@ export default async function TutorCalendarPage({ searchParams }) {
         description="Your week at a glance, plus the recurring hours families can book."
       />
 
-      {!integrations.some((i) => i.connected) && (
-        <Alert tone="neutral" title="Calendar sync is coming" className="mb-6">
-          Google Calendar and Outlook sync are on the roadmap. For now, block any time you&rsquo;re
-          busy elsewhere so nothing double-books.
-        </Alert>
-      )}
-
       <TutorCalendar
         availability={calendar.availability}
         bookings={calendar.bookings}
         from={calendar.from}
         timeZone={calendar.availability?.timeZone ?? profile.timeZone ?? "America/Toronto"}
       />
+
+      <div className="mt-8 max-w-3xl">
+        <CalendarConnections initial={calendarSync} />
+      </div>
     </DashboardPage>
   );
 }

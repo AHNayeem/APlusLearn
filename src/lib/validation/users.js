@@ -20,6 +20,29 @@ export const notificationPreferencesSchema = z.object({
   [NOTIFICATION_CHANNELS.PUSH]: z.boolean().optional(),
 });
 
+/**
+ * A mobile number, kept in both the shapes that matter (§41 Phase 2).
+ *
+ * `phone` is what the person typed, normalised the way the rest of the
+ * product already stores it. `phoneE164` is what a carrier needs, derived
+ * here rather than in the service so a request can never supply one that
+ * disagrees with the other.
+ *
+ * Canada only, because that is the marketplace: the `phone` primitive already
+ * refuses anything that is not a NANP number, and prefixing +1 is therefore
+ * correct rather than a guess.
+ */
+export const startPhoneVerificationSchema = z
+  .object({ phone })
+  .transform((v) => ({ phone: v.phone, phoneE164: `+1${v.phone}` }));
+
+export const confirmPhoneVerificationSchema = z.object({
+  code: z
+    .string()
+    .trim()
+    .regex(/^\d{6}$/, "Enter the 6-digit code we sent you."),
+});
+
 export const studentProfileSchema = z.object({
   firstName: personName,
   lastName: personName.optional().or(z.literal("").transform(() => undefined)),

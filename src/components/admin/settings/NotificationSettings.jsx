@@ -1,8 +1,8 @@
 "use client";
 
 import { ShieldAlert } from "lucide-react";
-import { Alert, Card, CardBody, CardHeader, Switch } from "@/components/ui";
-import { useSettingsSection } from "./useSettingsSection";
+import { Alert, Card, CardBody, CardHeader, Field, Input, Switch } from "@/components/ui";
+import { useSettingsSection, toNumber } from "./useSettingsSection";
 import { SectionForm } from "./SectionForm";
 
 /**
@@ -33,9 +33,14 @@ const CATEGORIES = [
   },
 ];
 
-export function NotificationSettings({ settings }) {
-  const s = useSettingsSection("notifications", { ...settings.notifications });
+export function NotificationSettings({ settings, smsProvider }) {
+  const s = useSettingsSection(
+    "notifications",
+    { ...settings.notifications },
+    { coerce: { smsPerNumberHourlyLimit: toNumber } },
+  );
   const allOff = s.form.emailEnabled === false;
+  const smsOff = s.form.smsEnabled === false;
 
   return (
     <SectionForm onSubmit={s.submit} pending={s.pending} error={s.error} fieldErrors={s.fieldErrors}>
@@ -84,6 +89,53 @@ export function NotificationSettings({ settings }) {
               Individual categories are inactive while email delivery is switched off.
             </p>
           )}
+        </CardBody>
+      </Card>
+      <Card>
+        <CardHeader
+          title="Text messages"
+          description="Only lesson events are ever texted, and only to a number its owner has confirmed."
+        />
+        <CardBody className="space-y-4">
+          {smsProvider && !smsProvider.ok ? (
+            <Alert tone="danger" title="SMS is misconfigured">
+              {smsProvider.error}
+            </Alert>
+          ) : smsProvider?.mode === "development" ? (
+            <Alert tone="warning" title="No SMS provider is configured">
+              Texts will be written to the delivery log and printed to the server console, but no
+              carrier will receive them. Set <code>SMS_PROVIDER</code> and its credentials to send
+              real messages.
+            </Alert>
+          ) : null}
+
+          <div className="rounded-xl border border-ink-200 p-4">
+            <Switch
+              label="Send notification texts"
+              description="With this off, nobody is texted — whatever they have chosen for themselves."
+              checked={s.form.smsEnabled === true}
+              onChange={s.set("smsEnabled")}
+            />
+          </div>
+
+          <Field
+            label="Maximum texts per number per hour"
+            htmlFor="set-sms-limit"
+            hint="Guards both the bill and the recipient. 0 removes the limit."
+            error={s.errorFor("smsPerNumberHourlyLimit")}
+          >
+            <Input
+              id="set-sms-limit"
+              type="number"
+              min={0}
+              max={50}
+              value={s.form.smsPerNumberHourlyLimit ?? ""}
+              onChange={s.set("smsPerNumberHourlyLimit")}
+              error={s.errorFor("smsPerNumberHourlyLimit")}
+              disabled={smsOff}
+              className="max-w-32"
+            />
+          </Field>
         </CardBody>
       </Card>
     </SectionForm>

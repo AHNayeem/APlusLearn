@@ -33,6 +33,12 @@ export default async function AdminSettingsPage() {
     recentWebhookEvents({ limit: 10 }),
   ]);
 
+  const integrations = integrationStatus();
+  // The SMS panel says plainly whether texts reach a carrier on this
+  // deployment, so an operator cannot switch the channel on and assume more
+  // than it does (§38, §41 Phase 2).
+  const smsProvider = integrations.find((row) => row.key === "sms") ?? null;
+
   return (
     <DashboardPage>
       <PageHeader
@@ -40,12 +46,16 @@ export default async function AdminSettingsPage() {
         description="Branding, appearance, metadata, marketplace rules and feature availability. Every change is recorded in the audit log."
       />
 
-      <SettingsWorkspace settings={settings} assetRules={BRANDING_ASSET_RULES} />
+      <SettingsWorkspace
+        settings={settings}
+        assetRules={BRANDING_ASSET_RULES}
+        smsProvider={smsProvider}
+      />
 
       <div className="mt-8 max-w-3xl">
         <IntegrationHealth
           appEnv={appEnv()}
-          integrations={integrationStatus()}
+          integrations={integrations}
           webhooks={webhooks}
         />
       </div>

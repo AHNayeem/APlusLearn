@@ -103,6 +103,25 @@ export function publicName(firstName = "", lastName = "") {
   return initial ? `${firstName} ${initial}.` : firstName;
 }
 
+/**
+ * How a learner's name reads to a tutor (§35, §42).
+ *
+ * A minor is a first name plus an initial unless the family opted in to
+ * sharing the full name. One implementation, because this is a privacy rule
+ * rather than a formatting preference — a second copy is a place for the two
+ * to disagree about a child's surname.
+ */
+export function learnerDisplayName(student, { forTutor = true } = {}) {
+  if (!student) return "your student";
+
+  const first = student.firstName ?? "";
+  const last = student.lastName ?? "";
+  const masked = forTutor && student.isMinor && !student.shareFullNameWithTutor;
+
+  if (masked) return publicName(first, last);
+  return `${first} ${last}`.trim() || first;
+}
+
 export function initials(firstName = "", lastName = "") {
   return `${firstName.charAt(0) ?? ""}${lastName.charAt(0) ?? ""}`.toUpperCase() || "?";
 }

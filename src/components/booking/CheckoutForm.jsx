@@ -207,6 +207,21 @@ function OrderSummary({ payment, bookings }) {
             <dt className="text-ink-500">Subtotal</dt>
             <dd className="font-semibold text-ink-900">{formatMoney(payment.subtotalCents)}</dd>
           </div>
+
+          {/*
+            Credit was applied server-side from the stored balance when this
+            payment was created — the browser never chose the amount (§42).
+            Shown here so the smaller total is explained rather than puzzling.
+          */}
+          {payment.creditAppliedCents > 0 && (
+            <div className="flex justify-between gap-3">
+              <dt className="text-ink-500">Account credit</dt>
+              <dd className="font-semibold text-success-700">
+                −{formatMoney(payment.creditAppliedCents)}
+              </dd>
+            </div>
+          )}
+
           <div className="flex justify-between gap-3 border-t border-ink-100 pt-2">
             <dt className="text-base font-bold text-ink-900">Total</dt>
             <dd className="text-base font-extrabold text-ink-900">

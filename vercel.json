@@ -5,6 +5,9 @@
     { "path": "/api/cron/booking-expiry", "schedule": "*/10 * * * *" },
     { "path": "/api/cron/verification-expiry", "schedule": "0 3 * * *" },
     { "path": "/api/cron/payouts", "schedule": "0 4 * * *" },
-    { "path": "/api/cron/request-expiry", "schedule": "0 5 * * *" }
+    { "path": "/api/cron/request-expiry", "schedule": "0 5 * * *" },
+    { "path": "/api/cron/calendar-sync", "schedule": "*/15 * * * *" },
+    { "path": "/api/cron/package-expiry", "schedule": "0 6 * * *" },
+    { "path": "/api/cron/group-settlement", "schedule": "*/30 * * * *" }
   ]
 }

@@ -8,6 +8,8 @@
  * `SITE` directly — this object is the floor beneath it, not the source.
  */
 
+import { MATCH_WEIGHTS } from "../lib/matching/weights.js";
+
 export const SITE = {
   name: "APlus Learn",
   shortName: "APlus",
@@ -236,6 +238,118 @@ export const DEFAULT_SETTINGS = {
   /** Reviews longer than this are queued for moderation. */
   autoModerateReviews: false,
 
+  /**
+   * Tutor requests and matching (§22, §41 Phase 2).
+   *
+   * §41 names "advanced matching" without defining its factors or their
+   * relative importance, so the numbers live here where an operator owns
+   * them rather than being frozen into the code. `matchWeights` is relative:
+   * the scorer rescales whatever is stored onto a total of 100, so a score
+   * is always on the same ruler however these are edited.
+   */
+  matching: {
+    /** Below this, a suggestion is not worth showing anyone. 0–100. */
+    minimumScore: 25,
+    /** Ceiling on stored suggestions per request. */
+    maxSuggestions: 20,
+    /** How many of the strongest candidates get told a request exists. */
+    notifyTopTutors: 8,
+    /** How long a request stays open before the expiry job closes it. */
+    requestTtlDays: 30,
+    /** Days before expiry that the family is warned once. */
+    requestExpiryWarningDays: 3,
+    /** Open requests one learner account may hold at a time. */
+    maxOpenRequestsPerOwner: 10,
+    /** How many tutors a family may invite to one request. */
+    maxInvitesPerRequest: 10,
+  },
+
+  matchWeights: { ...MATCH_WEIGHTS },
+
+  /**
+   * Tutor packages (§41 Phase 2).
+   *
+   * §41 names "tutor packages" and defines no pricing, discount or expiry
+   * policy, so what is fixed here is only what keeps the product honest, and
+   * the rest is the operator's:
+   *
+   *   A package may never cost more per hour than booking the same lessons
+   *   one at a time — that is checked against the tutor's own rate, not a
+   *   number invented here. A "package" that is a markup is a trap.
+   *
+   *   `expiryRefundPercent` ships at 100: nothing is kept for lessons that
+   *   were never delivered. An operator who wants a stricter forfeiture rule
+   *   has to choose it deliberately.
+   */
+  packages: {
+    enabled: true,
+    /** Lessons one package may contain. */
+    minSessions: 2,
+    maxSessions: 50,
+    /** How long a purchase stays usable, unless the tutor sets its own. */
+    defaultValidityDays: 180,
+    maxValidityDays: 730,
+    /** Packages one tutor may have on sale at once. */
+    maxActivePerTutor: 10,
+    /** Refunded share of unused lessons when a purchase expires unused. */
+    expiryRefundPercent: 100,
+    /** Days before expiry that the family is warned once. */
+    expiryWarningDays: 14,
+  },
+
+  /**
+   * Group tutoring (§41 Phase 2).
+   *
+   * §41 names group tutoring and sets no numbers, so what is fixed here is
+   * the shape that keeps it fair and the rest is the operator's.
+   *
+   * `underMinimumRefundPercent` ships at 100 and is not meaningfully
+   * negotiable: a session that does not run because too few people signed up
+   * is nobody's fault but the platform's optimism, and keeping money for a
+   * lesson that never happened would be indefensible.
+   */
+  groups: {
+    enabled: true,
+    minParticipants: 2,
+    maxParticipants: 12,
+    /** Hours before the start by which the minimum must be met. */
+    confirmationDeadlineHours: 24,
+    /** Refunded share when a session is cancelled for being under-subscribed. */
+    underMinimumRefundPercent: 100,
+    /** Learners who may wait for a seat, beyond the ones who have them. */
+    maxWaitlist: 10,
+    /** Sessions one tutor may have open for sign-ups at once. */
+    maxOpenPerTutor: 20,
+  },
+
+  /**
+   * Referrals (§41 Phase 2).
+   *
+   * §41 names "referrals" and defines no reward, so the amounts ship at zero
+   * and belong to the operator. At zero the system is still fully live —
+   * codes work, attribution is recorded, referrals qualify, both parties are
+   * notified and administrators can review them — it simply grants no money
+   * until somebody decides what a referral is worth.
+   *
+   * Credit is funded by the platform, not the tutor: a tutor is paid their
+   * full earnings on a discounted booking, and the platform's commission
+   * absorbs the difference. The alternative would make one tutor pay for
+   * another party's marketing, which is not a rule anybody agreed to.
+   */
+  referrals: {
+    enabled: true,
+    /** Credit granted to the person who shared the code. */
+    referrerRewardCents: 0,
+    /** Credit granted to the person who used it. */
+    refereeRewardCents: 0,
+    /** Completed, paid lessons before a referral qualifies. */
+    qualifyingLessons: 1,
+    /** Days a granted credit stays usable. 0 means it never expires. */
+    rewardExpiryDays: 365,
+    /** Rewarded referrals one account may earn in a rolling year. */
+    maxRewardsPerReferrer: 25,
+  },
+
   // --- Presentation ------------------------------------------------------
   // Everything below is how the platform introduces itself. None of it can
   // change a price, a refund or who may see what; those stay above.
@@ -328,6 +442,18 @@ export const DEFAULT_SETTINGS = {
     reviewEmails: true,
     payoutEmails: true,
     announcementEmails: true,
+
+    /**
+     * Text messages (§28, §41 Phase 2).
+     *
+     * `smsEnabled` is the platform switch; a person still has to confirm a
+     * mobile number and turn the channel on for themselves before anything is
+     * sent. Off by default, because a deployment with no carrier behind it
+     * should not look as though it has one.
+     */
+    smsEnabled: false,
+    /** Ceiling per number per hour. Guards both cost and nuisance. */
+    smsPerNumberHourlyLimit: 5,
   },
 };
 
@@ -338,6 +464,7 @@ export const DEFAULT_SETTINGS = {
  */
 export const SETTINGS_GROUPS = [
   "branding", "theme", "seo", "contact", "social", "footer", "features", "notifications",
+  "matching", "matchWeights", "referrals", "packages", "groups",
 ];
 
 export const PAGE_SIZES = {

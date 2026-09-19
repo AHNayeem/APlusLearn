@@ -233,3 +233,16 @@ export const badgeMutationSchema = z.object({
   action: z.enum(["GRANT", "REVOKE"]),
   reason: z.string().trim().max(500).optional(),
 });
+
+/**
+ * Changing a calendar connection (§18, §41 Phase 2).
+ *
+ * Only the three things a tutor owns: which calendar, and which of the two
+ * directions are on. Tokens, status and the account itself are not editable
+ * through any request — they come from the provider (§42).
+ */
+export const updateCalendarConnectionSchema = z.object({
+  calendarId: z.string().trim().min(1).max(512).optional(),
+  syncBusy: z.boolean().optional(),
+  pushEvents: z.boolean().optional(),
+});

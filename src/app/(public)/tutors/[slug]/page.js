@@ -3,6 +3,7 @@ import { connectToDatabase } from "@/lib/db/connect";
 import { getPublicTutorBySlug, listTutorReviews } from "@/services/tutor.service";
 import { ratingBreakdown } from "@/services/review.service";
 import { isFavourite, listStudents } from "@/services/student.service";
+import { listPublicPackages } from "@/services/package.service";
 import { getCurrentUser } from "@/lib/auth/current-user";
 import { LEARNER_ROLES, SITE } from "@/constants";
 import { formatRate } from "@/lib/utils/format";
@@ -11,6 +12,7 @@ import {
   GallerySection, AboutSection, CoursesSection, CredentialsSection, TrustSection, ReviewsSection,
 } from "@/components/tutor/TutorProfileBody";
 import { BookingWidget } from "@/components/booking/BookingWidget";
+import { PackageOffers } from "@/components/packages/PackageOffers";
 import { MessageTutorPanel } from "@/components/messaging/MessageTutorPanel";
 
 export async function generateMetadata({ params }) {
@@ -48,11 +50,13 @@ export default async function TutorProfilePage({ params }) {
 
   const user = await getCurrentUser();
 
-  const [{ items: reviews }, breakdown, saved, students] = await Promise.all([
+  const [{ items: reviews }, breakdown, saved, students, packages] = await Promise.all([
     listTutorReviews(tutor.id, { pageSize: 8 }),
     ratingBreakdown(tutor.id),
     isFavourite(tutor.id, user?.id),
     user && LEARNER_ROLES.includes(user.role) ? listStudents(user) : Promise.resolve([]),
+    // Only packages actually on sale; the service decides that, not the page (§42).
+    listPublicPackages(tutor.id),
   ]);
 
   return (
@@ -67,6 +71,16 @@ export default async function TutorProfilePage({ params }) {
             <CoursesSection tutor={tutor} />
             <CredentialsSection tutor={tutor} />
             <TrustSection tutor={tutor} />
+            <PackageOffers
+              packages={packages}
+              tutor={tutor}
+              students={students.map((student) => ({
+                id: student.id,
+                firstName: student.firstName,
+                gradeName: student.gradeName,
+              }))}
+              signedIn={Boolean(user && LEARNER_ROLES.includes(user.role))}
+            />
             <ReviewsSection tutor={tutor} reviews={reviews} breakdown={breakdown} />
             <MessageTutorPanel tutor={tutor} user={user} />
           </div>

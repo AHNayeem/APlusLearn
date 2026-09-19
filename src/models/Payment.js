@@ -13,11 +13,31 @@ const RefundSchema = new mongoose.Schema(
 
 const PaymentSchema = new mongoose.Schema(
   {
+    /**
+     * The lesson this payment is for — or absent, when it is for a package
+     * (§41 Phase 2).
+     *
+     * Was required until packages existed. Relaxed rather than duplicated: a
+     * second payment system would mean a second refund path, a second webhook
+     * handler and two places for the provider references to drift. `sparse`
+     * keeps the one-payment-per-booking guarantee for every row that has a
+     * booking, while letting a package payment have none.
+     *
+     * Exactly one of `bookingId` and `packagePurchaseId` is set; the schema
+     * validator below enforces that.
+     */
     bookingId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Booking",
-      required: true,
       unique: true,
+      sparse: true,
+      index: true,
+    },
+    packagePurchaseId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "PackagePurchase",
+      unique: true,
+      sparse: true,
       index: true,
     },
     purchaserId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
@@ -30,6 +50,19 @@ const PaymentSchema = new mongoose.Schema(
     tutorEarningsCents: { type: Number, required: true, min: 0 },
     totalCents: { type: Number, required: true, min: 0 },
     currency: { type: String, default: "CAD" },
+
+    /**
+     * Account credit applied to this payment (§41 Phase 2).
+     *
+     * `totalCents` is what the card is charged; `subtotalCents` remains the
+     * lesson's value, and `tutorEarningsCents` is untouched — the tutor is
+     * paid in full and the platform's commission absorbs the credit. Storing
+     * the applied amount is what lets it be returned if the payment never
+     * settles, or the booking is later refunded.
+     */
+    creditAppliedCents: { type: Number, default: 0, min: 0 },
+    /** Set once the applied credit has been given back, so it happens once. */
+    creditReleasedAt: { type: Date },
 
     status: {
       type: String,
@@ -69,6 +102,21 @@ const PaymentSchema = new mongoose.Schema(
   },
   { timestamps: true },
 );
+
+/**
+ * A payment is for exactly one thing. Without this a row could be for both a
+ * lesson and a package, and every refund would have to guess which.
+ */
+PaymentSchema.pre("validate", async function requireExactlyOneSubject() {
+  const hasBooking = Boolean(this.bookingId);
+  const hasPackage = Boolean(this.packagePurchaseId);
+  if (hasBooking === hasPackage) {
+    this.invalidate(
+      "bookingId",
+      "A payment must be for either a booking or a package, not both or neither.",
+    );
+  }
+});
 
 PaymentSchema.index({ purchaserId: 1, createdAt: -1 });
 PaymentSchema.index({ status: 1, paidAt: -1 });

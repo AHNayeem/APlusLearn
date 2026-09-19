@@ -35,8 +35,11 @@ import { requireParticipant, requireVerifiedEmail } from "@/lib/auth/assert";
 import { toPlain } from "@/lib/utils/serialize";
 import { publicReference } from "@/lib/auth/tokens";
 import { addDays, addMinutes } from "@/lib/utils/time";
-import { formatDate, formatTime, formatMoney, formatDuration, publicName } from "@/lib/utils/format";
+import {
+  formatDate, formatTime, formatMoney, formatDuration, publicName, learnerDisplayName,
+} from "@/lib/utils/format";
 import { calculateLessonPrice, calculateSeriesTotal, rateForCourse } from "@/lib/booking/pricing";
+import { packageSessionPrice } from "@/lib/booking/packages";
 import {
   resolveCancellation,
   resolveNoShow,
@@ -56,11 +59,26 @@ import {
   refundPayment,
   providerPaymentStatus,
   markPaymentPaid,
+  returnAppliedCredit,
 } from "./payment.service";
 import { notify } from "./notification.service";
 import { recordAudit } from "./audit.service";
 import { refreshNextAvailable } from "./availability.service";
+import {
+  externalBusyPeriods,
+  pushBookingEvent,
+  updateBookingEvent,
+  removeBookingEvent,
+} from "./calendar.service";
 import { refreshTutorStats } from "./tutor.service";
+import { qualifyReferralFor } from "./referral.service";
+import {
+  activatePackagePurchase,
+  consumePackageSession,
+  linkPackageBooking,
+  returnPackageSession,
+} from "./package.service";
+import { onGroupBookingConfirmed, releaseGroupSeat } from "./group.service";
 
 /**
  * Booking lifecycle (§19, §26).
@@ -192,14 +210,22 @@ export async function createBooking(input, actor) {
   const startTimes = seriesStartTimes(input.startAt, input.recurrence, input.occurrences);
   const lastEnd = addMinutes(startTimes.at(-1), input.durationMinutes);
 
-  const existing = await Booking.find({
-    tutorProfileId: tutor._id,
-    status: { $in: BLOCKING_BOOKING_STATUSES },
-    startAt: { $lt: lastEnd },
-    endAt: { $gt: new Date(startTimes[0]) },
-  })
-    .select("startAt endAt")
-    .lean();
+  const [storedBookings, external] = await Promise.all([
+    Booking.find({
+      tutorProfileId: tutor._id,
+      status: { $in: BLOCKING_BOOKING_STATUSES },
+      startAt: { $lt: lastEnd },
+      endAt: { $gt: new Date(startTimes[0]) },
+    })
+      .select("startAt endAt")
+      .lean(),
+    // The picker already subtracts these, but the picker is display. This is
+    // the guarantee: a direct API call cannot book over a tutor's external
+    // commitment just because it skipped the UI (§18, §42).
+    externalBusyPeriods(tutor._id, { from: new Date(startTimes[0]), to: lastEnd }),
+  ]);
+
+  const existing = [...storedBookings, ...external];
 
   // Validate every occurrence before writing any of them.
   for (const startAt of startTimes) {
@@ -219,11 +245,46 @@ export async function createBooking(input, actor) {
     }
   }
 
-  const price = calculateLessonPrice({
-    hourlyRateCents: rateForCourse(tutor, input.courseId),
-    durationMinutes: input.durationMinutes,
-    commissionPercent: settings.commissionPercent,
-  });
+  /**
+   * Paying with a package (§41 Phase 2).
+   *
+   * The session is drawn *before* any booking is written, because drawing is
+   * the operation that can legitimately fail — an expired package, a balance
+   * somebody else's booking just emptied — and failing after a booking exists
+   * would leave a lesson nobody has paid for.
+   *
+   * A package covers exactly one lesson, so a recurring series cannot be paid
+   * for from one: each occurrence would need its own draw, and a series that
+   * ran out halfway would be half-booked. The family books them one at a time.
+   */
+  let packagePurchase = null;
+  if (input.packagePurchaseId) {
+    if (input.recurrence && input.recurrence !== RECURRENCE.NONE) {
+      throw new BusinessRuleError(
+        "Book package lessons one at a time, so each one can be scheduled when it suits you.",
+        "PACKAGE_NO_SERIES",
+      );
+    }
+
+    packagePurchase = await consumePackageSession({
+      purchaseId: input.packagePurchaseId,
+      actor,
+      tutorProfileId: tutor._id,
+      courseId: course._id,
+      durationMinutes: input.durationMinutes,
+      mode: input.mode,
+    });
+  }
+
+  // A package lesson is priced from the terms captured when the package was
+  // bought, not from today's rate — the family already paid for it (§20).
+  const price = packagePurchase
+    ? packageSessionPrice(packagePurchase, { index: packagePurchase.sessionsUsed - 1 })
+    : calculateLessonPrice({
+        hourlyRateCents: rateForCourse(tutor, input.courseId),
+        durationMinutes: input.durationMinutes,
+        commissionPercent: settings.commissionPercent,
+      });
 
   const seriesId = new Types.ObjectId();
   const created = [];
@@ -251,7 +312,13 @@ export async function createBooking(input, actor) {
       endAt: end,
       durationMinutes: input.durationMinutes,
       timeZone: tutor.timeZone ?? availability.timeZone,
-      status: BOOKING_STATUS.PENDING_PAYMENT,
+      // A package lesson is paid for already, so it skips the hold entirely
+      // and is confirmed on creation. It is an ordinary booking in every
+      // other respect — same cancellation policy, same payout (§41 Phase 2).
+      status: packagePurchase ? BOOKING_STATUS.CONFIRMED : BOOKING_STATUS.PENDING_PAYMENT,
+      confirmedAt: packagePurchase ? new Date() : undefined,
+      packagePurchaseId: packagePurchase?._id,
+      paymentId: packagePurchase?.paymentId,
       price,
       recurrence: input.recurrence,
       seriesId: input.recurrence === RECURRENCE.NONE ? undefined : seriesId,
@@ -268,6 +335,37 @@ export async function createBooking(input, actor) {
   // the same slot can both pass it. This closes that window before any money
   // is taken (§18, §42).
   await settleSlotRace(created, tutor);
+
+  // A package lesson has already been paid for, so there is no checkout: the
+  // booking is confirmed here, through exactly the same path a settled
+  // payment takes — meeting link, notifications, calendar push and all.
+  if (packagePurchase) {
+    await linkPackageBooking(packagePurchase._id, created[0]._id);
+    await confirmPackageBooking(created[0]);
+
+    await recordAudit({
+      actor,
+      action: AUDIT_ACTIONS.PACKAGE_SESSION_USED,
+      entityType: "PackagePurchase",
+      entityId: packagePurchase._id,
+      metadata: {
+        booking: created[0].reference,
+        remaining: packagePurchase.sessionsTotal - packagePurchase.sessionsUsed,
+      },
+    });
+
+    return {
+      bookings: toPlain(await Booking.find({ _id: { $in: created.map((b) => b._id) } })),
+      payment: null,
+      paidFromPackage: {
+        id: String(packagePurchase._id),
+        title: packagePurchase.title,
+        sessionsRemaining: packagePurchase.sessionsTotal - packagePurchase.sessionsUsed,
+      },
+      total: calculateSeriesTotal(price, created.length),
+      meetingProvider: input.meetingProvider,
+    };
+  }
 
   // One payment covers the whole series.
   const payment = await createPaymentForBooking({
@@ -290,16 +388,42 @@ export async function createBooking(input, actor) {
 }
 
 /**
+ * Everything a settled payment would have done for one booking.
+ *
+ * A package lesson has no payment event of its own, so this is what stands in
+ * for it — deliberately the same steps, in the same order, as
+ * `confirmBookings` takes.
+ */
+async function confirmPackageBooking(booking) {
+  if (booking.mode === LESSON_MODES.ONLINE) {
+    booking.meeting = await createMeetingFor(booking, booking.meetingProvider);
+    await booking.save();
+  }
+
+  await Promise.all([
+    refreshNextAvailable(booking.tutorProfileId),
+    notifyBookingConfirmed([booking]),
+    pushBookingEvent(booking).catch((error) =>
+      console.warn("[booking] calendar push failed:", error.message),
+    ),
+  ]);
+}
+
+/**
  * Find any stored booking that overlaps one of these lessons (§18).
  *
  * The windows are tested one occurrence at a time, never as a single envelope
  * — a weekly series legitimately leaves the days in between free, and an
  * envelope test would refuse a booking sitting in one of those gaps.
  */
-function overlapQuery(lessons, tutorProfileId, excludeIds = []) {
+function overlapQuery(lessons, tutorProfileId, excludeIds = [], { groupSessionId } = {}) {
   return {
     tutorProfileId,
     ...(excludeIds.length ? { _id: { $nin: excludeIds } } : {}),
+    // Learners in the same group session share one hour by design, so they do
+    // not conflict with each other. They still block everything else, because
+    // the tutor is genuinely busy (§41 Phase 2).
+    ...(groupSessionId ? { groupSessionId: { $ne: groupSessionId } } : {}),
     status: { $in: BLOCKING_BOOKING_STATUSES },
     $or: lessons.map((l) => ({ startAt: { $lt: l.endAt }, endAt: { $gt: l.startAt } })),
   };
@@ -350,6 +474,20 @@ function seriesStartTimes(startAt, recurrence, occurrences) {
  * here, once there is actually something to attend (§27).
  */
 export async function confirmBookings(paymentId, { meetingProvider } = {}) {
+  // This is the funnel every settled payment runs through — the webhook and
+  // the development capture route both land here — so a package bought with
+  // that payment is activated in the same place a lesson is confirmed. Putting
+  // it anywhere else would mean a second call site that could forget (§41).
+  const activated = await activatePackagePurchase(paymentId).catch((error) => {
+    console.error("[booking] package activation failed:", error.message);
+    return { activated: 0 };
+  });
+  if (activated.activated) {
+    // A package payment has no bookings of its own; the lessons are booked
+    // later, one at a time, against the balance it created.
+    return { confirmed: 0, packageActivated: activated.activated };
+  }
+
   // EXPIRED is included for one narrow case: a payment that settles in the
   // moments after the sweep released its hold — an async payment method, or a
   // webhook that arrived late. Reviving is conditional on the slot still
@@ -405,9 +543,26 @@ export async function confirmBookings(paymentId, { meetingProvider } = {}) {
 
   if (!confirmed.length) return { confirmed: 0, unconfirmable: unconfirmable.length };
 
+  // A group booking also moves its enrolment on, and may be the one that
+  // takes the session past its minimum (§41 Phase 2).
+  for (const booking of confirmed) {
+    if (!booking.groupSessionId) continue;
+    await onGroupBookingConfirmed(booking).catch((error) =>
+      console.error("[booking] group confirmation failed:", error.message),
+    );
+  }
+
   await Promise.all([
     refreshNextAvailable(confirmed[0].tutorProfileId),
     notifyBookingConfirmed(confirmed),
+    // Best-effort and deliberately last: a calendar that is down must never
+    // leave a paid lesson unconfirmed. Failures are recorded on the booking
+    // and retried by the `calendar-sync` job (§18, §41 Phase 2).
+    ...confirmed.map((booking) =>
+      pushBookingEvent(booking).catch((error) =>
+        console.warn("[booking] calendar push failed:", error.message),
+      ),
+    ),
   ]);
 
   return {
@@ -672,7 +827,17 @@ async function closeAbandonedPayment(paymentId) {
       $unset: { providerCheckoutUrl: "", checkoutExpiresAt: "" },
     },
   );
-  return claim.modifiedCount === 1;
+  if (claim.modifiedCount !== 1) return false;
+
+  // Credit applied to a checkout that was abandoned goes back to the account
+  // it came from. Keyed on the payment, so a sweep that runs twice returns it
+  // once (§41 Phase 2).
+  const payment = await Payment.findById(paymentId).lean();
+  await returnAppliedCredit(payment, "Returned from a checkout that was not completed.").catch(
+    (error) => console.warn("[booking] credit return failed:", error.message),
+  );
+
+  return true;
 }
 
 async function notifyHoldReleased(booking) {
@@ -822,11 +987,9 @@ async function notifyBookingConfirmed(bookings) {
     }),
   });
 
-  const studentName = student
-    ? student.isMinor && !student.shareFullNameWithTutor
-      ? `${student.firstName} ${student.lastName?.charAt(0) ?? ""}.`
-      : `${student.firstName} ${student.lastName ?? ""}`.trim()
-    : "your student";
+  // The masking rule lives in one place, so a minor's surname cannot leak
+  // here while staying hidden everywhere else (§35, §42).
+  const studentName = learnerDisplayName(student);
 
   await notify({
     userId: first.tutorUserId,
@@ -1031,7 +1194,9 @@ export async function cancelBooking(id, { reason, cancelSeries }, actor) {
         })
       : [booking];
 
-  let totalRefund = 0;
+  // Kept only to size the notification and the audit entry; the money that
+  // actually moves is `cashRefund` below, which excludes package lessons.
+  let policyRefundTotal = 0;
   const cancelled = [];
 
   for (const target of targets) {
@@ -1065,13 +1230,53 @@ export async function cancelBooking(id, { reason, cancelSeries }, actor) {
     if (target.mode === LESSON_MODES.ONLINE) await releaseMeetingFor(target);
 
     await target.save();
-    totalRefund += outcome.refundCents;
+    policyRefundTotal += outcome.refundCents;
     cancelled.push(target);
   }
 
-  if (totalRefund > 0 && booking.paymentId) {
+  /**
+   * A cancelled package lesson goes back to the package, not to a card
+   * (§41 Phase 2).
+   *
+   * The block was bought as a block, so the natural remedy is the lesson
+   * itself rather than a fraction of the money. The *decision* still comes
+   * from the one cancellation policy every path uses: a cancellation that
+   * would have been refunded in full returns the session; one that would only
+   * have been partly refunded consumes it, exactly as a late cancellation
+   * costs a single-lesson purchaser.
+   */
+  const packageReturns = [];
+  const cashCancellations = [];
+  for (const target of cancelled) {
+    // A seat in a group session goes back into the session, so somebody on
+    // the waiting list can be offered it (§41 Phase 2).
+    if (target.groupSessionId) {
+      await releaseGroupSeat(target._id, {
+        refundedCents: target.cancellation?.refundCents ?? 0,
+      }).catch((error) => console.warn("[booking] group seat release failed:", error.message));
+    }
+
+    if (!target.packagePurchaseId) {
+      cashCancellations.push(target);
+      continue;
+    }
+    if (target.cancellation?.refundPercent === 100) {
+      const returned = await returnPackageSession(target.packagePurchaseId, target._id);
+      if (returned.returned) packageReturns.push(target);
+    }
+  }
+
+  // Only lessons actually paid for on their own refund money. Summing every
+  // cancellation here would refund a package lesson twice over — once as a
+  // returned session and once as cash.
+  const cashRefund = cashCancellations.reduce(
+    (sum, target) => sum + (target.cancellation?.refundCents ?? 0),
+    0,
+  );
+
+  if (cashRefund > 0 && booking.paymentId && !booking.packagePurchaseId) {
     await refundPayment(booking.paymentId, {
-      amountCents: totalRefund,
+      amountCents: cashRefund,
       reason: `Cancellation — ${cancelled[0].cancellation.policyApplied}`,
       issuedBy: actor.id,
     });
@@ -1086,20 +1291,39 @@ export async function cancelBooking(id, { reason, cancelSeries }, actor) {
   }
   await refreshNextAvailable(booking.tutorProfileId);
 
+  // A cancelled lesson comes off the tutor's own calendar too — a stale event
+  // is an hour they believe is taken (§18, §41 Phase 2).
+  await Promise.all(
+    cancelled.map((target) =>
+      removeBookingEvent(target).catch((error) =>
+        console.warn("[booking] calendar cleanup failed:", error.message),
+      ),
+    ),
+  );
+
   const abuse = await assessAbuse(actor, role, settings);
-  await notifyCancellation(cancelled, role, totalRefund);
+  await notifyCancellation(cancelled, role, cashRefund);
 
   await recordAudit({
     actor,
     action: AUDIT_ACTIONS.BOOKING_CANCELLED,
     entityType: "Booking",
     entityId: booking._id,
-    metadata: { role, count: cancelled.length, refundCents: totalRefund, reason },
+    metadata: {
+      role,
+      count: cancelled.length,
+      refundCents: cashRefund,
+      policyRefundCents: policyRefundTotal,
+      sessionsReturned: packageReturns.length,
+      reason,
+    },
   });
 
   return {
     cancelled: cancelled.length,
-    refundCents: totalRefund,
+    refundCents: cashRefund,
+    // What actually happened for a package lesson: the session came back.
+    sessionsReturned: packageReturns.length,
     policy: cancelled[0].cancellation,
     abuse,
   };
@@ -1230,6 +1454,15 @@ export async function completeBooking(id, { outcome, tutorNotes }, actor) {
 
   await booking.save();
   await refreshTutorStats(booking.tutorProfileId);
+
+  // A completed, paid lesson is what makes a referral qualify — not a
+  // sign-up, and not a booking. Best-effort: a referral problem must never
+  // stop a tutor marking a lesson done (§41 Phase 2).
+  if (outcome === BOOKING_STATUS.COMPLETED) {
+    await qualifyReferralFor(booking.purchaserId).catch((error) =>
+      console.warn("[booking] referral qualification failed:", error.message),
+    );
+  }
 
   await notify({
     userId: booking.purchaserId,
@@ -1434,6 +1667,12 @@ export async function rescheduleBooking(id, { startAt, durationMinutes, reason }
   }
 
   await refreshNextAvailable(booking.tutorProfileId);
+
+  // The same link is updated in place, so a moved lesson moves rather than
+  // appearing twice on the tutor's calendar (§18, §41 Phase 2).
+  await updateBookingEvent(booking).catch((error) =>
+    console.warn("[booking] calendar update failed:", error.message),
+  );
 
   await recordAudit({
     actor,

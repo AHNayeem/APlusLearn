@@ -34,6 +34,14 @@ export function BookingWidget({ tutor, user, students = [] }) {
   const [durationMinutes, setDurationMinutes] = useState(DEFAULT_LESSON_DURATION);
   const [startAt, setStartAt] = useState("");
   const [recurrence, setRecurrence] = useState(RECURRENCE.NONE);
+  /**
+   * Packages this family already paid for that could cover this lesson
+   * (§41 Phase 2). Offered so nobody is charged twice for something they have
+   * already bought. The server re-checks ownership, balance, tutor, course,
+   * duration and mode — picking one here proves nothing (§42).
+   */
+  const [usablePackages, setUsablePackages] = useState([]);
+  const [packagePurchaseId, setPackagePurchaseId] = useState("");
   const [occurrences, setOccurrences] = useState(4);
   const [meetingProvider, setMeetingProvider] = useState(
     tutor.onlineMeetingProviders?.[0] ?? MEETING_PROVIDERS.ZOOM,
@@ -96,6 +104,36 @@ export function BookingWidget({ tutor, user, students = [] }) {
     };
   }, [tutor.id, courseId, durationMinutes, recurrence, occurrences]);
 
+  useEffect(() => {
+    if (!user || !courseId) return undefined;
+
+    let cancelled = false;
+    api
+      .get(
+        `/api/packages/usable${qs({
+          tutorProfileId: tutor.id,
+          courseId,
+          durationMinutes,
+          mode,
+        })}`,
+      )
+      .then((data) => {
+        if (cancelled) return;
+        setUsablePackages(data.packages ?? []);
+      })
+      .catch(() => {
+        if (!cancelled) setUsablePackages([]);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user, tutor.id, courseId, durationMinutes, mode]);
+
+  // A package covers one lesson, so it is not offered for a repeating series.
+  const selectedPackage = usablePackages.find((p) => p.id === packagePurchaseId) ?? null;
+  const payWithPackage = Boolean(selectedPackage) && recurrence === RECURRENCE.NONE;
+
   const { submit, pending, error, fieldErrors } = useSubmit(async () => {
     const payload = {
       tutorProfileId: tutor.id,
@@ -107,6 +145,7 @@ export function BookingWidget({ tutor, user, students = [] }) {
       recurrence,
       occurrences: recurrence === RECURRENCE.NONE ? 1 : occurrences,
       studentNotes: notes || undefined,
+      ...(payWithPackage ? { packagePurchaseId } : {}),
       ...(mode === LESSON_MODES.ONLINE ? { meetingProvider } : {}),
       ...(mode === LESSON_MODES.IN_PERSON
         ? {
@@ -120,10 +159,23 @@ export function BookingWidget({ tutor, user, students = [] }) {
     };
 
     const result = await api.post("/api/bookings", payload);
+
+    // A package lesson is paid for already, so there is no checkout to send
+    // anybody to — it is confirmed the moment it is booked.
+    if (result.paidFromPackage) {
+      toast.success(
+        "Lesson booked",
+        `${result.paidFromPackage.sessionsRemaining} lesson${result.paidFromPackage.sessionsRemaining === 1 ? "" : "s"} left in ${result.paidFromPackage.title}.`,
+      );
+      router.push(`/bookings/${result.bookings[0].id}`);
+      return result;
+    }
+
     toast.success("Lesson reserved", "Complete payment to confirm it.");
     router.push(`/bookings/checkout/${result.payment.id}`);
     return result;
   });
+
 
   // --- Signed out: search and browsing are public, booking is not (§9) ---
   if (!user) {
@@ -337,6 +389,32 @@ export function BookingWidget({ tutor, user, students = [] }) {
           )}
         </div>
 
+        {usablePackages.length > 0 && (
+          <Field
+            label="Pay with a package"
+            htmlFor="booking-package"
+            hint={
+              recurrence === RECURRENCE.NONE
+                ? "You've already paid for these lessons."
+                : "Package lessons are booked one at a time, so this doesn't apply to a repeating series."
+            }
+          >
+            <Select
+              id="booking-package"
+              value={packagePurchaseId}
+              onChange={(e) => setPackagePurchaseId(e.target.value)}
+              disabled={recurrence !== RECURRENCE.NONE}
+            >
+              <option value="">Pay for this lesson now</option>
+              {usablePackages.map((pkg) => (
+                <option key={pkg.id} value={pkg.id}>
+                  {pkg.title} — {pkg.sessionsTotal - pkg.sessionsUsed} left
+                </option>
+              ))}
+            </Select>
+          </Field>
+        )}
+
         <Field label="Repeat this lesson?" htmlFor="booking-recurrence">
           <Select
             id="booking-recurrence"
@@ -386,15 +464,41 @@ export function BookingWidget({ tutor, user, students = [] }) {
           />
         </Field>
 
-        <PriceSummary quote={quote} startAt={startAt} timeZone={slots.timeZone} recurrence={recurrence} />
+        {payWithPackage ? (
+          <div className="rounded-xl border border-success-200 bg-success-50/60 p-4">
+            <p className="text-sm font-semibold text-ink-800">
+              Paid from {selectedPackage.title}
+            </p>
+            <p className="mt-1 text-xs text-ink-600">
+              This lesson uses one of the{" "}
+              {selectedPackage.sessionsTotal - selectedPackage.sessionsUsed} you have left. Nothing
+              to pay now, and it&rsquo;s confirmed straight away.
+            </p>
+          </div>
+        ) : (
+          <PriceSummary
+            quote={quote}
+            startAt={startAt}
+            timeZone={slots.timeZone}
+            recurrence={recurrence}
+          />
+        )}
 
         <Button type="submit" size="lg" fullWidth loading={pending} disabled={!canSubmit}>
-          {pending ? "Reserving…" : "Continue to payment"}
+          {pending
+            ? payWithPackage
+              ? "Booking…"
+              : "Reserving…"
+            : payWithPackage
+              ? "Book this lesson"
+              : "Continue to payment"}
         </Button>
 
         <p className="flex items-center justify-center gap-1.5 text-xs text-ink-500">
           <Lock className="size-3" />
-          You won&rsquo;t be charged until the next step
+          {payWithPackage
+            ? "Already paid for — nothing is charged"
+            : "You won't be charged until the next step"}
         </p>
       </form>
     </BookingShell>

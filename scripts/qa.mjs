@@ -38,7 +38,7 @@ function createClient() {
 
   return async function request(
     path,
-    { method = "GET", body, form, raw = false, headers: extraHeaders } = {},
+    { method = "GET", body, rawBody, form, raw = false, headers: extraHeaders } = {},
   ) {
     // `fetch` sets its own multipart Content-Type with the boundary, so a
     // FormData upload must not have one imposed on it.
@@ -50,7 +50,9 @@ function createClient() {
     const response = await fetch(`${BASE}${path}`, {
       method: form ? "POST" : method,
       headers,
-      body: form ?? (body ? JSON.stringify(body) : undefined),
+      // `rawBody` is for the endpoints that do not speak JSON — the carrier
+      // callbacks, which are form-encoded and signed over their exact bytes.
+      body: form ?? rawBody ?? (body ? JSON.stringify(body) : undefined),
       redirect: "manual",
     });
 
@@ -383,6 +385,1051 @@ async function main() {
   const requestId = request.payload?.data?.request?.id;
   const matches = await parent(`/api/requests/${requestId}/matches`);
   check("match list retrievable", matches.ok && Array.isArray(matches.payload.data.matches));
+
+  // --- Tutor requests: the Phase 2 lifecycle over real HTTP ----------------
+  section("Tutor requests — edit, invite, respond, moderate");
+
+  const myTutorProfile = await tutor("/api/tutor/profile");
+  const myTutorProfileId = myTutorProfile.payload?.data?.profile?.id;
+  check("tutor can read their own profile id", Boolean(myTutorProfileId));
+
+  // The course this tutor actually teaches, so the request is one they match.
+  const myCourseId = myTutorProfile.payload?.data?.profile?.courses?.[0]?.courseId ?? courseId;
+
+  const requestBody = (over = {}) => ({
+    studentProfileId: studentId,
+    courseId: myCourseId,
+    modes: ["ONLINE"],
+    preferredWindows: ["WEEKDAY_EVENING"],
+    sessionsPerWeek: 1,
+    preferredDurationMinutes: 60,
+    budgetMaxCents: 20000,
+    goal: "QA run — Phase 2 request lifecycle. Safe to delete.",
+    ...over,
+  });
+
+  // A client cannot decide its own lifecycle state or counters (§42).
+  const injected = await parent("/api/requests", {
+    method: "POST",
+    body: requestBody({
+      status: "MATCHED",
+      interestedCount: 999,
+      viewCount: 999,
+      reference: "REQ-HACKED",
+      expiresAt: "2099-01-01T00:00:00.000Z",
+    }),
+  });
+  check("request posted with injected fields", injected.ok, JSON.stringify(injected.payload?.error));
+  const injectedRequest = injected.payload?.data?.request;
+  check("an injected status is ignored — the server decides", injectedRequest?.status === "OPEN");
+  check("an injected reference is ignored", injectedRequest?.reference !== "REQ-HACKED");
+  check("injected counters are ignored", (injectedRequest?.interestedCount ?? 0) === 0);
+  const publicRequestId = injectedRequest?.id;
+
+  // --- editing -------------------------------------------------------------
+  const edit = await parent(`/api/requests/${publicRequestId}`, {
+    method: "PATCH",
+    body: { goal: "QA run — edited goal, still safe to delete.", budgetMaxCents: 22000 },
+  });
+  check("owner can edit an open request", edit.ok, JSON.stringify(edit.payload?.error));
+  check("editing re-runs matching", typeof edit.payload?.data?.matchCount === "number");
+
+  const tutorEdit = await tutor(`/api/requests/${publicRequestId}`, {
+    method: "PATCH",
+    body: { goal: "A tutor rewriting the family's brief." },
+  });
+  check("a tutor cannot edit a family's request", tutorEdit.status === 403);
+
+  const tutorCancel = await tutor(`/api/requests/${publicRequestId}`, { method: "DELETE" });
+  check("a tutor cannot cancel a family's request", tutorCancel.status === 403);
+
+  const badEdit = await parent(`/api/requests/${publicRequestId}`, {
+    method: "PATCH",
+    body: { budgetMinCents: 900000, budgetMaxCents: 1000 },
+  });
+  check("an inverted budget is refused on edit", badEdit.status === 422);
+
+  // --- invite-only visibility ----------------------------------------------
+  const privateCreate = await parent("/api/requests", {
+    method: "POST",
+    body: requestBody({ visibility: "INVITE_ONLY" }),
+  });
+  check("invite-only request posted", privateCreate.ok, JSON.stringify(privateCreate.payload?.error));
+  const privateRequestId = privateCreate.payload?.data?.request?.id;
+
+  const peek = await tutor(`/api/requests/${privateRequestId}`);
+  check("an uninvited tutor cannot read an invite-only request", peek.status === 404);
+
+  const sneakyPitch = await tutor(`/api/requests/${privateRequestId}/interest`, {
+    method: "POST",
+    body: { message: "Letting myself in to a request I was never shown. ".repeat(2) },
+  });
+  check("an uninvited tutor cannot respond to an invite-only request", sneakyPitch.status === 404);
+
+  const tutorInvites = await tutor(`/api/requests/${privateRequestId}/invite`, {
+    method: "POST",
+    body: { tutorProfileIds: [myTutorProfileId] },
+  });
+  check("a tutor cannot invite themselves to a request", tutorInvites.status === 403);
+
+  const invite = await parent(`/api/requests/${privateRequestId}/invite`, {
+    method: "POST",
+    body: { tutorProfileIds: [myTutorProfileId] },
+  });
+  check("owner can invite a tutor", invite.ok, JSON.stringify(invite.payload?.error));
+  check("the invitation counted exactly one tutor", invite.payload?.data?.invited === 1);
+
+  const invitedView = await tutor(`/api/requests/${privateRequestId}`);
+  check("an invited tutor can now read the request", invitedView.ok);
+  check("the tutor view carries their own match state",
+    invitedView.payload?.data?.match?.status === "INVITED");
+  check("the tutor view says they may respond", invitedView.payload?.data?.canRespond === true);
+
+  const pitch = await tutor(`/api/requests/${privateRequestId}/interest`, {
+    method: "POST",
+    body: { message: "QA run — I teach this course and have Tuesday evenings free this term." },
+  });
+  check("an invited tutor can respond", pitch.ok, JSON.stringify(pitch.payload?.error));
+
+  const pitchAgain = await tutor(`/api/requests/${privateRequestId}/interest`, {
+    method: "POST",
+    body: { message: "QA run — a second pitch that should be refused as a duplicate." },
+  });
+  check("a tutor cannot respond twice", pitchAgain.status === 409);
+
+  const withdraw = await tutor(`/api/requests/${privateRequestId}/interest`, {
+    method: "DELETE",
+    body: { action: "WITHDRAW", reason: "QA run." },
+  });
+  check("a tutor can withdraw their response", withdraw.ok, JSON.stringify(withdraw.payload?.error));
+
+  // --- admin moderation -----------------------------------------------------
+  const parentModerationList = await parent("/api/admin/requests");
+  check("a family cannot read the moderation queue", parentModerationList.status === 403);
+
+  const tutorModerationList = await tutor("/api/admin/requests");
+  check("a tutor cannot read the moderation queue", tutorModerationList.status === 403);
+
+  const queue = await admin("/api/admin/requests?status=OPEN");
+  check("admin can read the moderation queue",
+    queue.ok && Array.isArray(queue.payload?.data?.requests));
+
+  const parentModeratesRequest = await parent(`/api/admin/requests/${publicRequestId}`, {
+    method: "PATCH",
+    body: { action: "REMOVE", note: "Removing my own request through the admin API." },
+  });
+  check("a family cannot moderate a request", parentModeratesRequest.status === 403);
+
+  const remove = await admin(`/api/admin/requests/${publicRequestId}`, {
+    method: "PATCH",
+    body: { action: "REMOVE", note: "QA run — removing and restoring." },
+  });
+  check("admin can remove a request", remove.ok, JSON.stringify(remove.payload?.error));
+  check("a removed request is REMOVED", remove.payload?.data?.request?.status === "REMOVED");
+
+  const removedToTutor = await tutor(`/api/requests/${publicRequestId}`);
+  check("a removed request is invisible to tutors", removedToTutor.status === 404);
+
+  const restore = await admin(`/api/admin/requests/${publicRequestId}`, {
+    method: "PATCH",
+    body: { action: "RESTORE", note: "QA run — restored." },
+  });
+  check("admin can restore a removed request", restore.ok);
+  check("a restored request is open again", restore.payload?.data?.request?.status === "OPEN");
+
+  const noNote = await admin(`/api/admin/requests/${publicRequestId}`, {
+    method: "PATCH",
+    body: { action: "REMOVE" },
+  });
+  check("moderation without a recorded reason is refused", noNote.status === 422);
+
+  // --- closing --------------------------------------------------------------
+  for (const id of [publicRequestId, privateRequestId]) {
+    await parent(`/api/requests/${id}/close`, {
+      method: "POST",
+      body: { reason: "NO_LONGER_NEEDED" },
+    });
+  }
+  const closed = await parent(`/api/requests/${publicRequestId}`);
+  check("a closed request reads as CLOSED", closed.payload?.data?.request?.status === "CLOSED");
+
+  const editClosed = await parent(`/api/requests/${publicRequestId}`, {
+    method: "PATCH",
+    body: { goal: "QA run — editing a closed request should be refused." },
+  });
+  check("a closed request cannot be edited", editClosed.status === 422);
+
+  // --- Group tutoring: capacity, privacy and authorization -----------------
+  section("Group sessions — capacity, privacy and authorization");
+
+  const publicGroups = await anon("/api/groups");
+  check("group sessions are browsable without an account",
+    publicGroups.ok && Array.isArray(publicGroups.payload?.data?.sessions));
+  check("a public listing never carries a private address",
+    !JSON.stringify(publicGroups.payload ?? {}).includes("addressLine"));
+
+  const groupCourse = (myTutorProfile.payload?.data?.profile?.courses ?? [])[0];
+  let groupSessionId = null;
+
+  if (!groupCourse) {
+    check("group session flow", false, "the seeded tutor teaches no courses");
+  } else {
+    const groupSlots = await parent(
+      `/api/tutors/${myTutorProfileId}/availability?days=28&durationMinutes=60`,
+    );
+    const groupSlot = (groupSlots.payload?.data?.days ?? [])
+      .filter((d) => d.slots.length > 0)
+      .map((d) => d.slots.at(-1).startAt)
+      .at(-1);
+
+    const parentCreates = await parent("/api/tutor/groups", {
+      method: "POST",
+      body: {
+        title: "QA run — a family running a class",
+        courseId: groupCourse.courseId,
+        mode: "ONLINE",
+        meetingProvider: "ZOOM",
+        startAt: groupSlot,
+        durationMinutes: 60,
+        minParticipants: 2,
+        maxParticipants: 4,
+        pricePerSeatCents: 2500,
+      },
+    });
+    check("a family cannot create a group session", parentCreates.status === 403);
+
+    const badCapacity = await tutor("/api/tutor/groups", {
+      method: "POST",
+      body: {
+        title: "QA run — inverted capacity",
+        courseId: groupCourse.courseId,
+        mode: "ONLINE",
+        meetingProvider: "ZOOM",
+        startAt: groupSlot,
+        durationMinutes: 60,
+        minParticipants: 6,
+        maxParticipants: 2,
+        pricePerSeatCents: 2500,
+      },
+    });
+    check("a minimum larger than the maximum is refused", badCapacity.status === 422);
+
+    const createdGroup = await tutor("/api/tutor/groups", {
+      method: "POST",
+      body: {
+        title: "QA run — group session. Safe to delete.",
+        courseId: groupCourse.courseId,
+        mode: "ONLINE",
+        meetingProvider: "ZOOM",
+        startAt: groupSlot,
+        durationMinutes: 60,
+        minParticipants: 2,
+        maxParticipants: 4,
+        pricePerSeatCents: 2500,
+        // None of these may be dictated by the client.
+        seatsTaken: 99,
+        status: "CONFIRMED",
+        commissionPercent: 0,
+      },
+    });
+    check("a tutor can create a group session",
+      createdGroup.ok, JSON.stringify(createdGroup.payload?.error));
+    groupSessionId = createdGroup.payload?.data?.session?.id;
+
+    check("it starts as a draft whatever the request said",
+      createdGroup.payload?.data?.session?.status === "DRAFT");
+    check("seats start empty whatever the request said",
+      createdGroup.payload?.data?.session?.seatsTaken === 0);
+    check("commission is the platform's, not the request's",
+      createdGroup.payload?.data?.session?.commissionPercent > 0);
+
+    const joinDraft = await parent(`/api/groups/${groupSessionId}/join`, {
+      method: "POST",
+      body: { studentProfileId: studentId },
+    });
+    check("a draft session cannot be joined",
+      joinDraft.status === 422 && joinDraft.payload?.error?.code === "SESSION_NOT_OPEN");
+
+    const parentPublishes = await parent(`/api/tutor/groups/${groupSessionId}`, {
+      method: "POST",
+    });
+    check("a family cannot publish a tutor's session", parentPublishes.status === 403);
+
+    const publishedGroup = await tutor(`/api/tutor/groups/${groupSessionId}`, { method: "POST" });
+    check("a tutor can publish their session",
+      publishedGroup.ok, JSON.stringify(publishedGroup.payload?.error));
+    check("publishing opens it for sign-ups",
+      publishedGroup.payload?.data?.session?.status === "PUBLISHED");
+
+    const tutorJoinsOwn = await tutor(`/api/groups/${groupSessionId}/join`, {
+      method: "POST",
+      body: { studentProfileId: studentId },
+    });
+    check("a tutor cannot join their own session",
+      tutorJoinsOwn.status === 403 || tutorJoinsOwn.status === 422,
+      `status ${tutorJoinsOwn.status}`);
+
+    const foreignLearner = await parent(`/api/groups/${groupSessionId}/join`, {
+      method: "POST",
+      body: { studentProfileId: "000000000000000000000000" },
+    });
+    check("nobody can enrol a learner that is not theirs",
+      foreignLearner.status === 404 || foreignLearner.status === 403,
+      `status ${foreignLearner.status}`);
+
+    const joined = await parent(`/api/groups/${groupSessionId}/join`, {
+      method: "POST",
+      body: { studentProfileId: studentId },
+    });
+    check("a family can take a seat", joined.ok, JSON.stringify(joined.payload?.error));
+    check("the seat is held before payment",
+      joined.payload?.data?.enrolment?.status === "PENDING_PAYMENT");
+    check("and an ordinary booking was created for it",
+      Boolean(joined.payload?.data?.booking?.id));
+
+    const joinTwice = await parent(`/api/groups/${groupSessionId}/join`, {
+      method: "POST",
+      body: { studentProfileId: studentId },
+    });
+    check("the same learner cannot take two seats", joinTwice.status === 409);
+
+    // --- privacy ------------------------------------------------------------
+    const anonView = await anon(`/api/groups/${groupSessionId}`);
+    check("a group session is publicly viewable", anonView.ok);
+    check("an anonymous visitor sees no roster",
+      (anonView.payload?.data?.roster ?? []).length === 0);
+    check("and no meeting link", anonView.payload?.data?.meeting === null);
+
+    const ownerView = await parent(`/api/groups/${groupSessionId}`);
+    check("a family sees their own place", ownerView.payload?.data?.myEnrolments?.length === 1);
+    check("but not who else is in the class",
+      (ownerView.payload?.data?.roster ?? []).length === 0);
+    check("and cannot manage it", ownerView.payload?.data?.canManage === false);
+
+    const tutorView = await tutor(`/api/groups/${groupSessionId}`);
+    check("the tutor sees the roster", (tutorView.payload?.data?.roster ?? []).length >= 1);
+    check("and can manage the session", tutorView.payload?.data?.canManage === true);
+    // A minor's surname is masked; an adult learner keeps their name. That
+    // rule has its own check in the tutor journey — what matters here is that
+    // the roster exposes a display name and nothing else about the learner.
+    check("the roster gives a display name",
+      (tutorView.payload?.data?.roster ?? []).every((r) => Boolean(r.studentName)));
+    check("and carries no other personal detail about the learner",
+      !/"(email|birthYear|notes|accessibilityNeeds|ownerId)"/.test(
+        JSON.stringify(tutorView.payload?.data?.roster ?? []),
+      ),
+      JSON.stringify(tutorView.payload?.data?.roster?.[0]));
+
+    // --- attendance before the session has happened ---------------------------
+    const earlyAttendance = await tutor(`/api/tutor/groups/${groupSessionId}/attendance`, {
+      method: "POST",
+      body: { attendance: [{ enrolmentId: joined.payload.data.enrolment.id, attended: true }] },
+    });
+    check("attendance cannot be recorded before the session has finished",
+      earlyAttendance.status === 422 &&
+        earlyAttendance.payload?.error?.code === "SESSION_NOT_FINISHED");
+
+    const parentAttendance = await parent(`/api/tutor/groups/${groupSessionId}/attendance`, {
+      method: "POST",
+      body: { attendance: [{ enrolmentId: joined.payload.data.enrolment.id, attended: true }] },
+    });
+    check("a family cannot record attendance", parentAttendance.status === 403);
+
+    // --- editing is locked once somebody has joined ----------------------------
+    const repriceGroup = await tutor(`/api/tutor/groups/${groupSessionId}`, {
+      method: "PATCH",
+      body: { pricePerSeatCents: 100 },
+    });
+    check("the seat price cannot change once somebody has joined",
+      repriceGroup.status === 422 &&
+        repriceGroup.payload?.error?.code === "SESSION_HAS_ENROLMENTS");
+
+    // --- admin ------------------------------------------------------------------
+    const parentAdminGroups = await parent("/api/admin/groups");
+    check("a family cannot read the admin group list", parentAdminGroups.status === 403);
+
+    const adminGroups = await admin("/api/admin/groups");
+    check("an administrator can list group sessions",
+      adminGroups.ok && Array.isArray(adminGroups.payload?.data?.sessions));
+
+    // Clean up: cancelling refunds and frees the slot for the next run.
+    const cancelledGroup = await tutor(`/api/tutor/groups/${groupSessionId}`, {
+      method: "DELETE",
+      body: { reason: "QA run." },
+    });
+    check("a tutor can cancel their session", cancelledGroup.ok);
+    check("and every seat is given back",
+      cancelledGroup.payload?.data?.seatsTaken === 0);
+  }
+
+  // --- Packages: ownership, balance and price integrity --------------------
+  section("Packages — pricing rules, ownership and balance");
+
+  const myCourses = myTutorProfile.payload?.data?.profile?.courses ?? [];
+  const packageCourse = myCourses[0];
+  let packageId = null;
+
+  if (!packageCourse) {
+    check("package flow", false, "the seeded tutor teaches no courses");
+  } else {
+    const standardRate = packageCourse.hourlyRateCents
+      ?? myTutorProfile.payload?.data?.profile?.hourlyRateCents;
+
+    const overpriced = await tutor("/api/tutor/packages", {
+      method: "POST",
+      body: {
+        title: "QA run — overpriced package",
+        courseId: packageCourse.courseId,
+        sessionCount: 5,
+        sessionDurationMinutes: 60,
+        mode: "ONLINE",
+        priceCents: standardRate * 5 * 2,
+      },
+    });
+    check("a package dearer per hour than booking singly is refused",
+      overpriced.status === 422 &&
+        overpriced.payload?.error?.code === "ABOVE_STANDARD_RATE",
+      JSON.stringify(overpriced.payload?.error));
+
+    const created = await tutor("/api/tutor/packages", {
+      method: "POST",
+      body: {
+        title: "QA run — package. Safe to delete.",
+        courseId: packageCourse.courseId,
+        sessionCount: 5,
+        sessionDurationMinutes: 60,
+        mode: "ONLINE",
+        priceCents: Math.floor(standardRate * 5 * 0.8),
+        // Derived figures cannot be dictated by the client.
+        perSessionCents: 1,
+        effectiveHourlyRateCents: 1,
+        savingPercent: 99,
+        status: "ACTIVE",
+      },
+    });
+    check("a tutor can create a package", created.ok, JSON.stringify(created.payload?.error));
+    packageId = created.payload?.data?.package?.id;
+
+    check("a package starts as a draft whatever the request said",
+      created.payload?.data?.package?.status === "DRAFT");
+    check("the per-session price is derived, not supplied",
+      created.payload?.data?.package?.perSessionCents ===
+        Math.floor(Math.floor(standardRate * 5 * 0.8) / 5));
+    check("and so is the advertised saving",
+      created.payload?.data?.package?.savingPercent !== 99);
+
+    const parentCreates = await parent("/api/tutor/packages", {
+      method: "POST",
+      body: {
+        title: "QA run — a family selling packages",
+        courseId: packageCourse.courseId,
+        sessionCount: 5,
+        sessionDurationMinutes: 60,
+        priceCents: 10000,
+      },
+    });
+    check("a family cannot create a tutor package", parentCreates.status === 403);
+
+    const parentEdits = await parent(`/api/tutor/packages/${packageId}`, {
+      method: "PATCH",
+      body: { priceCents: 1 },
+    });
+    check("a family cannot edit a tutor's package", parentEdits.status === 403);
+
+    const draftBuy = await parent("/api/packages", {
+      method: "POST",
+      body: { packageId, studentProfileId: studentId },
+    });
+    check("a draft package cannot be bought",
+      draftBuy.status === 422 && draftBuy.payload?.error?.code === "PACKAGE_NOT_ON_SALE");
+
+    await tutor(`/api/tutor/packages/${packageId}`, {
+      method: "POST",
+      body: { status: "ACTIVE" },
+    });
+
+    const publicProfile = await anon(`/api/tutors/${myTutorProfileId}`);
+    check("an on-sale package appears on the public profile", publicProfile.ok);
+
+    const foreignChild = await parent("/api/packages", {
+      method: "POST",
+      body: { packageId, studentProfileId: "000000000000000000000000" },
+    });
+    check("a package cannot be bought for a learner that is not yours",
+      foreignChild.status === 404 || foreignChild.status === 403,
+      `status ${foreignChild.status}`);
+
+    const bought = await parent("/api/packages", {
+      method: "POST",
+      body: { packageId, studentProfileId: studentId },
+    });
+    check("a family can buy a package", bought.ok, JSON.stringify(bought.payload?.error));
+
+    const purchaseId = bought.payload?.data?.purchase?.id;
+    check("the purchase waits for payment",
+      bought.payload?.data?.purchase?.status === "PENDING_PAYMENT");
+    check("and carries the terms as they were at purchase",
+      bought.payload?.data?.purchase?.sessionsTotal === 5);
+
+    const mine = await parent("/api/packages");
+    check("the family sees their package",
+      mine.ok && mine.payload.data.purchases.some((p) => p.id === purchaseId));
+
+    const strangerReads = await tutor(`/api/packages/${purchaseId}`);
+    check("the tutor can see a package bought from them", strangerReads.ok);
+
+    // A real free slot, so the refusal is about the package rather than the
+    // booking horizon or the tutor's calendar.
+    const packageSlots = await parent(
+      `/api/tutors/${myTutorProfileId}/availability?days=28&durationMinutes=60`,
+    );
+    const packageSlot = (packageSlots.payload?.data?.days ?? [])
+      .filter((d) => d.slots.length > 0)
+      .map((d) => d.slots[0].startAt)[0];
+
+    if (!packageSlot) {
+      check("package booking refusal", false, "the seeded tutor has no free slots");
+    } else {
+      const unpaidBooking = await parent("/api/bookings", {
+        method: "POST",
+        body: {
+          tutorProfileId: myTutorProfileId,
+          studentProfileId: studentId,
+          courseId: packageCourse.courseId,
+          mode: "ONLINE",
+          meetingProvider: "ZOOM",
+          startAt: packageSlot,
+          durationMinutes: 60,
+          packagePurchaseId: purchaseId,
+        },
+      });
+      check("an unpaid package cannot pay for a lesson",
+        unpaidBooking.status === 422 &&
+          unpaidBooking.payload?.error?.code === "PACKAGE_NOT_USABLE",
+        JSON.stringify(unpaidBooking.payload?.error));
+      check("and no booking was created for it",
+        unpaidBooking.payload?.data?.bookings === undefined);
+    }
+
+    const usable = await parent(
+      `/api/packages/usable?tutorProfileId=${myTutorProfileId}&courseId=${packageCourse.courseId}&durationMinutes=60`,
+    );
+    check("an unpaid package is not offered at checkout",
+      usable.ok && usable.payload.data.packages.every((p) => p.id !== purchaseId));
+
+    const tutorPeeks = await tutor(
+      `/api/packages/usable?tutorProfileId=${myTutorProfileId}&courseId=${packageCourse.courseId}`,
+    );
+    check("nobody can discover somebody else's balances",
+      tutorPeeks.status === 403 || (tutorPeeks.ok && tutorPeeks.payload.data.packages.length === 0),
+      `status ${tutorPeeks.status}`);
+
+    // Clean up: cancel the unpaid purchase and archive the offer.
+    await parent(`/api/packages/${purchaseId}`, {
+      method: "DELETE",
+      body: { reason: "QA run." },
+    });
+    await tutor(`/api/tutor/packages/${packageId}`, {
+      method: "POST",
+      body: { status: "ARCHIVED" },
+    });
+
+    const parentAdminPackages = await parent("/api/admin/packages");
+    check("a family cannot read the admin package list", parentAdminPackages.status === 403);
+
+    const adminPackages = await admin("/api/admin/packages");
+    check("an administrator can read package purchases",
+      adminPackages.ok && Array.isArray(adminPackages.payload?.data?.purchases));
+    check("and the totals that reconcile them",
+      typeof adminPackages.payload?.data?.totals?.grossCents === "number");
+  }
+
+  // --- Referrals and account credit over real HTTP -------------------------
+  section("Referrals — codes, credit and abuse prevention");
+
+  const myReferrals = await parent("/api/referrals");
+  check("a family can read their own referral summary",
+    myReferrals.ok && /^[A-Z2-9]{8}$/.test(myReferrals.payload?.data?.code ?? ""),
+    myReferrals.payload?.data?.code);
+
+  const referralCode = myReferrals.payload?.data?.code;
+
+  const anonReferrals = await anon("/api/referrals");
+  check("anonymous cannot read a referral summary", anonReferrals.status === 401);
+
+  const tutorReferrals = await tutor("/api/referrals");
+  check("a tutor has a referral code too", tutorReferrals.ok);
+  check("two accounts never share a code",
+    tutorReferrals.payload?.data?.code !== referralCode);
+
+  const codeLookup = await anon(`/api/referrals/code/${referralCode}`);
+  check("a referral code can be checked before signing up",
+    codeLookup.ok && codeLookup.payload?.data?.valid === true);
+  check("the lookup shows a first name and initial, never a surname",
+    /^[^ ]+( [A-Z]\.)?$/.test(codeLookup.payload?.data?.referrerName ?? ""),
+    codeLookup.payload?.data?.referrerName);
+  check("the lookup never reveals the referrer's email",
+    !JSON.stringify(codeLookup.payload ?? {}).includes("@"));
+
+  const unknownCode = await anon("/api/referrals/code/ZZZZZZZZ");
+  check("an unknown code answers plainly, without saying why",
+    unknownCode.ok && unknownCode.payload?.data?.valid === false);
+  check("and gives nothing else away",
+    Object.keys(unknownCode.payload?.data ?? {}).length === 1);
+
+  // --- registering with a code -----------------------------------------------
+  const inviteeEmail = `qa-referral-${Date.now()}@example.com`;
+  const invitee = createClient();
+  const signedUp = await invitee("/api/auth/register", {
+    method: "POST",
+    body: {
+      role: "PARENT",
+      firstName: "Qa",
+      lastName: "Invitee",
+      email: inviteeEmail,
+      password: PASSWORD,
+      confirmPassword: PASSWORD,
+      acceptTerms: true,
+      referralCode,
+    },
+  });
+  check("a new account can register with a referral code",
+    signedUp.ok, JSON.stringify(signedUp.payload?.error));
+
+  const afterSignup = await parent("/api/referrals");
+  check("the referrer sees the new sign-up",
+    (afterSignup.payload?.data?.stats?.joined ?? 0) >
+      (myReferrals.payload?.data?.stats?.joined ?? 0));
+  check("but no reward is paid before any lessons are taken",
+    (afterSignup.payload?.data?.stats?.rewarded ?? 0) ===
+      (myReferrals.payload?.data?.stats?.rewarded ?? 0));
+
+  const selfReferral = await invitee("/api/referrals");
+  check("the invitee gets their own code", selfReferral.ok);
+  check("and is shown who invited them",
+    Boolean(selfReferral.payload?.data?.referredBy));
+
+  const badCodeSignup = createClient();
+  const withBadCode = await badCodeSignup("/api/auth/register", {
+    method: "POST",
+    body: {
+      role: "PARENT",
+      firstName: "Qa",
+      lastName: "Badcode",
+      email: `qa-badcode-${Date.now()}@example.com`,
+      password: PASSWORD,
+      confirmPassword: PASSWORD,
+      acceptTerms: true,
+      referralCode: "NOTACODE",
+    },
+  });
+  check("a mistyped code never stops somebody creating an account", withBadCode.ok);
+
+  // --- credit is server-owned ---------------------------------------------------
+  const credits = await parent("/api/credits");
+  check("a family can read their credit statement",
+    credits.ok && typeof credits.payload?.data?.balanceCents === "number");
+
+  const anonCredits = await anon("/api/credits");
+  check("anonymous cannot read a credit statement", anonCredits.status === 401);
+
+  const parentGrants = await parent(`/api/admin/users/${myReferrals.payload?.data ? "000000000000000000000000" : ""}/credit`, {
+    method: "POST",
+    body: { amountCents: 100000, note: "Granting myself money." },
+  });
+  check("a family cannot grant themselves credit", parentGrants.status === 403);
+
+  const tutorGrants = await tutor("/api/admin/users/000000000000000000000000/credit", {
+    method: "POST",
+    body: { amountCents: 100000, note: "Granting myself money." },
+  });
+  check("nor can a tutor", tutorGrants.status === 403);
+
+  const noReason = await admin("/api/admin/users/000000000000000000000000/credit", {
+    method: "POST",
+    body: { amountCents: 1000 },
+  });
+  check("an administrator must record why they moved a balance", noReason.status === 422);
+
+  // --- the referral queue is admin-only --------------------------------------------
+  const parentReferralQueue = await parent("/api/admin/referrals");
+  check("a family cannot read the referral queue", parentReferralQueue.status === 403);
+
+  const tutorReferralQueue = await tutor("/api/admin/referrals");
+  check("a tutor cannot read the referral queue", tutorReferralQueue.status === 403);
+
+  const adminReferralQueue = await admin("/api/admin/referrals");
+  check("an administrator can read the referral queue",
+    adminReferralQueue.ok && Array.isArray(adminReferralQueue.payload?.data?.referrals));
+
+  const parentReverses = await parent("/api/admin/referrals/000000000000000000000000", {
+    method: "PATCH",
+    body: { reason: "Reversing somebody else's referral." },
+  });
+  check("a family cannot reverse a referral", parentReverses.status === 403);
+
+  const reverseNoReason = await admin("/api/admin/referrals/000000000000000000000000", {
+    method: "PATCH",
+    body: {},
+  });
+  check("reversing without a recorded reason is refused", reverseNoReason.status === 422);
+
+  // --- Progress reports: authorship and privacy over real HTTP -------------
+  section("Progress reports — authorship, privacy and acknowledgement");
+
+  const reportableStudentList = await tutor("/api/tutor/progress/students");
+  check("a tutor can list the students they may report on",
+    reportableStudentList.ok && Array.isArray(reportableStudentList.payload?.data?.students));
+
+  const parentReadsPicker = await parent("/api/tutor/progress/students");
+  check("a family cannot read a tutor's student picker", parentReadsPicker.status === 403);
+
+  // The family-side assertions only mean anything for a learner this QA
+  // parent actually owns, so the two lists are correlated rather than the
+  // first entry being taken on trust.
+  const parentStudentIds = new Set(
+    (students.payload?.data?.students ?? []).map((child) => child.id),
+  );
+  const reportStudent = (reportableStudentList.payload?.data?.students ?? []).find((child) =>
+    parentStudentIds.has(child.id),
+  );
+  let progressReportId = null;
+
+  if (!reportStudent) {
+    check(
+      "progress report flow",
+      false,
+      "the seeded tutor has no completed lessons with this QA parent's children",
+    );
+  } else {
+    const draft = await tutor("/api/tutor/progress", {
+      method: "POST",
+      body: { studentProfileId: reportStudent.id, courseId: reportStudent.courseId },
+    });
+
+    // A draft may already exist from an earlier QA run; reuse it rather than
+    // failing on a conflict that is not a defect.
+    if (draft.status === 409) {
+      const existing = await tutor("/api/tutor/progress?status=DRAFT");
+      progressReportId = existing.payload?.data?.reports?.[0]?.id;
+      check("an existing draft is reused", Boolean(progressReportId));
+    } else {
+      check("a tutor can start a progress report", draft.ok, JSON.stringify(draft.payload?.error));
+      progressReportId = draft.payload?.data?.report?.id;
+    }
+
+    const injected = await tutor("/api/tutor/progress", {
+      method: "POST",
+      body: {
+        studentProfileId: reportStudent.id,
+        status: "SUBMITTED",
+        lessonCount: 999,
+        bookingIds: ["000000000000000000000000"],
+      },
+    });
+    check("a client cannot declare a report already shared, or invent lessons",
+      injected.status === 409 || injected.payload?.data?.report?.status === "DRAFT");
+
+    // --- a draft belongs to its author alone ---------------------------------
+    const familyReadsDraft = await parent(`/api/progress/${progressReportId}`);
+    check("a family cannot read an unfinished draft", familyReadsDraft.status === 404);
+
+    const familyEdits = await parent(`/api/tutor/progress/${progressReportId}`, {
+      method: "PATCH",
+      body: { summary: "Rewritten by the family, which must never be possible." },
+    });
+    check("a family cannot reach the tutor's edit endpoint at all",
+      familyEdits.status === 403);
+
+    const anonReads = await anon(`/api/progress/${progressReportId}`);
+    check("anonymous cannot read a progress report", anonReads.status === 401);
+
+    // --- sharing --------------------------------------------------------------
+    const shortSummary = await tutor(`/api/tutor/progress/${progressReportId}`, {
+      method: "PATCH",
+      body: { summary: "Too short." },
+    });
+    check("a draft saves freely", shortSummary.ok, JSON.stringify(shortSummary.payload?.error));
+
+    const refusedShare = await tutor(`/api/tutor/progress/${progressReportId}`, { method: "POST" });
+    check("a report with a thin summary cannot be shared",
+      refusedShare.status === 422 &&
+        refusedShare.payload?.error?.code === "SUMMARY_REQUIRED");
+
+    await tutor(`/api/tutor/progress/${progressReportId}`, {
+      method: "PATCH",
+      body: {
+        summary: "QA run — covered logarithms and rational graphs this block. Safe to delete.",
+        ratings: { understanding: 4, effort: 5 },
+        privateNote: "QA run — this line must never reach the family.",
+      },
+    });
+
+    const submitted = await tutor(`/api/tutor/progress/${progressReportId}`, { method: "POST" });
+    check("a tutor can share the report", submitted.ok, JSON.stringify(submitted.payload?.error));
+    check("the shared report leaves draft",
+      submitted.payload?.data?.report?.status === "SUBMITTED");
+
+    // --- reading ----------------------------------------------------------------
+    const familyReads = await parent(`/api/progress/${progressReportId}`);
+    check("the family can now read it", familyReads.ok);
+    check("the family may acknowledge but not edit",
+      familyReads.payload?.data?.canAcknowledge === true &&
+        familyReads.payload?.data?.canEdit === false);
+    check("the tutor's private note never reaches the family",
+      !JSON.stringify(familyReads.payload ?? {}).includes("must never reach the family"));
+
+    const familyHistory = await parent("/api/progress");
+    check("the report appears in the family's history",
+      familyHistory.ok &&
+        familyHistory.payload.data.reports.some((r) => r.id === progressReportId));
+
+    // --- acknowledgement -----------------------------------------------------------
+    const acknowledged = await parent(`/api/progress/${progressReportId}`, { method: "POST" });
+    check("the family can mark it read", acknowledged.ok);
+    check("acknowledging does not change what the tutor wrote",
+      acknowledged.payload?.data?.report?.summary?.startsWith("QA run —"));
+
+    const tutorAcknowledges = await tutor(`/api/progress/${progressReportId}`, { method: "POST" });
+    check("a tutor cannot acknowledge on the family's behalf",
+      tutorAcknowledges.status === 403 || tutorAcknowledges.status === 404,
+      `status ${tutorAcknowledges.status}`);
+
+    // --- revision keeps history ------------------------------------------------------
+    const revised = await tutor(`/api/tutor/progress/${progressReportId}`, {
+      method: "PATCH",
+      body: { summary: "QA run — revised summary. Safe to delete.", revisionReason: "QA revision." },
+    });
+    check("revising a shared report succeeds", revised.ok);
+    check("and keeps what the family was originally shown",
+      revised.payload?.data?.report?.revisions?.[0]?.snapshot?.summary?.includes("logarithms"));
+
+    // --- admin ------------------------------------------------------------------------
+    const parentReadsAdmin = await parent("/api/admin/progress");
+    check("a family cannot read the admin progress list", parentReadsAdmin.status === 403);
+
+    const tutorReadsAdmin = await tutor("/api/admin/progress");
+    check("a tutor cannot read the admin progress list", tutorReadsAdmin.status === 403);
+
+    const adminProgress = await admin("/api/admin/progress");
+    check("an administrator can list shared reports",
+      adminProgress.ok && Array.isArray(adminProgress.payload?.data?.reports));
+    check("no private note reaches the admin list",
+      !JSON.stringify(adminProgress.payload ?? {}).includes("must never reach the family"));
+
+    // Leave the fixture archived rather than shared, so repeat runs are clean.
+    await tutor(`/api/tutor/progress/${progressReportId}`, { method: "DELETE" });
+  }
+
+  // --- Calendar sync: consent, ownership and tokens ------------------------
+  section("Calendar sync — consent, ownership and token safety");
+
+  const anonConnect = await anon("/api/tutor/calendar/connect", {
+    method: "POST",
+    body: { provider: "GOOGLE" },
+  });
+  check("anonymous cannot start a calendar connection", anonConnect.status === 401);
+
+  const parentConnect = await parent("/api/tutor/calendar/connect", {
+    method: "POST",
+    body: { provider: "GOOGLE" },
+  });
+  check("a family cannot connect a tutor calendar", parentConnect.status === 403);
+
+  const badProvider = await tutor("/api/tutor/calendar/connect", {
+    method: "POST",
+    body: { provider: "ICAL" },
+  });
+  check("an unknown calendar provider is refused", badProvider.status === 422);
+
+  const begin = await tutor("/api/tutor/calendar/connect", {
+    method: "POST",
+    body: { provider: "GOOGLE" },
+  });
+  check("a tutor can start a calendar connection", begin.ok, JSON.stringify(begin.payload?.error));
+
+  const consentUrl = begin.payload?.data?.authorizationUrl ?? "";
+  check("the consent URL carries a signed state", consentUrl.includes("state="));
+  check("no client secret is ever put in a URL the browser follows",
+    !/client_secret/i.test(consentUrl));
+
+  // Complete the round trip. With no Google credentials configured this runs
+  // against the development calendar, which is a real implementation.
+  const callbackPath = consentUrl.startsWith(BASE)
+    ? consentUrl.slice(BASE.length)
+    : new URL(consentUrl).pathname + new URL(consentUrl).search;
+  const callback = await tutor(callbackPath, { raw: true });
+  check("the callback redirects back to the tutor's calendar",
+    callback.status === 307 || callback.status === 302,
+    `status ${callback.status}`);
+  check("and reports the outcome in the query string",
+    (callback.headers.get("location") ?? "").includes("calendar=connected"),
+    callback.headers.get("location"));
+
+  const forgedCallback = await tutor(
+    "/api/calendar/callback/google?code=stolen&state=forged.signature",
+    { raw: true },
+  );
+  check("a callback with a forged state does not create a connection",
+    (forgedCallback.headers.get("location") ?? "").includes("calendar=error"));
+
+  const connections = await tutor("/api/tutor/calendar/connections");
+  check("the tutor can list their connections",
+    connections.ok && connections.payload.data.connections.length >= 1);
+
+  const connectionId = connections.payload?.data?.connections?.[0]?.id;
+  check("a connection reports which provider and account it is",
+    Boolean(connections.payload?.data?.connections?.[0]?.provider));
+  check("no token of any kind reaches the browser",
+    !/accessToken|refreshToken|"v1\./.test(JSON.stringify(connections.payload)));
+  check("the response says plainly whether the provider is the real service",
+    connections.payload.data.providers.every((p) => typeof p.live === "boolean"));
+
+  const parentReadsConnections = await parent("/api/tutor/calendar/connections");
+  check("a family cannot list a tutor's calendar connections",
+    parentReadsConnections.status === 403);
+
+  const strangerPatch = await parent(`/api/tutor/calendar/connections/${connectionId}`, {
+    method: "PATCH",
+    body: { syncBusy: false },
+  });
+  check("a family cannot change a tutor's calendar connection", strangerPatch.status === 403);
+
+  const toggled = await tutor(`/api/tutor/calendar/connections/${connectionId}`, {
+    method: "PATCH",
+    body: { syncBusy: false, pushEvents: false },
+  });
+  check("a tutor can turn each sync direction off",
+    toggled.ok && toggled.payload.data.connection.syncBusy === false &&
+      toggled.payload.data.connection.pushEvents === false);
+
+  const injectedStatus = await tutor(`/api/tutor/calendar/connections/${connectionId}`, {
+    method: "PATCH",
+    body: { status: "CONNECTED", accountEmail: "attacker@example.com", accessToken: "stolen" },
+  });
+  check("connection status, account and tokens are not client-settable",
+    injectedStatus.ok &&
+      injectedStatus.payload.data.connection.accountEmail !== "attacker@example.com");
+
+  const calendars = await tutor(`/api/tutor/calendar/connections/${connectionId}/calendars`);
+  check("a tutor can list the calendars on the connected account",
+    calendars.ok && Array.isArray(calendars.payload.data.calendars));
+
+  const unknownCalendar = await tutor(`/api/tutor/calendar/connections/${connectionId}`, {
+    method: "PATCH",
+    body: { calendarId: "a-calendar-that-does-not-exist" },
+  });
+  check("a calendar the account does not have is refused", unknownCalendar.status === 404);
+
+  const refreshed = await tutor(`/api/tutor/calendar/connections/${connectionId}`, {
+    method: "POST",
+  });
+  check("a tutor can refresh busy periods on demand", refreshed.ok);
+
+  const parentDisconnect = await parent(`/api/tutor/calendar/connections/${connectionId}`, {
+    method: "DELETE",
+  });
+  check("a family cannot disconnect a tutor's calendar", parentDisconnect.status === 403);
+
+  const disconnected = await tutor(`/api/tutor/calendar/connections/${connectionId}`, {
+    method: "DELETE",
+  });
+  check("a tutor can disconnect their own calendar", disconnected.ok);
+
+  const afterDisconnect = await tutor("/api/tutor/calendar/connections");
+  check("the disconnected calendar is gone",
+    afterDisconnect.payload.data.connections.every((c) => c.id !== connectionId));
+
+  // --- SMS: consent and authorization over real HTTP -----------------------
+  section("Text messages — consent, verification and authorization");
+
+  const anonPhone = await anon("/api/users/me/phone", {
+    method: "POST",
+    body: { phone: "4165550142" },
+  });
+  check("anonymous cannot ask for a confirmation code", anonPhone.status === 401);
+
+  const badPhone = await parent("/api/users/me/phone", {
+    method: "POST",
+    body: { phone: "not-a-number" },
+  });
+  check("an invalid mobile number is refused", badPhone.status === 422);
+
+  // The channel cannot be switched on before a number is confirmed — checked
+  // server-side, not just disabled in the UI.
+  await parent("/api/users/me/phone", { method: "DELETE" });
+  const smsWithoutPhone = await parent("/api/users/me/notifications", {
+    method: "PATCH",
+    body: { SMS: true },
+  });
+  check("text notifications cannot be switched on without a confirmed number",
+    smsWithoutPhone.status === 422 &&
+      smsWithoutPhone.payload?.error?.code === "PHONE_NOT_VERIFIED",
+    JSON.stringify(smsWithoutPhone.payload?.error));
+
+  const sendCode = await parent("/api/users/me/phone", {
+    method: "POST",
+    body: { phone: "4165550142" },
+  });
+  check("a confirmation code can be requested", sendCode.ok, JSON.stringify(sendCode.payload?.error));
+  check("the response says honestly whether a carrier is configured",
+    sendCode.payload?.data?.providerConfigured === false);
+  check("the code itself is never returned to the browser",
+    !JSON.stringify(sendCode.payload ?? {}).match(/\b\d{6}\b/));
+
+  const wrongCode = await parent("/api/users/me/phone", {
+    method: "PATCH",
+    body: { code: "000000" },
+  });
+  check("a wrong confirmation code is refused", wrongCode.status === 422);
+
+  const malformedCode = await parent("/api/users/me/phone", {
+    method: "PATCH",
+    body: { code: "12" },
+  });
+  check("a malformed code never reaches the service", malformedCode.status === 422);
+
+  const clearPhone = await parent("/api/users/me/phone", { method: "DELETE" });
+  check("the number can be removed again", clearPhone.ok);
+
+  // --- the delivery log is admin-only ---------------------------------------
+  const parentSmsLog = await parent("/api/admin/sms");
+  check("a family cannot read the text delivery log", parentSmsLog.status === 403);
+
+  const tutorSmsLog = await tutor("/api/admin/sms");
+  check("a tutor cannot read the text delivery log", tutorSmsLog.status === 403);
+
+  const adminSmsLog = await admin("/api/admin/sms");
+  check("admin can read the text delivery log",
+    adminSmsLog.ok && Array.isArray(adminSmsLog.payload?.data?.messages));
+  check("the delivery log masks phone numbers",
+    (adminSmsLog.payload?.data?.messages ?? []).every((m) => !/^\+\d{11,}$/.test(m.to)));
+  check("the delivery log states whether a carrier is configured",
+    adminSmsLog.payload?.data?.providerConfigured === false);
+
+  // --- the inbound callback is signed ----------------------------------------
+  const unsignedInbound = await anon("/api/webhooks/sms", {
+    method: "POST",
+    raw: true,
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    rawBody: "From=%2B14165550142&Body=STOP",
+  });
+  check("an unsigned inbound SMS callback is refused",
+    unsignedInbound.status === 403 || unsignedInbound.status === 404,
+    `status ${unsignedInbound.status}`);
+
+  const forgedInbound = await anon("/api/webhooks/sms", {
+    method: "POST",
+    raw: true,
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      "X-Twilio-Signature": "ZmFrZSBzaWduYXR1cmU=",
+    },
+    rawBody: "From=%2B14165550142&Body=STOP",
+  });
+  check("a forged signature on an inbound callback is refused",
+    forgedInbound.status === 403 || forgedInbound.status === 404,
+    `status ${forgedInbound.status}`);
 
   // --- Business rules ------------------------------------------------------
   section("Business rules");

@@ -5,6 +5,7 @@ import { NotFoundError, BusinessRuleError } from "@/lib/api/errors";
 import { toPlain, compact } from "@/lib/utils/serialize";
 import { addDays, rangesOverlap } from "@/lib/utils/time";
 import { generateSlots, firstAvailableSlot } from "@/lib/booking/slots";
+import { externalBusyPeriods } from "./calendar.service";
 import { getSettings } from "./settings.service";
 
 /**
@@ -52,18 +53,25 @@ export async function getBookableSlots(
   const fromDate = from ? new Date(`${from}T00:00:00Z`) : new Date();
   const windowEnd = addDays(fromDate, days + 1);
 
-  const bookings = await Booking.find({
-    tutorProfileId,
-    status: { $in: BLOCKING_BOOKING_STATUSES },
-    startAt: { $lt: windowEnd },
-    endAt: { $gt: fromDate },
-  })
-    .select("startAt endAt")
-    .lean();
+  // A tutor's other commitments are not in this platform, and a slot offered
+  // over one is a slot that gets cancelled. Connected calendars contribute
+  // busy periods in exactly the shape a booking does, so the slot generator
+  // needs to know nothing about calendars (§18, §41 Phase 2).
+  const [bookings, external] = await Promise.all([
+    Booking.find({
+      tutorProfileId,
+      status: { $in: BLOCKING_BOOKING_STATUSES },
+      startAt: { $lt: windowEnd },
+      endAt: { $gt: fromDate },
+    })
+      .select("startAt endAt")
+      .lean(),
+    externalBusyPeriods(tutorProfileId, { from: fromDate, to: windowEnd }),
+  ]);
 
   const generated = generateSlots({
     availability,
-    bookings,
+    bookings: [...bookings, ...external],
     durationMinutes,
     fromDate,
     days,

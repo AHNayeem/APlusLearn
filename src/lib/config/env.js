@@ -107,6 +107,56 @@ export const INTEGRATIONS = {
       },
     },
   },
+  calendar: {
+    label: "Calendar sync",
+    selector: "CALENDAR_PROVIDER",
+    /**
+     * Calendar sync is additive: a tutor who connects nothing still publishes
+     * availability by hand and still receives bookings. So a production
+     * deployment may run without either provider — and when it does, the
+     * development implementation is a *working* calendar rather than a stub,
+     * labelled as simulated everywhere a tutor can see it (§18, §41 Phase 2).
+     *
+     * §41 names both Google and Outlook, and a tutor may connect either or
+     * both, so like meeting links this selector takes a comma-separated list.
+     */
+    fakeAllowedInProduction: true,
+    multi: true,
+    providers: {
+      google: {
+        label: "Google Calendar",
+        required: ["GOOGLE_CALENDAR_CLIENT_ID", "GOOGLE_CALENDAR_CLIENT_SECRET"],
+        optional: [],
+      },
+      microsoft: {
+        label: "Outlook Calendar",
+        required: ["MICROSOFT_CALENDAR_CLIENT_ID", "MICROSOFT_CALENDAR_CLIENT_SECRET"],
+        optional: ["MICROSOFT_CALENDAR_TENANT_ID"],
+      },
+    },
+  },
+  sms: {
+    label: "SMS",
+    selector: "SMS_PROVIDER",
+    /**
+     * SMS is an *additive* channel: in-app and email carry every notification
+     * on their own, and nobody is locked out of their account without it. So
+     * a production deployment may run without an SMS account — but the
+     * development provider never claims a message was delivered, it records
+     * that one was simulated, and the channel is reported as unconfigured
+     * rather than working (§38, §41 Phase 2).
+     */
+    fakeAllowedInProduction: true,
+    providers: {
+      twilio: {
+        label: "Twilio",
+        required: ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN"],
+        // One of these two is required at send time; the factory checks that,
+        // because either is a valid way to configure Twilio.
+        optional: ["TWILIO_FROM_NUMBER", "TWILIO_MESSAGING_SERVICE_SID", "TWILIO_STATUS_CALLBACK_URL"],
+      },
+    },
+  },
   storage: {
     label: "File storage",
     selector: "STORAGE_PROVIDER",

@@ -5,6 +5,8 @@ import {
 } from "@/constants";
 import { toPlain } from "@/lib/utils/serialize";
 import { sendEmail } from "./external/email-provider";
+import { sendNotificationSms } from "./sms.service";
+import { hasSmsTemplate } from "./external/sms-templates";
 
 /**
  * Which platform switch each notification's email belongs to (§26).
@@ -75,6 +77,13 @@ export async function notify({
     await dispatchEmail(notification._id, userId, email, emailCategoryFor(type));
   }
 
+  // SMS is attempted for *every* notification rather than only where a caller
+  // asked for it, because whether a text is appropriate is a property of the
+  // notification type and the recipient's consent — not of the call site. The
+  // gates all live in `sms.service`, which records why it declined when it
+  // does, so no future caller can accidentally sidestep them (§28, §41).
+  await dispatchSms(notification);
+
   return toPlain(notification);
 }
 
@@ -94,6 +103,31 @@ async function dispatchEmail(notificationId, userId, email, category) {
     { _id: notificationId },
     { $addToSet: { deliveredChannels: NOTIFICATION_CHANNELS.EMAIL } },
   );
+}
+
+/**
+ * Text the notification, if the type has a text version and the recipient
+ * consented. Never throws: an SMS failure must not undo the notification.
+ */
+async function dispatchSms(notification) {
+  if (!hasSmsTemplate(notification.type)) return;
+
+  try {
+    const user = await User.findById(notification.userId)
+      .select("phoneE164 phoneVerifiedAt smsOptOutAt notificationPreferences")
+      .lean();
+    if (!user) return;
+
+    const result = await sendNotificationSms(notification, user);
+    if (!result?.sent) return;
+
+    await Notification.updateOne(
+      { _id: notification._id },
+      { $addToSet: { deliveredChannels: NOTIFICATION_CHANNELS.SMS } },
+    );
+  } catch (error) {
+    console.error("[notification] SMS dispatch failed:", error.message);
+  }
 }
 
 /** Notify several people about the same event. */

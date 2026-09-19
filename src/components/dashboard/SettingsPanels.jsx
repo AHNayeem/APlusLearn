@@ -11,12 +11,14 @@ import {
 } from "@/components/ui";
 import { CANADIAN_TIMEZONES } from "@/lib/utils/time";
 import { NOTIFICATION_CHANNELS } from "@/constants";
+import { PhonePanel } from "./PhonePanel";
 
 /** Profile, notifications, password and account deletion (§24, §35). */
 export function SettingsPanels({ user }) {
   return (
     <div className="max-w-2xl space-y-6">
       <ProfilePanel user={user} />
+      <PhonePanel user={user} />
       <NotificationPanel user={user} />
       <PasswordPanel />
       <DangerPanel user={user} />
@@ -155,7 +157,7 @@ function NotificationPanel({ user }) {
       key: NOTIFICATION_CHANNELS.IN_APP,
       label: "In-app notifications",
       description: "Always on — this is your notification centre.",
-      locked: true,
+      alwaysOn: true,
     },
     {
       key: NOTIFICATION_CHANNELS.EMAIL,
@@ -165,8 +167,13 @@ function NotificationPanel({ user }) {
     {
       key: NOTIFICATION_CHANNELS.SMS,
       label: "Text message",
-      description: "Lesson reminders by SMS.",
-      comingSoon: true,
+      description: "Lesson confirmations, changes, reminders and refunds.",
+      // The server refuses this too — the toggle is disabled here so the
+      // reason is visible before the refusal, not instead of it (§10).
+      locked: !user.phoneVerifiedAt || Boolean(user.smsOptOutAt),
+      lockedHint: user.smsOptOutAt
+        ? "This number replied STOP. Text START to opt back in."
+        : "Confirm a mobile number above to turn this on.",
     },
     {
       key: NOTIFICATION_CHANNELS.PUSH,
@@ -184,17 +191,22 @@ function NotificationPanel({ user }) {
           <Switch
             key={channel.key}
             label={channel.label}
-            description={
-              channel.comingSoon ? `${channel.description} Coming soon.` : channel.description
-            }
-            checked={channel.locked ? true : (prefs[channel.key] ?? false)}
-            disabled={channel.locked || channel.comingSoon}
+            description={describe(channel)}
+            checked={channel.alwaysOn ? true : (prefs[channel.key] ?? false)}
+            disabled={channel.alwaysOn || channel.comingSoon || channel.locked}
             onChange={(e) => toggle(channel.key, e.target.checked)}
           />
         ))}
       </CardBody>
     </Card>
   );
+}
+
+/** One description line, whichever reason a channel is unavailable for. */
+function describe(channel) {
+  if (channel.comingSoon) return `${channel.description} Coming soon.`;
+  if (channel.locked && channel.lockedHint) return `${channel.description} ${channel.lockedHint}`;
+  return channel.description;
 }
 
 function PasswordPanel() {

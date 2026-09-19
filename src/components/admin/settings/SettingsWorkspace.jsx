@@ -7,6 +7,8 @@ import { BrandingSettings } from "./BrandingSettings";
 import { AppearanceSettings } from "./AppearanceSettings";
 import { SeoSettings } from "./SeoSettings";
 import { MarketplaceSettings } from "./MarketplaceSettings";
+import { MatchingSettings } from "./MatchingSettings";
+import { ReferralSettings } from "./ReferralSettings";
 import { FeatureSettings } from "./FeatureSettings";
 import { NotificationSettings } from "./NotificationSettings";
 
@@ -27,11 +29,13 @@ const TABS = [
   { value: "social", label: "Social" },
   { value: "footer", label: "Footer" },
   { value: "marketplace", label: "Marketplace" },
+  { value: "matching", label: "Matching" },
+  { value: "referrals", label: "Referrals" },
   { value: "features", label: "Features" },
   { value: "notifications", label: "Notifications" },
 ];
 
-export function SettingsWorkspace({ settings, assetRules }) {
+export function SettingsWorkspace({ settings, assetRules, smsProvider }) {
   const [tab, setTab] = useState("general");
 
   const panels = {
@@ -43,8 +47,10 @@ export function SettingsWorkspace({ settings, assetRules }) {
     social: <SocialSettings settings={settings} />,
     footer: <FooterSettings settings={settings} />,
     marketplace: <MarketplaceSettings settings={settings} />,
+    matching: <MatchingSettings settings={settings} />,
+    referrals: <ReferralSettings settings={settings} />,
     features: <FeatureSettings settings={settings} />,
-    notifications: <NotificationSettings settings={settings} />,
+    notifications: <NotificationSettings settings={settings} smsProvider={smsProvider} />,
   };
 
   return (

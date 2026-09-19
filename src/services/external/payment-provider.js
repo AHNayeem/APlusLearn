@@ -568,6 +568,17 @@ export function getPaymentProvider() {
   return provider;
 }
 
+/**
+ * Drop the memoised provider.
+ *
+ * Exists for the integration suite, which switches `PAYMENT_PROVIDER` between
+ * sections to exercise both adapters in one process. Nothing in the running
+ * application calls it — the provider does not change under a live server.
+ */
+export function resetPaymentProvider() {
+  cached = null;
+}
+
 /** Which mode payments are running in, for the UI and the admin health panel. */
 export function paymentProviderStatus() {
   const resolved = resolveIntegration("payment");

@@ -246,6 +246,7 @@ authenticated endpoint, so no queue or worker process is needed:
 | Verification expiry | `/api/cron/verification-expiry` | daily |
 | Tutor payouts | `/api/cron/payouts` | daily |
 | Tutor request expiry | `/api/cron/request-expiry` | daily |
+| External calendar sync | `/api/cron/calendar-sync` | every 15 min |
 | All of the above | `/api/cron/all` | daily |
 
 Authenticate with `Authorization: Bearer $CRON_SECRET`; a signed-in

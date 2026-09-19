@@ -5,6 +5,9 @@ import { sendBookingReminders, expireStaleBookings } from "./booking.service";
 import { expireStaleVerifications } from "./verification.service";
 import { runScheduledPayouts } from "./payout.service";
 import { expireStaleRequests } from "./request.service";
+import { syncStaleCalendars } from "./calendar.service";
+import { expirePackages } from "./package.service";
+import { settleUnderfilledSessions } from "./group.service";
 import { recordAudit } from "./audit.service";
 
 /**
@@ -35,6 +38,9 @@ export const JOBS = {
   VERIFICATION_EXPIRY: "verification-expiry",
   PAYOUTS: "payouts",
   REQUEST_EXPIRY: "request-expiry",
+  CALENDAR_SYNC: "calendar-sync",
+  PACKAGE_EXPIRY: "package-expiry",
+  GROUP_SETTLEMENT: "group-settlement",
 };
 
 /**
@@ -73,9 +79,33 @@ const REGISTRY = {
   },
   [JOBS.REQUEST_EXPIRY]: {
     name: "Tutor request expiry",
-    description: "Closes open tutor requests that have passed their expiry date.",
+    description:
+      "Closes open tutor requests that have passed their expiry date, and warns the families whose requests are about to. Each warning is stamped on the request before it is sent, so repeat runs never send a second one.",
     suggestedCron: "0 5 * * *",
-    run: () => expireStaleRequests(),
+    run: (options) => expireStaleRequests(options),
+  },
+  [JOBS.PACKAGE_EXPIRY]: {
+    name: "Package expiry",
+    description:
+      "Expires package balances that have run out of time, refunding the lessons that were never delivered, and warns the families whose packages are about to expire. Each purchase is claimed on its ACTIVE status before anything is refunded, so a repeat run refunds nothing twice.",
+    suggestedCron: "0 6 * * *",
+    run: (options) => expirePackages(options),
+  },
+  [JOBS.GROUP_SETTLEMENT]: {
+    name: "Group session settlement",
+    description:
+      "Decides the fate of group sessions that have reached their confirmation deadline: confirms the ones that filled, and cancels and fully refunds the ones that did not. Each session is claimed on its PUBLISHED status before anything is refunded, so a repeat run refunds nothing twice.",
+    suggestedCron: "*/30 * * * *",
+    run: (options) => settleUnderfilledSessions(options),
+  },
+  [JOBS.CALENDAR_SYNC]: {
+    name: "External calendar sync",
+    description:
+      "Refreshes the cached busy periods of every connected Google and Outlook calendar whose cache has aged out, and retries lesson events that failed to reach a calendar. Each connection is refreshed independently, so one failing account never stops the rest.",
+    // Busy periods are cached for minutes, not hours: a tutor who blocks out
+    // their afternoon in Google should not be bookable for it much longer.
+    suggestedCron: "*/15 * * * *",
+    run: (options) => syncStaleCalendars(options),
   },
 };
 

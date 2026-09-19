@@ -3,6 +3,8 @@ import mongoose from "mongoose";
 export const AUTH_TOKEN_PURPOSE = {
   EMAIL_VERIFICATION: "EMAIL_VERIFICATION",
   PASSWORD_RESET: "PASSWORD_RESET",
+  /** Six-digit code texted to a mobile number before it is trusted (§41 Phase 2). */
+  PHONE_VERIFICATION: "PHONE_VERIFICATION",
 };
 
 /**
@@ -17,6 +19,15 @@ const AuthTokenSchema = new mongoose.Schema(
     expiresAt: { type: Date, required: true },
     consumedAt: { type: Date, default: null },
     requestedIp: { type: String },
+    /**
+     * What the token was issued *for*, when that is not the account itself —
+     * the mobile number a phone-verification code was sent to. Confirming a
+     * code proves the holder of that number, so the number is bound to the
+     * token rather than read back from a request that could name another.
+     */
+    subject: { type: String, trim: true },
+    /** Wrong guesses so far. A code is burned after a handful (§36). */
+    attempts: { type: Number, default: 0 },
   },
   { timestamps: true },
 );

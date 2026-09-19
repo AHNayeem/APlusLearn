@@ -17,6 +17,8 @@ import { formatMoney } from "@/lib/utils/format";
 import { holdMinutes } from "@/lib/booking/policy";
 import { getPaymentProvider } from "./external/payment-provider";
 import { getSettings } from "./settings.service";
+import { spendCredit, releaseCredit } from "./credit.service";
+import { reverseReferralsForBooking } from "./referral.service";
 import { brandedEmailTemplates } from "./external/email-provider";
 import { notify } from "./notification.service";
 import { recordAudit } from "./audit.service";
@@ -61,10 +63,76 @@ export async function createPaymentForBooking({ bookings, purchaserId, tutorUser
     provider: provider.name,
   });
 
+  // Account credit is applied server-side, from the stored balance, after the
+  // price is computed — never from anything the browser sent (§42). The
+  // lesson's value and the tutor's earnings are untouched: the platform's
+  // commission absorbs the credit, so a discounted booking still pays the
+  // tutor in full (§41 Phase 2).
+  const credit = await spendCredit({
+    userId: purchaserId,
+    maxCents: totals.totalCents,
+    paymentId: payment._id,
+    bookingId: bookings[0]._id,
+    note: bookings[0].courseCode
+      ? `Applied to ${bookings[0].courseCode}`
+      : "Applied to a booking",
+  });
+
+  if (credit.appliedCents > 0) {
+    payment.creditAppliedCents = credit.appliedCents;
+    payment.totalCents = Math.max(0, totals.totalCents - credit.appliedCents);
+    await payment.save();
+  }
+
   // The bookings are linked to this payment by the caller a moment from now,
   // so their ids are passed in rather than read back.
   const checkout = await openCheckoutSession(payment, bookings[0], provider, {
     bookingIds: bookings.map((b) => String(b._id)),
+  });
+
+  return { ...toPlain(payment), checkoutUrl: checkout.checkoutUrl };
+}
+
+/**
+ * Create the payment for a package purchase (§41 Phase 2).
+ *
+ * Deliberately the same function shape, the same provider call, the same
+ * checkout session and the same webhook path as a booking. A package is a
+ * different thing to buy, not a different way to pay — so the only difference
+ * here is which field on the Payment names what was bought.
+ */
+export async function createPaymentForPackage({ purchase, purchaserId, tutorUserId }) {
+  const provider = getPaymentProvider();
+
+  const payment = await Payment.create({
+    packagePurchaseId: purchase._id,
+    purchaserId,
+    tutorUserId,
+    subtotalCents: purchase.priceCents,
+    commissionPercent: purchase.commissionPercent,
+    commissionCents: purchase.perSessionCommissionCents * purchase.sessionsTotal,
+    tutorEarningsCents: purchase.perSessionTutorEarningsCents * purchase.sessionsTotal,
+    totalCents: purchase.priceCents,
+    status: PAYMENT_STATUS.REQUIRES_PAYMENT,
+    provider: provider.name,
+  });
+
+  const credit = await spendCredit({
+    userId: purchaserId,
+    maxCents: purchase.priceCents,
+    paymentId: payment._id,
+    note: `Applied to ${purchase.title}`,
+  });
+
+  if (credit.appliedCents > 0) {
+    payment.creditAppliedCents = credit.appliedCents;
+    payment.totalCents = Math.max(0, purchase.priceCents - credit.appliedCents);
+    await payment.save();
+  }
+
+  const checkout = await openCheckoutSession(payment, null, provider, {
+    packageTitle: purchase.title,
+    reference: purchase.reference,
   });
 
   return { ...toPlain(payment), checkoutUrl: checkout.checkoutUrl };
@@ -77,23 +145,28 @@ export async function createPaymentForBooking({ bookings, purchaserId, tutorUser
  * over lunch, `checkoutUrlFor()` calls this again rather than showing them a
  * dead page. The amount always comes from the Payment row.
  */
-async function openCheckoutSession(payment, booking, provider = getPaymentProvider(), { bookingIds } = {}) {
+async function openCheckoutSession(payment, booking, provider = getPaymentProvider(), { bookingIds, packageTitle, reference } = {}) {
   const [purchaser, settings] = await Promise.all([
     User.findById(payment.purchaserId).select("email paymentCustomerId").lean(),
     getSettings(),
   ]);
 
-  const ids =
-    bookingIds ??
-    (await Booking.find({ paymentId: payment._id }).select("_id").lean()).map((b) => String(b._id));
+  // A package payment has no bookings to name; a lesson payment has at least
+  // one, and looks them up when the caller did not pass them.
+  const ids = payment.packagePurchaseId
+    ? []
+    : bookingIds ??
+      (await Booking.find({ paymentId: payment._id }).select("_id").lean()).map((b) => String(b._id));
 
   const checkout = await provider.createCheckout({
-    bookingReference: booking?.reference ?? String(payment._id),
+    bookingReference: reference ?? booking?.reference ?? String(payment._id),
     amountCents: payment.totalCents,
     currency: payment.currency,
-    description: booking?.courseName
-      ? `${booking.courseName} — APlus Learn lesson`
-      : "APlus Learn lessons",
+    description: packageTitle
+      ? `${packageTitle} — APlus Learn package`
+      : booking?.courseName
+        ? `${booking.courseName} — APlus Learn lesson`
+        : "APlus Learn lessons",
     customerEmail: purchaser?.email,
     customerId: purchaser?.paymentCustomerId ?? undefined,
     successUrl: appUrl(`/bookings/checkout/${payment._id}/complete`),
@@ -107,6 +180,9 @@ async function openCheckoutSession(payment, booking, provider = getPaymentProvid
     metadata: {
       paymentId: String(payment._id),
       bookingIds: ids.join(","),
+      ...(payment.packagePurchaseId
+        ? { packagePurchaseId: String(payment.packagePurchaseId) }
+        : {}),
     },
   });
 
@@ -263,6 +339,14 @@ export async function refundPayment(paymentId, { amountCents, reason, issuedBy }
       : PAYMENT_STATUS.PARTIALLY_REFUNDED;
   await payment.save();
 
+  // A reward earned by a lesson that has now been refunded is unwound, so a
+  // refund cannot be used to keep the credit and the money (§41 Phase 2).
+  // Best-effort: a referral problem must never block a refund reaching
+  // somebody's card.
+  await reverseReferralsForBooking(payment.bookingId, {
+    reason: "The qualifying lesson was refunded.",
+  }).catch((error) => console.warn("[payment] referral reversal failed:", error.message));
+
   const purchaser = await User.findById(payment.purchaserId).select("firstName").lean();
 
   await notify({
@@ -386,7 +470,40 @@ export async function markPaymentFailed(paymentId, { failureReason } = {}) {
   payment.failureReason = failureReason ?? "The payment was declined.";
   await payment.save();
 
+  await returnAppliedCredit(payment, "The payment was not completed.");
+
   return { changed: true, payment: toPlain(payment) };
+}
+
+/**
+ * Give back credit that was applied to a payment which never settled.
+ *
+ * Idempotent on the payment, twice over: `creditReleasedAt` short-circuits
+ * the common case, and the ledger entry carries a key scoped to the payment
+ * so even a concurrent second call grants nothing extra (§41 Phase 2).
+ */
+export async function returnAppliedCredit(payment, note) {
+  if (!payment?.creditAppliedCents || payment.creditReleasedAt) return { released: false };
+
+  // A settled payment consumed its credit; only an unpaid one gets it back.
+  if (payment.status === PAYMENT_STATUS.PAID || payment.status === PAYMENT_STATUS.PARTIALLY_REFUNDED) {
+    return { released: false, reason: "SETTLED" };
+  }
+
+  const claimed = await Payment.updateOne(
+    { _id: payment._id, creditReleasedAt: null },
+    { $set: { creditReleasedAt: new Date() } },
+  );
+  if (!claimed.modifiedCount) return { released: false, reason: "ALREADY_RELEASED" };
+
+  await releaseCredit({
+    userId: payment.purchaserId,
+    amountCents: payment.creditAppliedCents,
+    paymentId: payment._id,
+    note,
+  });
+
+  return { released: true, amountCents: payment.creditAppliedCents };
 }
 
 /**

@@ -3,14 +3,14 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { Check, X, MessageSquare, CalendarDays, Sparkles, Users } from "lucide-react";
+import { Check, X, MessageSquare, CalendarDays, Send, Users } from "lucide-react";
 import { cn } from "@/lib/utils/cn";
 import { api } from "@/lib/api/client";
 import {
   Avatar, Badge, Button, Card, CardBody, EmptyState, Rating, useToast,
 } from "@/components/ui";
 import { formatRate, formatDistance } from "@/lib/utils/format";
-import { MATCH_STATUS } from "@/constants";
+import { MATCH_STATUS, MATCH_STATUS_LABELS, REQUEST_VISIBILITY } from "@/constants";
 import { VerificationBadges } from "@/components/tutor/VerificationBadges";
 
 /**
@@ -19,10 +19,13 @@ import { VerificationBadges } from "@/components/tutor/VerificationBadges";
  * Interested tutors come first, then scored suggestions. Each card explains
  * *why* the tutor was matched, so the ranking is never a black box.
  */
-export function MatchComparison({ matches, requestId }) {
+export function MatchComparison({ matches, requestId, request }) {
   const router = useRouter();
   const toast = useToast();
   const [pendingId, setPendingId] = useState(null);
+
+  const isOpen = request ? request.status === "OPEN" : true;
+  const inviteOnly = request?.visibility === REQUEST_VISIBILITY.INVITE_ONLY;
 
   const respond = async (matchId, action) => {
     setPendingId(matchId);
@@ -32,6 +35,25 @@ export function MatchComparison({ matches, requestId }) {
       router.refresh();
     } catch (error) {
       toast.error("Couldn't update", error.message);
+    } finally {
+      setPendingId(null);
+    }
+  };
+
+  /**
+   * Invite one suggested tutor. The same endpoint the bulk invite uses, so
+   * the eligibility and cap checks are identical whichever way it is reached.
+   */
+  const invite = async (match) => {
+    setPendingId(match.id);
+    try {
+      await api.post(`/api/requests/${requestId}/invite`, {
+        tutorProfileIds: [match.tutor.id],
+      });
+      toast.success("Invitation sent", `${match.tutor.displayName} has been notified.`);
+      router.refresh();
+    } catch (error) {
+      toast.error("Couldn't invite", error.message);
     } finally {
       setPendingId(null);
     }
@@ -55,8 +77,12 @@ export function MatchComparison({ matches, requestId }) {
   const interested = matches.filter((m) =>
     [MATCH_STATUS.TUTOR_INTERESTED, MATCH_STATUS.SHORTLISTED, MATCH_STATUS.BOOKED].includes(m.status),
   );
+  const invited = matches.filter((m) => m.status === MATCH_STATUS.INVITED);
   const suggested = matches.filter((m) => m.status === MATCH_STATUS.SUGGESTED);
-  const declined = matches.filter((m) => m.status === MATCH_STATUS.DECLINED);
+  // Everything that has ended, whichever side ended it.
+  const closed = matches.filter((m) =>
+    [MATCH_STATUS.DECLINED, MATCH_STATUS.TUTOR_DECLINED, MATCH_STATUS.WITHDRAWN].includes(m.status),
+  );
 
   return (
     <div className="space-y-8">
@@ -78,17 +104,16 @@ export function MatchComparison({ matches, requestId }) {
         </section>
       )}
 
-      {suggested.length > 0 && (
+      {invited.length > 0 && (
         <section>
           <h2 className="mb-1 text-sm font-bold text-ink-900">
-            Suggested matches ({suggested.length})
+            Invited ({invited.length})
           </h2>
           <p className="mb-3 text-xs text-ink-500">
-            These tutors have been notified but haven&rsquo;t responded yet. You can message them
-            directly.
+            You invited these tutors directly. We&rsquo;ll tell you as soon as they reply.
           </p>
           <div className="grid gap-4 lg:grid-cols-2">
-            {suggested.map((match) => (
+            {invited.map((match) => (
               <MatchCard
                 key={match.id}
                 match={match}
@@ -100,13 +125,37 @@ export function MatchComparison({ matches, requestId }) {
         </section>
       )}
 
-      {declined.length > 0 && (
+      {suggested.length > 0 && (
+        <section>
+          <h2 className="mb-1 text-sm font-bold text-ink-900">
+            Suggested matches ({suggested.length})
+          </h2>
+          <p className="mb-3 text-xs text-ink-500">
+            {inviteOnly
+              ? "Your request is invite-only, so these tutors have not been told about it. Invite the ones you like."
+              : "These tutors have been notified but haven't responded yet. You can invite or message them directly."}
+          </p>
+          <div className="grid gap-4 lg:grid-cols-2">
+            {suggested.map((match) => (
+              <MatchCard
+                key={match.id}
+                match={match}
+                onRespond={respond}
+                onInvite={isOpen ? invite : undefined}
+                pending={pendingId === match.id}
+              />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {closed.length > 0 && (
         <section>
           <h2 className="mb-3 text-sm font-bold text-ink-400">
-            Declined ({declined.length})
+            Not going ahead ({closed.length})
           </h2>
           <div className="grid gap-4 lg:grid-cols-2">
-            {declined.map((match) => (
+            {closed.map((match) => (
               <MatchCard key={match.id} match={match} onRespond={respond} muted />
             ))}
           </div>
@@ -116,7 +165,7 @@ export function MatchComparison({ matches, requestId }) {
   );
 }
 
-function MatchCard({ match, onRespond, pending, muted }) {
+function MatchCard({ match, onRespond, onInvite, pending, muted }) {
   const { tutor } = match;
   const isShortlisted = match.status === MATCH_STATUS.SHORTLISTED;
   const hasResponded = Boolean(match.message);
@@ -182,10 +231,21 @@ function MatchCard({ match, onRespond, pending, muted }) {
           </blockquote>
         )}
 
-        {!hasResponded && (
+        {match.status === MATCH_STATUS.TUTOR_DECLINED && (
+          <p className="mt-3 text-xs italic text-ink-500">
+            This tutor declined{match.declineReason ? `: “${match.declineReason}”` : "."}
+          </p>
+        )}
+        {match.status === MATCH_STATUS.WITHDRAWN && (
+          <p className="mt-3 text-xs italic text-ink-500">This tutor withdrew their reply.</p>
+        )}
+        {!hasResponded && match.status === MATCH_STATUS.SUGGESTED && (
           <p className="mt-3 text-xs italic text-ink-400">
             Suggested by our matching service — hasn&rsquo;t responded yet.
           </p>
+        )}
+        {match.status === MATCH_STATUS.INVITED && (
+          <p className="mt-3 text-xs italic text-ink-400">Invited — waiting for a reply.</p>
         )}
 
         <div className="mt-auto flex flex-wrap gap-2 border-t border-ink-100 pt-4">
@@ -204,6 +264,18 @@ function MatchCard({ match, onRespond, pending, muted }) {
           >
             Book
           </Button>
+
+          {!muted && onInvite && !hasResponded && (
+            <Button
+              variant="subtle"
+              size="sm"
+              loading={pending}
+              onClick={() => onInvite(match)}
+              iconLeft={<Send className="size-3.5" />}
+            >
+              Invite
+            </Button>
+          )}
 
           {!muted && hasResponded && !isShortlisted && (
             <>
@@ -228,6 +300,11 @@ function MatchCard({ match, onRespond, pending, muted }) {
           {isShortlisted && (
             <Badge tone="brand" className="self-center">
               Shortlisted
+            </Badge>
+          )}
+          {muted && (
+            <Badge tone="neutral" className="self-center">
+              {MATCH_STATUS_LABELS[match.status]}
             </Badge>
           )}
         </div>

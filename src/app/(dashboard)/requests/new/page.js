@@ -4,7 +4,6 @@ import { connectToDatabase } from "@/lib/db/connect";
 import { enforceRole } from "@/lib/auth/guards";
 import { LEARNER_ROLES } from "@/constants";
 import { listStudents } from "@/services/student.service";
-import { listProvinces } from "@/services/curriculum.service";
 import { Alert, Button, EmptyState } from "@/components/ui";
 import { DashboardPage, PageHeader } from "@/components/layout/DashboardShell";
 import { RequestForm } from "@/components/dashboard/RequestForm";
@@ -19,10 +18,7 @@ export default async function NewRequestPage() {
   const user = await enforceRole(LEARNER_ROLES, "/requests/new");
   await connectToDatabase();
 
-  const [students, provinces] = await Promise.all([
-    listStudents(user),
-    listProvinces({ activeOnly: true }),
-  ]);
+  const students = await listStudents(user);
 
   return (
     <DashboardPage>
@@ -48,7 +44,7 @@ export default async function NewRequestPage() {
             action={<Button href="/children?new=1">Add a child</Button>}
           />
         ) : (
-          <RequestForm students={students} provinces={provinces} />
+          <RequestForm students={students} />
         )}
       </div>
     </DashboardPage>

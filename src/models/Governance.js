@@ -2,6 +2,7 @@ import mongoose from "mongoose";
 import {
   DISPUTE_STATUS, DISPUTE_REASONS, AUDIT_ACTIONS, DEFAULT_SETTINGS,
 } from "../constants/index.js";
+import { MATCH_FACTOR_KEYS } from "../lib/matching/weights.js";
 const DisputeSchema = new mongoose.Schema(
   {
     reference: { type: String, required: true, unique: true, index: true },
@@ -197,10 +198,176 @@ const FeaturesSchema = new mongoose.Schema(
   group,
 );
 
-const NotificationSettingsSchema = new mongoose.Schema(
+/**
+ * Tutor-request and matching controls (§22, §41 Phase 2).
+ *
+ * Bounded rather than free-form: a `minimumScore` above 100 would silently
+ * empty every request's suggestions, and an unbounded `maxSuggestions` is a
+ * denial-of-service against the matcher.
+ */
+const MatchingSchema = new mongoose.Schema(
+  {
+    minimumScore: { type: Number, default: defaults.matching.minimumScore, min: 0, max: 100 },
+    maxSuggestions: { type: Number, default: defaults.matching.maxSuggestions, min: 1, max: 100 },
+    notifyTopTutors: { type: Number, default: defaults.matching.notifyTopTutors, min: 0, max: 50 },
+    requestTtlDays: { type: Number, default: defaults.matching.requestTtlDays, min: 1, max: 365 },
+    requestExpiryWarningDays: {
+      type: Number,
+      default: defaults.matching.requestExpiryWarningDays,
+      min: 0,
+      max: 60,
+    },
+    maxOpenRequestsPerOwner: {
+      type: Number,
+      default: defaults.matching.maxOpenRequestsPerOwner,
+      min: 1,
+      max: 100,
+    },
+    maxInvitesPerRequest: {
+      type: Number,
+      default: defaults.matching.maxInvitesPerRequest,
+      min: 1,
+      max: 50,
+    },
+  },
+  group,
+);
+
+/**
+ * Relative importance of each matching factor. The scorer rescales these onto
+ * a total of 100, so an operator can think in whatever units they like.
+ */
+const MatchWeightsSchema = new mongoose.Schema(
   Object.fromEntries(
-    Object.keys(defaults.notifications).map((key) => [key, { type: Boolean, default: true }]),
+    MATCH_FACTOR_KEYS.map((key) => [
+      key,
+      { type: Number, default: defaults.matchWeights[key], min: 0, max: 100 },
+    ]),
   ),
+  group,
+);
+
+/**
+ * Notification switches. Every flag defaults to on except SMS, which is off
+ * until an operator has a carrier behind it (§28, §41 Phase 2), and the
+ * per-number ceiling, which is a number rather than a flag.
+ */
+const NOTIFICATION_NUMBER_KEYS = ["smsPerNumberHourlyLimit"];
+
+/**
+ * Referral rules (§41 Phase 2). The reward amounts ship at zero because the
+ * requirements name the feature without pricing it; everything else works.
+ */
+const ReferralSettingsSchema = new mongoose.Schema(
+  {
+    enabled: { type: Boolean, default: defaults.referrals.enabled },
+    referrerRewardCents: {
+      type: Number,
+      default: defaults.referrals.referrerRewardCents,
+      min: 0,
+      max: 100000,
+    },
+    refereeRewardCents: {
+      type: Number,
+      default: defaults.referrals.refereeRewardCents,
+      min: 0,
+      max: 100000,
+    },
+    qualifyingLessons: {
+      type: Number,
+      default: defaults.referrals.qualifyingLessons,
+      min: 1,
+      max: 20,
+    },
+    rewardExpiryDays: {
+      type: Number,
+      default: defaults.referrals.rewardExpiryDays,
+      min: 0,
+      max: 3650,
+    },
+    maxRewardsPerReferrer: {
+      type: Number,
+      default: defaults.referrals.maxRewardsPerReferrer,
+      min: 1,
+      max: 1000,
+    },
+  },
+  group,
+);
+
+/** Tutor package rules (§41 Phase 2). */
+const PackageSettingsSchema = new mongoose.Schema(
+  {
+    enabled: { type: Boolean, default: defaults.packages.enabled },
+    minSessions: { type: Number, default: defaults.packages.minSessions, min: 1, max: 100 },
+    maxSessions: { type: Number, default: defaults.packages.maxSessions, min: 1, max: 100 },
+    defaultValidityDays: {
+      type: Number,
+      default: defaults.packages.defaultValidityDays,
+      min: 1,
+      max: 730,
+    },
+    maxValidityDays: { type: Number, default: defaults.packages.maxValidityDays, min: 1, max: 730 },
+    maxActivePerTutor: {
+      type: Number,
+      default: defaults.packages.maxActivePerTutor,
+      min: 1,
+      max: 50,
+    },
+    expiryRefundPercent: {
+      type: Number,
+      default: defaults.packages.expiryRefundPercent,
+      min: 0,
+      max: 100,
+    },
+    expiryWarningDays: {
+      type: Number,
+      default: defaults.packages.expiryWarningDays,
+      min: 0,
+      max: 90,
+    },
+  },
+  group,
+);
+
+/** Group tutoring rules (§41 Phase 2). */
+const GroupSettingsSchema = new mongoose.Schema(
+  {
+    enabled: { type: Boolean, default: defaults.groups.enabled },
+    minParticipants: { type: Number, default: defaults.groups.minParticipants, min: 1, max: 100 },
+    maxParticipants: { type: Number, default: defaults.groups.maxParticipants, min: 1, max: 100 },
+    confirmationDeadlineHours: {
+      type: Number,
+      default: defaults.groups.confirmationDeadlineHours,
+      min: 0,
+      max: 336,
+    },
+    underMinimumRefundPercent: {
+      type: Number,
+      default: defaults.groups.underMinimumRefundPercent,
+      min: 0,
+      max: 100,
+    },
+    maxWaitlist: { type: Number, default: defaults.groups.maxWaitlist, min: 0, max: 100 },
+    maxOpenPerTutor: { type: Number, default: defaults.groups.maxOpenPerTutor, min: 1, max: 100 },
+  },
+  group,
+);
+
+const NotificationSettingsSchema = new mongoose.Schema(
+  {
+    ...Object.fromEntries(
+      Object.keys(defaults.notifications)
+        .filter((key) => !NOTIFICATION_NUMBER_KEYS.includes(key))
+        .map((key) => [key, { type: Boolean, default: defaults.notifications[key] }]),
+    ),
+    smsPerNumberHourlyLimit: {
+      type: Number,
+      default: defaults.notifications.smsPerNumberHourlyLimit,
+      min: 0,
+      max: 50,
+    },
+  },
   group,
 );
 
@@ -277,6 +444,11 @@ const SettingsSchema = new mongoose.Schema(
     footer: { type: FooterSchema, default: () => ({}) },
     features: { type: FeaturesSchema, default: () => ({}) },
     notifications: { type: NotificationSettingsSchema, default: () => ({}) },
+    matching: { type: MatchingSchema, default: () => ({}) },
+    matchWeights: { type: MatchWeightsSchema, default: () => ({}) },
+    referrals: { type: ReferralSettingsSchema, default: () => ({}) },
+    packages: { type: PackageSettingsSchema, default: () => ({}) },
+    groups: { type: GroupSettingsSchema, default: () => ({}) },
 
     updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
   },

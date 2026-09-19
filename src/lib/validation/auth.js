@@ -15,6 +15,20 @@ export const registerSchema = z
     city: z.string().trim().max(80).optional(),
     acceptTerms: z.literal(true, { message: "You must accept the terms to continue." }),
     marketingOptIn: z.boolean().default(false),
+    /**
+     * A referral code, if they arrived with one (§41 Phase 2).
+     *
+     * Deliberately lenient: an unknown or malformed code is ignored by the
+     * service rather than refused here. Somebody mistyping a friend's code is
+     * not a reason to stop them creating an account.
+     */
+    referralCode: z
+      .string()
+      .trim()
+      .toUpperCase()
+      .max(16)
+      .optional()
+      .or(z.literal("").transform(() => undefined)),
   })
   .refine((data) => data.password === data.confirmPassword, {
     message: "Passwords do not match.",

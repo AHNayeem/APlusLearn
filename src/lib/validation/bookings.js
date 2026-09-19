@@ -26,6 +26,13 @@ export const availabilityQuerySchema = z.object({
  */
 export const createBookingSchema = z
   .object({
+    /**
+     * Pay for this lesson from a package the family already bought
+     * (§41 Phase 2). Ownership, balance, tutor, course, duration and mode are
+     * all re-checked server-side — naming a package here proves nothing (§42).
+     */
+    packagePurchaseId: objectId.optional(),
+
     tutorProfileId: objectId,
     studentProfileId: objectId,
     courseId: objectId,

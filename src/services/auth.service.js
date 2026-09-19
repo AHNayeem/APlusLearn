@@ -14,6 +14,7 @@ import { toPlain } from "@/lib/utils/serialize";
 import { sendEmail, brandedEmailTemplates } from "./external/email-provider";
 import { getOAuthProvider } from "./external/oauth-provider";
 import { recordAudit } from "./audit.service";
+import { attributeReferral } from "./referral.service";
 
 const VERIFY_TTL_MS = 24 * 60 * 60 * 1000;
 const RESET_TTL_MS = 60 * 60 * 1000;
@@ -52,6 +53,18 @@ export async function register(input, { request } = {}) {
       lastName: user.lastName,
       provinceCode: input.provinceCode,
       isMinor: false,
+    });
+  }
+
+  // A referral that cannot be attributed — unknown code, self-referral, an
+  // account already introduced by somebody — is a quiet no-op. Creating an
+  // account must never fail because a code was wrong (§41 Phase 2).
+  if (input.referralCode) {
+    await attributeReferral({
+      code: input.referralCode,
+      refereeUserId: user._id,
+      email: user.email,
+      ip: request?.headers?.get?.("x-forwarded-for")?.split(",")[0]?.trim(),
     });
   }
 

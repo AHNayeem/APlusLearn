@@ -6,6 +6,7 @@ import {
 import {
   isLegible, isUsableAsSolid, isUsableAsSurface, MIN_TEXT_CONTRAST, normalizeHex,
 } from "@/lib/theme/palette";
+import { MATCH_FACTOR_KEYS } from "@/lib/matching/weights";
 import { objectId, cents, provinceCode, courseCode, email, url } from "./common";
 
 export const adminUserQuerySchema = z.object({
@@ -181,7 +182,83 @@ const notificationSettingsSchema = z.object({
   reviewEmails: z.boolean().optional(),
   payoutEmails: z.boolean().optional(),
   announcementEmails: z.boolean().optional(),
+  smsEnabled: z.boolean().optional(),
+  smsPerNumberHourlyLimit: z.coerce.number().int().min(0).max(50).optional(),
 });
+
+/**
+ * Tutor-request and matching controls (§22, §41 Phase 2). Bounded so a
+ * mistyped value degrades the ranking rather than emptying it.
+ */
+const matchingSchema = z.object({
+  minimumScore: z.coerce.number().int().min(0).max(100).optional(),
+  maxSuggestions: z.coerce.number().int().min(1).max(100).optional(),
+  notifyTopTutors: z.coerce.number().int().min(0).max(50).optional(),
+  requestTtlDays: z.coerce.number().int().min(1).max(365).optional(),
+  requestExpiryWarningDays: z.coerce.number().int().min(0).max(60).optional(),
+  maxOpenRequestsPerOwner: z.coerce.number().int().min(1).max(100).optional(),
+  maxInvitesPerRequest: z.coerce.number().int().min(1).max(50).optional(),
+});
+
+/**
+ * Relative factor weights. The scorer rescales them onto 100, so the only
+ * thing that would break is every weight being zero — refused here.
+ */
+const matchWeightsSchema = z
+  .object(
+    Object.fromEntries(
+      MATCH_FACTOR_KEYS.map((key) => [key, z.coerce.number().min(0).max(100).optional()]),
+    ),
+  )
+  .refine(
+    (v) =>
+      Object.values(v).every((n) => n === undefined) ||
+      Object.values(v).some((n) => (n ?? 0) > 0),
+    { message: "At least one factor must carry some weight.", path: ["course"] },
+  );
+
+const referralSettingsSchema = z.object({
+  enabled: z.boolean().optional(),
+  referrerRewardCents: z.coerce.number().int().min(0).max(100000).optional(),
+  refereeRewardCents: z.coerce.number().int().min(0).max(100000).optional(),
+  qualifyingLessons: z.coerce.number().int().min(1).max(20).optional(),
+  rewardExpiryDays: z.coerce.number().int().min(0).max(3650).optional(),
+  maxRewardsPerReferrer: z.coerce.number().int().min(1).max(1000).optional(),
+});
+
+const packageSettingsSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    minSessions: z.coerce.number().int().min(1).max(100).optional(),
+    maxSessions: z.coerce.number().int().min(1).max(100).optional(),
+    defaultValidityDays: z.coerce.number().int().min(1).max(730).optional(),
+    maxValidityDays: z.coerce.number().int().min(1).max(730).optional(),
+    maxActivePerTutor: z.coerce.number().int().min(1).max(50).optional(),
+    expiryRefundPercent: z.coerce.number().int().min(0).max(100).optional(),
+    expiryWarningDays: z.coerce.number().int().min(0).max(90).optional(),
+  })
+  .refine(
+    (v) => v.minSessions === undefined || v.maxSessions === undefined || v.minSessions <= v.maxSessions,
+    { message: "The smallest package cannot be larger than the biggest.", path: ["minSessions"] },
+  );
+
+const groupSettingsSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    minParticipants: z.coerce.number().int().min(1).max(100).optional(),
+    maxParticipants: z.coerce.number().int().min(1).max(100).optional(),
+    confirmationDeadlineHours: z.coerce.number().int().min(0).max(336).optional(),
+    underMinimumRefundPercent: z.coerce.number().int().min(0).max(100).optional(),
+    maxWaitlist: z.coerce.number().int().min(0).max(100).optional(),
+    maxOpenPerTutor: z.coerce.number().int().min(1).max(100).optional(),
+  })
+  .refine(
+    (v) =>
+      v.minParticipants === undefined ||
+      v.maxParticipants === undefined ||
+      v.minParticipants <= v.maxParticipants,
+    { message: "The smallest group cannot be larger than the biggest.", path: ["minParticipants"] },
+  );
 
 export const platformSettingsSchema = z
   .object({
@@ -213,6 +290,11 @@ export const platformSettingsSchema = z
     footer: footerSchema.optional(),
     features: featuresSchema.optional(),
     notifications: notificationSettingsSchema.optional(),
+    matching: matchingSchema.optional(),
+    matchWeights: matchWeightsSchema.optional(),
+    referrals: referralSettingsSchema.optional(),
+    packages: packageSettingsSchema.optional(),
+    groups: groupSettingsSchema.optional(),
   })
   // Unknown keys are dropped rather than rejected — `updatedBy`, `key` and the
   // timestamps come back on every GET and a round-tripping form would resend

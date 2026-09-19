@@ -8,7 +8,9 @@ import {
   Favourite,
   TutorRequest,
 } from "@/models";
-import { USER_STATUS, ROLES, BOOKING_STATUS, AUDIT_ACTIONS, PAGE_SIZES } from "@/constants";
+import {
+  USER_STATUS, ROLES, BOOKING_STATUS, AUDIT_ACTIONS, PAGE_SIZES, NOTIFICATION_CHANNELS,
+} from "@/constants";
 import { NotFoundError, BusinessRuleError, AuthenticationError } from "@/lib/api/errors";
 import { toPlain, compact } from "@/lib/utils/serialize";
 import { verifyPassword } from "@/lib/auth/password";
@@ -62,6 +64,30 @@ export async function updateNotificationPreferences(userId, preferences) {
       .filter(([, v]) => v !== undefined)
       .map(([k, v]) => [`notificationPreferences.${k}`, v]),
   );
+
+  // Switching the text channel on is a claim about a number, so it is checked
+  // against the account rather than taken from the request: a preference
+  // cannot be the thing that authorises texting an unconfirmed handset, and
+  // it can never override a STOP the carrier forwarded (§36, §41 Phase 2).
+  if (preferences[NOTIFICATION_CHANNELS.SMS] === true) {
+    const account = await User.findById(userId)
+      .select("phoneE164 phoneVerifiedAt smsOptOutAt")
+      .lean();
+    if (!account) throw new NotFoundError("We couldn't find that account.");
+
+    if (!account.phoneE164 || !account.phoneVerifiedAt) {
+      throw new BusinessRuleError(
+        "Confirm a mobile number before turning text messages on.",
+        "PHONE_NOT_VERIFIED",
+      );
+    }
+    if (account.smsOptOutAt) {
+      throw new BusinessRuleError(
+        "This number replied STOP. Text START to our number to receive messages again.",
+        "SMS_OPTED_OUT",
+      );
+    }
+  }
 
   const user = await User.findByIdAndUpdate(userId, { $set: update }, { returnDocument: "after" }).lean();
   if (!user) throw new NotFoundError("We couldn't find that account.");

@@ -37,6 +37,23 @@ const UserSchema = new mongoose.Schema(
     firstName: { type: String, required: true, trim: true, maxlength: 60 },
     lastName: { type: String, required: true, trim: true, maxlength: 60 },
     phone: { type: String, trim: true, maxlength: 30 },
+    /**
+     * Mobile number in E.164, and when it was proved (§41 Phase 2).
+     *
+     * `phone` stays as the person typed it, for display and for support.
+     * `phoneE164` is the only value ever handed to an SMS provider, and a text
+     * is only ever sent once `phoneVerifiedAt` is set — an unconfirmed number
+     * may belong to somebody else entirely, and texting it would leak a
+     * lesson time to a stranger (§36).
+     */
+    phoneE164: { type: String, trim: true, maxlength: 20, index: true, sparse: true },
+    phoneVerifiedAt: { type: Date, default: null },
+    /**
+     * Set when the carrier forwards STOP. It outranks every preference,
+     * including one the account holder set themselves, because honouring it
+     * is a legal duty rather than a setting.
+     */
+    smsOptOutAt: { type: Date, default: null },
     avatarUrl: { type: String, trim: true },
 
     role: { type: String, enum: Object.values(ROLES), required: true, index: true },
@@ -77,6 +94,17 @@ const UserSchema = new mongoose.Schema(
     },
 
     notificationPreferences: { type: NotificationPreferenceSchema, default: () => ({}) },
+
+    /**
+     * The code this account shares, and the balance it has earned (§41 Phase 2).
+     *
+     * `creditBalanceCents` is authoritative rather than derived: a single
+     * conditional `$inc` on this one document is what makes "spend at most
+     * what you have" safe against two checkouts racing, which a sum over a
+     * ledger can never be without transactions. `CreditEntry` explains it.
+     */
+    referralCode: { type: String, uppercase: true, trim: true, index: true, sparse: true },
+    creditBalanceCents: { type: Number, default: 0, min: 0 },
 
     marketingOptIn: { type: Boolean, default: false },
     acceptedTermsAt: { type: Date },

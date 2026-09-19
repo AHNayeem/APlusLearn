@@ -1,8 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Mail, Lock, User, Check } from "lucide-react";
+import { Mail, Lock, User, Check, Gift } from "lucide-react";
 import { cn } from "@/lib/utils/cn";
 import { api } from "@/lib/api/client";
 import { useSubmit } from "@/hooks/useAsync";
@@ -47,7 +47,13 @@ export function RegisterForm({ oauthProviders }) {
     confirmPassword: "",
     acceptTerms: false,
     marketingOptIn: false,
+    // A referral link carries the code in the query string (§41 Phase 2).
+    // An unknown or mistyped code is ignored server-side rather than refused,
+    // so this never stands between somebody and an account.
+    referralCode: params.get("ref")?.slice(0, 16).toUpperCase() ?? "",
   });
+
+  const [referral, setReferral] = useState(null);
 
   const set = (key) => (event) =>
     setForm((f) => ({
@@ -55,14 +61,46 @@ export function RegisterForm({ oauthProviders }) {
       [key]: event.target.type === "checkbox" ? event.target.checked : event.target.value,
     }));
 
+  // Confirm the code belongs to somebody, so a mistyped one is noticed before
+  // the account exists rather than silently earning nobody anything.
+  //
+  // The answer is stored with the code it was for, and only rendered when the
+  // two still agree — that keeps the effect free of a synchronous state write
+  // and stops a slow reply describing a code that has since been retyped.
+  useEffect(() => {
+    const code = form.referralCode.trim();
+    if (code.length < 4) return undefined;
+
+    let cancelled = false;
+    api
+      .get(`/api/referrals/code/${encodeURIComponent(code)}`)
+      .then((data) => {
+        if (!cancelled) setReferral({ code, ...data });
+      })
+      .catch(() => {
+        if (!cancelled) setReferral({ code, valid: false });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [form.referralCode]);
+
   const { submit, pending, error, fieldErrors } = useSubmit(async () => {
-    const result = await api.post("/api/auth/register", form);
+    const result = await api.post("/api/auth/register", {
+      ...form,
+      referralCode: form.referralCode.trim() || undefined,
+    });
     router.push(next?.startsWith("/") ? next : result.redirectTo);
     router.refresh();
     return result;
   });
 
   const issues = passwordIssues(form.password);
+
+  // Only trust the lookup while it still describes what is in the field.
+  const checkedReferral =
+    referral && referral.code === form.referralCode.trim() ? referral : null;
 
   return (
     <div className="mt-8">
@@ -193,6 +231,37 @@ export function RegisterForm({ oauthProviders }) {
             error={fieldErrors.confirmPassword}
             iconLeft={<Lock className="size-4" />}
           />
+        </Field>
+
+        <Field
+          label="Referral code"
+          htmlFor="referralCode"
+          hint="Optional — if a friend gave you one."
+          error={fieldErrors.referralCode}
+        >
+          <Input
+            id="referralCode"
+            autoComplete="off"
+            maxLength={16}
+            value={form.referralCode}
+            onChange={(e) =>
+              setForm((f) => ({ ...f, referralCode: e.target.value.toUpperCase().trim() }))
+            }
+            error={fieldErrors.referralCode}
+            iconLeft={<Gift className="size-4" />}
+            placeholder="ABCD2345"
+          />
+          {checkedReferral?.valid && (
+            <p className="mt-1.5 flex items-center gap-1.5 text-xs font-medium text-success-700">
+              <Check className="size-3.5" />
+              {checkedReferral.referrerName} invited you.
+            </p>
+          )}
+          {checkedReferral && !checkedReferral.valid && (
+            <p className="mt-1.5 text-xs text-ink-500">
+              We don&rsquo;t recognise that code. You can still create your account.
+            </p>
+          )}
         </Field>
 
         <div className="space-y-3">

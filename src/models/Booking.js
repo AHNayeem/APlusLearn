@@ -68,6 +68,30 @@ const CancellationSchema = new mongoose.Schema(
   { _id: false },
 );
 
+/**
+ * A lesson as it exists on somebody's external calendar (§18, §41 Phase 2).
+ *
+ * One entry per connection the lesson was pushed to. The pair
+ * (connectionId, booking) is what makes the push idempotent: a retry finds
+ * the existing entry and updates that event instead of creating a second one,
+ * so a tutor never ends up with the same lesson twice in their week.
+ */
+const ExternalEventSchema = new mongoose.Schema(
+  {
+    connectionId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "CalendarConnection",
+      required: true,
+    },
+    provider: { type: String, trim: true },
+    eventId: { type: String, trim: true },
+    state: { type: String, trim: true },
+    syncedAt: { type: Date },
+    error: { type: String, trim: true, maxlength: 300 },
+  },
+  { _id: false },
+);
+
 const BookingSchema = new mongoose.Schema(
   {
     reference: { type: String, required: true, unique: true, index: true }, // APL-7F3K2Q
@@ -125,6 +149,17 @@ const BookingSchema = new mongoose.Schema(
 
     price: { type: PriceBreakdownSchema, required: true },
     paymentId: { type: mongoose.Schema.Types.ObjectId, ref: "Payment", index: true },
+    /**
+     * Set when this lesson was drawn from a package rather than paid for on
+     * its own (§41 Phase 2). `paymentId` still points at the package's
+     * payment, so refunds and receipts resolve exactly as they always did.
+     */
+    packagePurchaseId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "PackagePurchase",
+      index: true,
+      sparse: true,
+    },
     payoutId: { type: mongoose.Schema.Types.ObjectId, ref: "Payout", index: true },
 
     /** Recurring series link. The first booking is its own series parent. */
@@ -144,6 +179,26 @@ const BookingSchema = new mongoose.Schema(
     /** Set once a review exists, so "leave a review" prompts disappear. */
     reviewId: { type: mongoose.Schema.Types.ObjectId, ref: "Review" },
     remindersSent: { type: [String], default: [] },
+
+    /**
+     * Set when this booking is one learner's place in a group session
+     * (§41 Phase 2).
+     *
+     * The booking stays an ordinary booking — its own price, payment, status
+     * and cancellation — which is what lets payouts, refunds and reviews work
+     * unchanged. What it does not do is hold the tutor's slot on its own: the
+     * group session reserved that once, and several bookings legitimately
+     * share the same hour.
+     */
+    groupSessionId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "GroupSession",
+      index: true,
+      sparse: true,
+    },
+
+    /** Where this lesson has been mirrored onto an external calendar (§18). */
+    externalEvents: { type: [ExternalEventSchema], default: [] },
   },
   { timestamps: true },
 );
