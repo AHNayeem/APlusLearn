@@ -1,244 +1,259 @@
+import { Suspense } from "react";
 import Link from "next/link";
-import * as Icons from "lucide-react";
-import { Search, BookOpen, ArrowRight } from "lucide-react";
+import { SearchX, Sparkles } from "lucide-react";
 import { connectToDatabase } from "@/lib/db/connect";
-import {
-  listCourses, listGrades, listSubjects, listProvinces,
-} from "@/services/curriculum.service";
 import { courseSearchSchema } from "@/lib/validation/search";
 import {
-  Badge, Button, Card, CardBody, EmptyState, Pagination, Reveal, RevealGroup, RevealItem,
-} from "@/components/ui";
-import { PageHero } from "@/components/marketing/PageHero";
-import { Section } from "@/components/home/Sections";
-import { cn } from "@/lib/utils/cn";
-
-export const metadata = {
-  title: "Browse courses",
-  description:
-    "Every Ontario course APlus Learn covers, from Grade 1 numeracy to MCV4U. Find a tutor for the exact course on your child's timetable.",
-  alternates: { canonical: "/courses" },
-};
+  listCourses, courseFacets, listGrades, listSubjects, listProvinces,
+} from "@/services/curriculum.service";
+import { Button, EmptyState, Pagination, Skeleton } from "@/components/ui";
+import { CourseCard } from "@/components/course/CourseCard";
+import { CourseFilters } from "@/components/search/CourseFilters";
+import { CourseToolbar } from "@/components/search/CourseToolbar";
+import { RefineCourseSearch } from "@/components/search/RefineCourseSearch";
 
 export const dynamic = "force-dynamic";
 
-export default async function CoursesPage({ searchParams }) {
-  await connectToDatabase();
+export async function generateMetadata({ searchParams }) {
+  const params = await searchParams;
+  const subject = params.subject ? params.subject.replace(/-/g, " ") : "";
+  const grade = params.grade ? params.grade.replace(/-/g, " ") : "";
 
+  const what = [grade, subject].filter(Boolean).join(" ");
+  const title = what ? `${what} courses` : "Browse courses";
+
+  return {
+    title,
+    description: what
+      ? `Every ${what} course APlus Learn covers. Filter by stream, grade and tutor availability, then find a tutor for the exact course on your child's timetable.`
+      : "Every Ontario course APlus Learn covers, from Grade 1 numeracy to MCV4U. Filter by grade, subject, stream and tutor availability.",
+    alternates: { canonical: "/courses" },
+    // Filtered permutations shouldn't compete with the canonical course pages.
+    robots: Object.keys(params).length > 2 ? { index: false, follow: true } : undefined,
+  };
+}
+
+export default async function CoursesPage({ searchParams }) {
   const raw = await searchParams;
+
+  // Invalid query strings fall back to defaults rather than erroring — a
+  // pasted or truncated URL should still show results.
   const parsed = courseSearchSchema.safeParse(raw);
   const params = parsed.success ? parsed.data : courseSearchSchema.parse({});
 
-  const [result, grades, subjects, provinces] = await Promise.all([
-    listCourses({ ...params, province: params.province ?? "ON", pageSize: 36 }),
+  return (
+    <div className="bg-canvas pb-16">
+      <CoursesHeader params={params} />
+      <div className="container-wide">
+        <Suspense fallback={<CoursesSkeleton />} key={JSON.stringify(raw)}>
+          <CourseResults params={params} rawParams={raw} />
+        </Suspense>
+      </div>
+    </div>
+  );
+}
+
+async function CoursesHeader({ params }) {
+  await connectToDatabase();
+  const [provinces, grades, subjects] = await Promise.all([
+    listProvinces({ activeOnly: false }),
     listGrades({ provinceCode: params.province ?? "ON" }),
     listSubjects(),
-    listProvinces({ activeOnly: false }),
   ]);
 
-  const buildHref = (overrides) => {
-    const next = new URLSearchParams();
-    for (const [key, value] of Object.entries({ ...params, ...overrides })) {
-      if (!value || key === "pageSize") continue;
-      next.set(key, String(value));
-    }
+  return (
+    <div className="border-b border-ink-200 bg-white">
+      <div className="container-wide py-6">
+        <h1 className="text-2xl font-extrabold tracking-tight text-ink-900 sm:text-3xl">
+          Browse courses
+        </h1>
+        <p className="mt-1 text-sm text-ink-500">
+          Search by the code on the report card — an Ontario course code maps to exactly one set
+          of curriculum expectations, so it&rsquo;s the most precise place to start.
+        </p>
+        <RefineCourseSearch
+          className="mt-5"
+          provinces={provinces}
+          grades={grades}
+          subjects={subjects}
+        />
+      </div>
+    </div>
+  );
+}
+
+async function CourseResults({ params, rawParams }) {
+  await connectToDatabase();
+
+  const province = params.province ?? "ON";
+  const query = { ...params, province };
+
+  const [result, facets, grades, subjects] = await Promise.all([
+    listCourses({ ...query, pageSize: params.pageSize ?? 24 }),
+    courseFacets(query),
+    listGrades({ provinceCode: province }),
+    listSubjects(),
+  ]);
+
+  // The card tints its plate from the course code, but falls back to the
+  // subject's icon for elementary courses that have none.
+  const iconBySubject = new Map(subjects.map((s) => [s.slug, s.icon]));
+  const courses = result.items.map((course) => ({
+    ...course,
+    subjectIcon: iconBySubject.get(course.subjectSlug),
+  }));
+
+  const resolved = {
+    grade: grades.find((g) => g.slug === params.grade) ?? null,
+    subject: subjects.find((s) => s.slug === params.subject) ?? null,
+  };
+
+  const buildHref = (page) => {
+    const next = new URLSearchParams(
+      Object.entries(rawParams).filter(([, v]) => typeof v === "string"),
+    );
+    next.set("page", String(page));
     return `/courses?${next.toString()}`;
   };
 
   return (
-    <>
-      <PageHero
-        eyebrow="Courses"
-        title="Search by the code on the report card"
-        description="Ontario course codes map to exactly one set of curriculum expectations. Start there and you'll find tutors who have actually taught it."
-      >
-        <form action="/courses" className="flex max-w-lg gap-2">
-          <input type="hidden" name="province" value={params.province ?? "ON"} />
-          <div className="relative flex-1">
-            <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-ink-400" />
-            <label className="sr-only" htmlFor="course-search">
-              Search courses
-            </label>
-            <input
-              id="course-search"
-              name="q"
-              defaultValue={params.q ?? ""}
-              placeholder="MHF4U, Advanced Functions, Grade 9 math…"
-              className="h-11 w-full rounded-xl border-0 bg-white pl-9 pr-3 text-sm shadow-xs ring-1 ring-inset ring-ink-200 focus:ring-2 focus:ring-brand-500 focus:outline-none"
-            />
-          </div>
-          <Button type="submit" size="md" className="h-11">
-            Search
-          </Button>
-        </form>
-      </PageHero>
+    <div className="grid gap-8 py-8 lg:grid-cols-[17rem_1fr]">
+      <CourseFilters facets={facets} grades={grades} subjects={subjects} />
 
-      <Section tone="muted">
-        <div className="grid gap-8 lg:grid-cols-[15rem_1fr]">
-          <Reveal>
-            <aside aria-label="Course filters" className="space-y-6 lg:sticky lg:top-24">
-              <div>
-                <h2 className="mb-3 text-xs font-bold uppercase tracking-wide text-ink-900">
-                  Grade
-                </h2>
-                <ul className="space-y-1">
-                  <li>
-                    <Link
-                      href={buildHref({ grade: "", page: "" })}
-                      className={cn(
-                        "block rounded-lg px-3 py-1.5 text-sm transition-colors",
-                        !params.grade
-                          ? "bg-brand-50 font-semibold text-brand-700"
-                          : "text-ink-600 hover:bg-ink-100",
-                      )}
-                    >
-                      All grades
-                    </Link>
-                  </li>
-                  {grades.map((grade) => (
-                    <li key={grade.id}>
-                      <Link
-                        href={buildHref({ grade: grade.slug, page: "" })}
-                        className={cn(
-                          "block rounded-lg px-3 py-1.5 text-sm transition-colors",
-                          params.grade === grade.slug
-                            ? "bg-brand-50 font-semibold text-brand-700"
-                            : "text-ink-600 hover:bg-ink-100",
-                        )}
-                      >
-                        {grade.name}
-                      </Link>
-                    </li>
-                  ))}
-                </ul>
-              </div>
+      <div className="min-w-0">
+        <CourseToolbar total={result.total} resolved={resolved} />
 
-              <div>
-                <h2 className="mb-3 text-xs font-bold uppercase tracking-wide text-ink-900">
-                  Subject
-                </h2>
-                <ul className="space-y-1">
-                  <li>
-                    <Link
-                      href={buildHref({ subject: "", page: "" })}
-                      className={cn(
-                        "block rounded-lg px-3 py-1.5 text-sm transition-colors",
-                        !params.subject
-                          ? "bg-brand-50 font-semibold text-brand-700"
-                          : "text-ink-600 hover:bg-ink-100",
-                      )}
-                    >
-                      All subjects
-                    </Link>
-                  </li>
-                  {subjects.map((subject) => (
-                    <li key={subject.id}>
-                      <Link
-                        href={buildHref({ subject: subject.slug, page: "" })}
-                        className={cn(
-                          "block rounded-lg px-3 py-1.5 text-sm transition-colors",
-                          params.subject === subject.slug
-                            ? "bg-brand-50 font-semibold text-brand-700"
-                            : "text-ink-600 hover:bg-ink-100",
-                        )}
-                      >
-                        {subject.name}
-                      </Link>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            </aside>
-          </Reveal>
-
-          <div className="min-w-0">
-            <p className="mb-5 text-sm text-ink-500">
-              <span className="font-bold text-ink-900">{result.total}</span>{" "}
-              {result.total === 1 ? "course" : "courses"}
-              {params.q && (
-                <>
-                  {" "}matching <span className="font-semibold text-ink-900">“{params.q}”</span>
-                </>
-              )}
-            </p>
-
-            {result.items.length === 0 ? (
-              <EmptyState
-                icon={<BookOpen className="size-7" />}
-                title="No courses match"
-                description="Try a different search, or browse by grade and subject."
-                action={<Button href="/courses">Clear filters</Button>}
-              />
-            ) : (
-              <RevealGroup className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-                {result.items.map((course) => (
-                  <RevealItem key={course.id}>
-                    <CourseCard course={course} />
-                  </RevealItem>
-                ))}
-              </RevealGroup>
-            )}
+        {courses.length === 0 ? (
+          <NoResults params={params} />
+        ) : (
+          <>
+            <div className="mt-6 flex flex-col gap-4">
+              {courses.map((course) => (
+                <CourseCard key={course.id} course={course} layout="wide" />
+              ))}
+            </div>
 
             <Pagination
-              className="mt-8"
+              className="mt-10"
               page={result.page}
-              totalPages={Math.max(1, Math.ceil(result.total / result.pageSize))}
+              totalPages={result.totalPages}
               total={result.total}
               pageSize={result.pageSize}
               label="courses"
-              buildHref={(p) => buildHref({ page: p })}
+              buildHref={buildHref}
             />
-          </div>
-        </div>
-      </Section>
-    </>
+          </>
+        )}
+      </div>
+    </div>
   );
 }
 
-function CourseCard({ course }) {
-  const href = course.code
-    ? `/find-a-tutor?courseCode=${course.code}&province=${course.provinceCode}`
-    : `/find-a-tutor?course=${course.slug}&grade=${course.gradeSlug}&province=${course.provinceCode}`;
+/**
+ * Empty state that actually helps: it suggests which filter to relax rather
+ * than only reporting that nothing matched (§32).
+ */
+function NoResults({ params }) {
+  const suggestions = [];
+  if (params.hasTutors) {
+    suggestions.push({ label: "Include courses without tutors", href: relaxed(params, { hasTutors: "" }) });
+  }
+  if (params.stream?.length) {
+    suggestions.push({ label: "Any stream", href: relaxed(params, { stream: "" }) });
+  }
+  if (params.stage?.length || params.minGrade !== undefined || params.maxGrade !== undefined) {
+    suggestions.push({ label: "Any grade", href: relaxed(params, { stage: "", minGrade: "", maxGrade: "", grade: "" }) });
+  }
+  if (params.subject) {
+    suggestions.push({ label: "All subjects", href: relaxed(params, { subject: "" }) });
+  }
+  if (params.hasCode !== undefined) {
+    suggestions.push({ label: "Coded and uncoded courses", href: relaxed(params, { hasCode: "" }) });
+  }
+  if (params.q) {
+    suggestions.push({ label: "Clear the search term", href: relaxed(params, { q: "" }) });
+  }
 
   return (
-    <Link
-      href={href}
-      className="group flex h-full flex-col rounded-2xl border border-ink-200 bg-canvas p-5 transition-all duration-200 hover:-translate-y-0.5 hover:border-brand-300 hover:shadow-lg motion-reduce:hover:translate-y-0"
-    >
-      <div className="flex items-start gap-3">
-        <span className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-brand-600 text-[10px] font-black text-white">
-          {course.code ?? "ON"}
-        </span>
-        <div className="min-w-0 flex-1">
-          <h3 className="text-sm font-bold text-ink-900 group-hover:text-brand-700">
-            {course.name}
-          </h3>
-          <p className="mt-0.5 text-xs text-ink-500">
-            Grade {course.gradeLevel} · {course.subjectName}
-            {course.stream ? ` · ${course.stream}` : ""}
-          </p>
+    <EmptyState
+      className="mt-6"
+      icon={<SearchX className="size-7" />}
+      title="No courses match all of those filters"
+      description={
+        suggestions.length
+          ? "Try relaxing one of these, or tell us what you're looking for and we'll find a tutor for it."
+          : "We don't have that course loaded yet. Post a request and we'll match you with a tutor who teaches it."
+      }
+      action={
+        <div className="flex flex-col items-center gap-4">
+          {suggestions.length > 0 && (
+            <div className="flex flex-wrap justify-center gap-2">
+              {suggestions.slice(0, 3).map((s) => (
+                <Link
+                  key={s.label}
+                  href={s.href}
+                  className="rounded-full bg-brand-50 px-3.5 py-2 text-xs font-semibold text-brand-700 ring-1 ring-inset ring-brand-200 transition-colors hover:bg-brand-100"
+                >
+                  {s.label}
+                </Link>
+              ))}
+            </div>
+          )}
+          <Button href="/requests/new" iconLeft={<Sparkles className="size-4" />}>
+            Post a tutor request
+          </Button>
+        </div>
+      }
+    />
+  );
+}
+
+function relaxed(params, changes) {
+  const next = new URLSearchParams();
+  for (const [key, value] of Object.entries({ ...params, ...changes })) {
+    if (value === undefined || value === null || value === "" || key === "page" || key === "pageSize") continue;
+    next.set(key, Array.isArray(value) ? value.join(",") : String(value));
+  }
+  return `/courses?${next.toString()}`;
+}
+
+function CoursesSkeleton() {
+  return (
+    <div className="grid gap-8 py-8 lg:grid-cols-[17rem_1fr]">
+      <div className="hidden lg:block">
+        <div className="h-[36rem] rounded-2xl shimmer" />
+      </div>
+      <div className="min-w-0" role="status" aria-label="Loading courses">
+        <div className="h-5 w-40 rounded shimmer" />
+        <div className="mt-6 flex flex-col gap-4">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <CourseCardSkeleton key={i} />
+          ))}
+        </div>
+        <span className="sr-only">Loading courses…</span>
+      </div>
+    </div>
+  );
+}
+
+/** Mirrors the wide card's plate-plus-text shape so the swap doesn't jump. */
+function CourseCardSkeleton() {
+  return (
+    <div className="rounded-2xl border border-ink-200 bg-white p-4 sm:p-5">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
+        <Skeleton className="size-14 shrink-0 rounded-2xl sm:size-16" />
+        <div className="flex min-w-0 flex-1 flex-col gap-3">
+          <div className="flex items-start justify-between gap-4">
+            <div className="flex-1 space-y-2">
+              <Skeleton className="h-5 w-2/5" />
+              <Skeleton className="h-4 w-3/5" />
+            </div>
+            <Skeleton className="h-6 w-24 rounded-full" />
+          </div>
+          <Skeleton className="h-8 w-full" />
+          <Skeleton className="h-4 w-1/3" />
         </div>
       </div>
-
-      {course.description && (
-        <p className="mt-3 line-clamp-3 text-xs leading-relaxed text-ink-500">
-          {course.description}
-        </p>
-      )}
-
-      <div className="mt-auto flex items-center justify-between gap-2 pt-4">
-        {course.tutorCount > 0 ? (
-          <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-success-700">
-            <span className="size-1.5 rounded-full bg-success-500" />
-            {course.tutorCount} {course.tutorCount === 1 ? "tutor" : "tutors"}
-          </span>
-        ) : (
-          <span className="text-xs text-ink-400">No tutors yet</span>
-        )}
-        <span className="text-xs font-semibold text-brand-600 opacity-0 transition-opacity group-hover:opacity-100">
-          Find tutors →
-        </span>
-      </div>
-    </Link>
+    </div>
   );
 }

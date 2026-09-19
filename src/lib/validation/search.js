@@ -1,5 +1,7 @@
 import { z } from "zod";
-import { LESSON_MODES, QUALIFICATION_TYPES, VERIFICATION_TYPES } from "@/constants";
+import {
+  COURSE_SORTS, GRADE_STAGES, LESSON_MODES, QUALIFICATION_TYPES, VERIFICATION_TYPES,
+} from "@/constants";
 import { csvArray, boolQuery, provinceCode } from "./common";
 
 /**
@@ -45,12 +47,29 @@ export const tutorSearchSchema = z.object({
   pageSize: z.coerce.number().int().min(1).max(48).optional(),
 });
 
+/**
+ * Course browse query (§13). Mirrors the tutor schema's shape so the two
+ * search pages can share their URL conventions — every filter is a string in
+ * the URL, coerced and bounded here before it reaches the query builder.
+ */
 export const courseSearchSchema = z.object({
+  // What
   q: z.string().trim().max(80).optional(),
   province: provinceCode.optional(),
-  grade: z.string().trim().max(40).optional(),
-  subject: z.string().trim().max(60).optional(),
+  grade: z.string().trim().max(40).optional(), // slug, e.g. "grade-12"
+  subject: z.string().trim().max(60).optional(), // slug, e.g. "mathematics"
+
+  // Narrowing
+  stage: csvArray(z.enum(GRADE_STAGES.map((s) => s.value))),
+  stream: csvArray(z.string().trim().max(40)),
+  minGrade: z.coerce.number().int().min(0).max(12).optional(),
+  maxGrade: z.coerce.number().int().min(0).max(12).optional(),
+  hasTutors: boolQuery,
+  hasCode: boolQuery,
   popular: boolQuery,
+
+  // Presentation
+  sort: z.enum(COURSE_SORTS).default("RELEVANCE"),
   page: z.coerce.number().int().min(1).max(200).default(1),
   pageSize: z.coerce.number().int().min(1).max(60).optional(),
 });

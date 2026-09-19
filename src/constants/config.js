@@ -381,3 +381,32 @@ export const UPLOAD = {
   maxDocumentBytes: 8 * 1024 * 1024,
   acceptedDocumentTypes: ["application/pdf", "image/jpeg", "image/png", "image/webp"],
 };
+
+/**
+ * Course browse (§13).
+ *
+ * Grade stages are expressed as `gradeLevel` ranges rather than a join onto
+ * `Grade.stage`, because courses carry the denormalised level already — so the
+ * stage filter costs no extra lookup and works for provinces whose grades
+ * haven't been loaded yet.
+ */
+export const GRADE_STAGES = [
+  { value: "ELEMENTARY", label: "Elementary", hint: "K–6", minLevel: 0, maxLevel: 6 },
+  { value: "MIDDLE", label: "Middle school", hint: "Grades 7–8", minLevel: 7, maxLevel: 8 },
+  { value: "SECONDARY", label: "Secondary", hint: "Grades 9–12", minLevel: 9, maxLevel: 12 },
+];
+
+export const GRADE_STAGE_LABELS = Object.fromEntries(
+  GRADE_STAGES.map((stage) => [stage.value, stage.label]),
+);
+
+export const COURSE_SORT_OPTIONS = [
+  { value: "RELEVANCE", label: "Best match" },
+  { value: "TUTORS", label: "Most tutors" },
+  { value: "GRADE_DESC", label: "Grade: high to low" },
+  { value: "GRADE_ASC", label: "Grade: low to high" },
+  { value: "NAME", label: "Course name (A–Z)" },
+  { value: "CODE", label: "Course code (A–Z)" },
+];
+
+export const COURSE_SORTS = COURSE_SORT_OPTIONS.map((option) => option.value);
