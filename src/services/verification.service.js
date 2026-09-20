@@ -12,7 +12,7 @@ import {
 import { NotFoundError, BusinessRuleError, AuthorizationError } from "@/lib/api/errors";
 import { toPlain } from "@/lib/utils/serialize";
 import { inspectDocument, safeFileName } from "@/lib/images/inspect";
-import { getStorageProvider, STORAGE_SCOPES } from "./external/storage-provider";
+import { getStorageProvider, getStorageProviderForRead, STORAGE_SCOPES } from "./external/storage-provider";
 import { notify } from "./notification.service";
 import { recordAudit } from "./audit.service";
 
@@ -113,7 +113,7 @@ export async function uploadVerificationDocument(
   // it ends up in a response header when the document is served back.
   const fileName = safeFileName(file.name, `${type}.pdf`);
 
-  const stored = await getStorageProvider().put({
+  const stored = await (await getStorageProvider()).put({
     buffer,
     fileName,
     contentType,
@@ -157,7 +157,7 @@ export async function readVerificationDocument(documentId, admin) {
     .lean();
   if (!document) throw new NotFoundError("That document no longer exists.");
 
-  const buffer = await getStorageProvider().get({
+  const buffer = await (await getStorageProviderForRead()).get({
     storageKey: document.storageKey,
     scope: STORAGE_SCOPES.DOCUMENTS,
   });

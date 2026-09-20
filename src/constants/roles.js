@@ -92,6 +92,14 @@ export const PERMISSIONS = {
   ADMIN_RISK_MANAGE: "ADMIN_RISK_MANAGE",
   ADMIN_ANALYTICS_VIEW: "ADMIN_ANALYTICS_VIEW",
   ADMIN_SETTINGS_MANAGE: "ADMIN_SETTINGS_MANAGE",
+  /**
+   * External modules — provider credentials, webhook secrets, connection
+   * tests. Held apart from ADMIN_SETTINGS_MANAGE on purpose: editing the
+   * footer copy and rotating the Stripe secret key are not the same act, and
+   * a future limited-administrator role should be able to do the first
+   * without being able to do the second (§36).
+   */
+  ADMIN_INTEGRATION_MANAGE: "ADMIN_INTEGRATION_MANAGE",
 };
 
 const LEARNER_PERMISSIONS = [

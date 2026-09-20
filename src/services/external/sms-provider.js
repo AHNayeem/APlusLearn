@@ -1,6 +1,8 @@
 import "server-only";
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { requireIntegration, resolveIntegration, DEVELOPMENT } from "@/lib/config/env";
+import { DEVELOPMENT } from "@/lib/config/env";
+import { requireIntegrationConfig, resolveIntegrationConfig } from "@/lib/config/integrations";
+import { INTEGRATION_MODULES } from "@/constants";
 
 /**
  * SMS abstraction (§38, §41 Phase 2).
@@ -36,6 +38,18 @@ export class SmsProvider {
   async send() {
     throw new Error("not implemented");
   }
+
+  /**
+   * Prove the credentials open the account, without sending a message.
+   *
+   * An operator checking their configuration should not have to text a real
+   * phone — and pay for it — to find out the auth token is wrong (§39).
+   *
+   * @returns {Promise<{ ok: boolean, code: string, message: string }>}
+   */
+  async verify() {
+    return { ok: false, code: "NOT_SUPPORTED", message: "This provider cannot be tested." };
+  }
 }
 
 export class ConsoleSmsProvider extends SmsProvider {
@@ -45,6 +59,15 @@ export class ConsoleSmsProvider extends SmsProvider {
 
   get configured() {
     return false;
+  }
+
+  async verify() {
+    return {
+      ok: false,
+      code: "NO_CARRIER",
+      message:
+        "No SMS provider is configured, so messages are printed to the server log and never reach a phone.",
+    };
   }
 
   async send({ to, body }) {
@@ -143,6 +166,71 @@ export class TwilioSmsProvider extends SmsProvider {
       segments: Number(payload.num_segments) || undefined,
     };
   }
+
+  /**
+   * Fetch the account itself — a read-only call that costs nothing and sends
+   * nothing, but proves the SID and auth token belong together.
+   *
+   * Also reports the account's own status, because a suspended Twilio account
+   * accepts credentials happily and then refuses every message, which is a
+   * confusing way to find out.
+   */
+  async verify() {
+    if (!this.accountSid || !this.authToken) {
+      return { ok: false, code: "NOT_CONFIGURED", message: "An account SID and auth token are required." };
+    }
+
+    let response;
+    try {
+      response = await this.fetch(
+        `${TWILIO_API}/Accounts/${encodeURIComponent(this.accountSid)}.json`,
+        {
+          headers: {
+            Authorization: `Basic ${Buffer.from(`${this.accountSid}:${this.authToken}`).toString("base64")}`,
+          },
+        },
+      );
+    } catch (error) {
+      return { ok: false, code: "UNREACHABLE", message: `Twilio could not be reached: ${error.message}` };
+    }
+
+    if (response.status === 401) {
+      return { ok: false, code: "INVALID_CREDENTIALS", message: "Twilio rejected the account SID or auth token." };
+    }
+    if (response.status === 404) {
+      return { ok: false, code: "INVALID_CREDENTIALS", message: "Twilio does not recognise that account SID." };
+    }
+    if (response.status === 429) {
+      return { ok: false, code: "RATE_LIMITED", message: "Twilio is rate limiting this account. Try again shortly." };
+    }
+    if (!response.ok) {
+      return { ok: false, code: "PROVIDER_ERROR", message: `Twilio answered HTTP ${response.status}.` };
+    }
+
+    const payload = await response.json().catch(() => ({}));
+    if (payload.status && payload.status !== "active") {
+      return {
+        ok: false,
+        code: "ACCOUNT_SUSPENDED",
+        message: `The credentials are valid, but the Twilio account is ${payload.status}. Messages would be refused.`,
+      };
+    }
+
+    if (!this.from && !this.messagingServiceSid) {
+      return {
+        ok: false,
+        code: "NO_SENDER",
+        message: "The credentials are valid, but no from number or messaging service is set, so nothing can be sent.",
+      };
+    }
+
+    const sender = this.messagingServiceSid ? "a messaging service" : this.from;
+    return {
+      ok: true,
+      code: "OK",
+      message: `Connected to ${payload.friendly_name ?? "the Twilio account"}, sending from ${sender}.`,
+    };
+  }
 }
 
 /**
@@ -173,44 +261,56 @@ export function verifyTwilioSignature({ signature, url, params, authToken }) {
 
 let cached = null;
 
-export function getSmsProvider() {
-  const { name } = requireIntegration("sms");
-  if (cached?.key === name) return cached.provider;
+/**
+ * Build the adapter one resolved configuration describes.
+ *
+ * Exported so a connection test can construct a provider from a configuration
+ * that has been saved but not yet switched on.
+ */
+export function buildSmsProvider(resolved) {
+  if (resolved.provider !== "twilio") return new ConsoleSmsProvider();
 
-  let provider;
-  if (name === "twilio") {
-    provider = new TwilioSmsProvider({
-      accountSid: process.env.TWILIO_ACCOUNT_SID,
-      authToken: process.env.TWILIO_AUTH_TOKEN,
-      from: process.env.TWILIO_FROM_NUMBER,
-      messagingServiceSid: process.env.TWILIO_MESSAGING_SERVICE_SID,
-      statusCallbackUrl: process.env.TWILIO_STATUS_CALLBACK_URL,
-    });
+  return new TwilioSmsProvider({
+    accountSid: resolved.config.accountSid,
+    authToken: resolved.secrets.authToken,
+    from: resolved.config.fromNumber,
+    messagingServiceSid: resolved.config.messagingServiceSid,
+    statusCallbackUrl: resolved.config.statusCallbackUrl,
+  });
+}
 
-    // Twilio's two sender styles are both optional individually and required
-    // together, which `INTEGRATIONS` cannot express — so it is checked here,
-    // at the first use, rather than failing once per message at the carrier.
-    if (!provider.configured) {
-      const error = new Error(
-        "SMS: SMS_PROVIDER=twilio needs either TWILIO_FROM_NUMBER or TWILIO_MESSAGING_SERVICE_SID.",
-      );
-      error.status = 503;
-      error.code = "PROVIDER_MISCONFIGURED";
-      error.expose = true;
-      throw error;
-    }
-  } else {
-    provider = new ConsoleSmsProvider();
+export async function getSmsProvider() {
+  const resolved = await requireIntegrationConfig(INTEGRATION_MODULES.SMS);
+
+  const key = `${resolved.provider}:${resolved.source}:${resolved.updatedAt?.getTime?.() ?? 0}`;
+  if (cached?.key === key) return cached.provider;
+
+  const provider = buildSmsProvider(resolved);
+
+  // Twilio's two sender styles are each optional and jointly required, which
+  // a per-field required flag cannot express — so it is checked here, at the
+  // first use, rather than failing once per message at the carrier.
+  if (provider instanceof TwilioSmsProvider && !provider.configured) {
+    // Names both the panel field and the environment variable, because
+    // either could be where this deployment configures Twilio and an
+    // operator should not have to guess which one the message means.
+    const error = new Error(
+      "SMS: Twilio needs either a from number (TWILIO_FROM_NUMBER) or a messaging service SID (TWILIO_MESSAGING_SERVICE_SID).",
+    );
+    error.status = 503;
+    error.code = "PROVIDER_MISCONFIGURED";
+    error.expose = true;
+    throw error;
   }
 
-  cached = { key: name, provider };
+  cached = { key, provider };
   return provider;
 }
 
 /** True when texts actually reach a carrier on this deployment. */
-export function smsConfigured() {
-  const resolved = resolveIntegration("sms");
-  return resolved.configured && resolved.name !== DEVELOPMENT;
+export async function smsConfigured() {
+  const resolved = await resolveIntegrationConfig(INTEGRATION_MODULES.SMS);
+  return resolved.enabled && resolved.configured && resolved.provider !== DEVELOPMENT;
 }
 
 export function resetSmsProvider() {

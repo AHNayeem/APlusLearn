@@ -120,7 +120,7 @@ export async function deliverSms({
   }
 
   try {
-    const result = await getSmsProvider().send({ to, body, idempotencyKey: dedupeKey });
+    const result = await (await getSmsProvider()).send({ to, body, idempotencyKey: dedupeKey });
 
     const status = result.simulated
       ? SMS_STATUS.SIMULATED
@@ -142,6 +142,17 @@ export async function deliverSms({
 
     return { sent: status === SMS_STATUS.SENT, status, simulated: Boolean(result.simulated) };
   } catch (error) {
+    // An operator switching the module off is a decision, not a fault. It is
+    // recorded as a skip with its own reason so the delivery log tells "we
+    // chose not to" apart from "we tried and it broke" — which is the whole
+    // point of keeping deliberate non-sends as first-class rows (§28).
+    if (error?.code === "MODULE_DISABLED") {
+      const patch = { status: SMS_STATUS.SKIPPED, skipReason: SMS_SKIP_REASONS.MODULE_DISABLED };
+      if (claimed) await finish(claimed, patch);
+      else await record({ user, to, body, kind, notification, ...patch });
+      return { sent: false, status: SMS_STATUS.SKIPPED, skipReason: patch.skipReason };
+    }
+
     // A failed text never breaks the thing it was announcing: the lesson is
     // still booked, the code is still valid through the in-app path. The
     // reason is logged; the body never is (§36).
@@ -298,7 +309,7 @@ export async function startPhoneVerification(userId, { phone, phoneE164 }, { ip 
     simulated: Boolean(delivery.simulated),
     expiresInMinutes: VERIFICATION_TTL_MINUTES,
     /** Honest about a deployment with no carrier behind it. */
-    providerConfigured: smsConfigured(),
+    providerConfigured: await smsConfigured(),
   };
 }
 
@@ -476,7 +487,7 @@ export async function listSmsMessages({ status, kind, search, page = 1, pageSize
     page,
     pageSize: size,
     counts: Object.fromEntries(counts.map((c) => [c._id, c.count])),
-    providerConfigured: smsConfigured(),
+    providerConfigured: await smsConfigured(),
   };
 }
 

@@ -2209,6 +2209,532 @@ async function main() {
     !JSON.stringify(adminSettingsPage.payload?.data ?? {}).match(/sk_live|sk_test|whsec|RESEND|api_key/i),
   );
 
+  // --- External modules -----------------------------------------------------
+  //
+  // The admin-configurable integration settings (§26, §36). Two things are
+  // being proved here, and they pull in opposite directions:
+  //
+  //   1. An administrator can genuinely configure a provider — save it, change
+  //      it, test it, switch it off — and the platform actually uses what was
+  //      saved.
+  //   2. Nobody, including that administrator, can read a stored credential
+  //      back out of the application by any route.
+  //
+  // A feature that only satisfied the first would be a credential-disclosure
+  // surface; one that only satisfied the second would be a form that does
+  // nothing. So every assertion below is paired.
+  section("External modules");
+
+  // Start from the deployment environment, whatever a previous run left
+  // behind. A crashed run can leave a module switched off, and a disabled
+  // payment module stops checkout for the whole suite — so this is not
+  // tidiness, it is the difference between one section failing and all of
+  // them failing for a reason that has nothing to do with them.
+  for (const key of ["email", "payment", "calendar", "sms", "storage"]) {
+    await admin(`/api/admin/integrations/${key}`, { method: "DELETE" });
+  }
+
+  // A value with no other reason to exist, so finding it anywhere is proof of
+  // a leak rather than a coincidence.
+  const PLANTED = `re_qa_${Date.now()}_donotleak`;
+  const PLANTED_SMTP = `smtp_qa_${Date.now()}_donotleak`;
+
+  // Authorization, on every endpoint and every method — this is the control,
+  // and the page merely being unreachable is not.
+  for (const [label, path, method, body] of [
+    ["the module list", "/api/admin/integrations", "GET", undefined],
+    ["one module", "/api/admin/integrations/email", "GET", undefined],
+    ["a module save", "/api/admin/integrations/email", "PATCH", { enabled: true }],
+    ["an environment import", "/api/admin/integrations/email", "POST", {}],
+    ["a connection test", "/api/admin/integrations/email/test", "POST", {}],
+    ["a configuration removal", "/api/admin/integrations/email", "DELETE", undefined],
+  ]) {
+    const anonRes = await anon(path, { method, body });
+    check(`anonymous cannot reach ${label}`, anonRes.status === 401, `status ${anonRes.status}`);
+
+    const parentRes = await parent(path, { method, body });
+    check(`a parent cannot reach ${label}`, parentRes.status === 403, `status ${parentRes.status}`);
+
+    const tutorRes = await tutor(path, { method, body });
+    check(`a tutor cannot reach ${label}`, tutorRes.status === 403, `status ${tutorRes.status}`);
+  }
+
+  const modulesList = await admin("/api/admin/integrations");
+  check("an administrator can read the module list", modulesList.ok);
+  check(
+    "every module the platform has is listed",
+    ["email", "payment", "calendar", "sms", "storage"].every((key) =>
+      modulesList.payload?.data?.modules?.some((m) => m.module === key),
+    ),
+  );
+  check(
+    "a module that has never been configured says so rather than claiming to work",
+    modulesList.payload?.data?.modules?.find((m) => m.module === "sms")?.status === "NOT_CONFIGURED",
+    modulesList.payload?.data?.modules?.find((m) => m.module === "sms")?.status,
+  );
+
+  // --- Email: save, mask, update, disable ----------------------------------
+  const emailSave = await admin("/api/admin/integrations/email", {
+    method: "PATCH",
+    body: {
+      enabled: true,
+      provider: "resend",
+      config: { from: "APlus QA <qa@example.com>", replyTo: "reply@example.com" },
+      secrets: { apiKey: PLANTED },
+    },
+  });
+  check("an administrator can save an email configuration", emailSave.ok, JSON.stringify(emailSave.payload?.error));
+  check(
+    "the save response reports the secret as set without returning it",
+    emailSave.payload?.data?.module?.secrets?.apiKey?.set === true &&
+      emailSave.payload?.data?.module?.secrets?.apiKey?.last4 == null,
+  );
+  check(
+    "saving a configuration does not by itself claim the provider works",
+    emailSave.payload?.data?.module?.status === "CONFIGURED",
+    emailSave.payload?.data?.module?.status,
+  );
+
+  const emailRead = await admin("/api/admin/integrations/email");
+  check("the saved non-secret values come back", emailRead.payload?.data?.module?.config?.from === "APlus QA <qa@example.com>");
+  check(
+    "the stored API key is never returned by the API",
+    !JSON.stringify(emailRead.payload).includes(PLANTED),
+  );
+  check(
+    "nor is it returned by the module list",
+    !JSON.stringify((await admin("/api/admin/integrations")).payload).includes(PLANTED),
+  );
+
+  // A partial save must not silently destroy the credential it did not send.
+  const emailPartial = await admin("/api/admin/integrations/email", {
+    method: "PATCH",
+    body: { config: { replyTo: "changed@example.com" } },
+  });
+  check("a save that omits the secret keeps it", emailPartial.payload?.data?.module?.secrets?.apiKey?.set === true);
+  check("and applies the field that was sent", emailPartial.payload?.data?.module?.config?.replyTo === "changed@example.com");
+  check("and leaves the other fields alone", emailPartial.payload?.data?.module?.config?.from === "APlus QA <qa@example.com>");
+
+  // Switching provider must not destroy the configuration being switched away
+  // from — trying SMTP for an afternoon should not cost you your Resend setup.
+  const emailSmtp = await admin("/api/admin/integrations/email", {
+    method: "PATCH",
+    body: {
+      provider: "smtp",
+      config: { host: "smtp.example.com", port: 587, secure: false, username: "qa@example.com", from: "APlus QA <qa@example.com>" },
+      secrets: { password: PLANTED_SMTP },
+    },
+  });
+  check("the provider can be switched", emailSmtp.payload?.data?.module?.provider === "smtp", JSON.stringify(emailSmtp.payload?.error));
+  check("the SMTP password is stored and not returned", emailSmtp.payload?.data?.module?.secrets?.password?.set === true &&
+    !JSON.stringify(emailSmtp.payload).includes(PLANTED_SMTP));
+  check("the Resend key is still stored behind the switch", emailSmtp.payload?.data?.module?.secrets?.apiKey?.set === true);
+  check(
+    "switching provider drops any earlier connection claim",
+    emailSmtp.payload?.data?.module?.lastTest === null ||
+      emailSmtp.payload?.data?.module?.lastTest?.stale === true,
+  );
+
+  // Invalid configuration is refused, per field.
+  const emailBadPort = await admin("/api/admin/integrations/email", {
+    method: "PATCH",
+    body: { provider: "smtp", config: { port: 99999 } },
+  });
+  check("an impossible port is refused", emailBadPort.status === 422, `status ${emailBadPort.status}`);
+  check(
+    "and the refusal names the field",
+    Boolean(emailBadPort.payload?.error?.details?.fieldErrors?.["config.port"]),
+  );
+
+  const emailBadReply = await admin("/api/admin/integrations/email", {
+    method: "PATCH",
+    body: { provider: "smtp", config: { replyTo: "not-an-address" } },
+  });
+  check("a malformed reply-to address is refused", emailBadReply.status === 422);
+
+  const emailUnknownField = await admin("/api/admin/integrations/email", {
+    method: "PATCH",
+    body: { provider: "resend", config: { accountSid: "AC0" } },
+  });
+  check(
+    "a field belonging to another module is refused rather than quietly dropped",
+    emailUnknownField.status === 422,
+    `status ${emailUnknownField.status}`,
+  );
+
+  const email465 = await admin("/api/admin/integrations/email", {
+    method: "PATCH",
+    body: { provider: "smtp", config: { port: 465, secure: false } },
+  });
+  check("port 465 without implicit TLS is refused rather than left to hang", email465.status === 422);
+
+  // A test runs against what is stored, and reports honestly when it fails.
+  const emailTest = await admin("/api/admin/integrations/email/test", { method: "POST", body: {} });
+  check("a connection test returns a verdict rather than an error", emailTest.ok, JSON.stringify(emailTest.payload?.error));
+  check(
+    "bogus credentials are reported as a failure, not a success",
+    emailTest.payload?.data?.result?.ok === false,
+  );
+  check(
+    "the failure message carries no credential",
+    !JSON.stringify(emailTest.payload).includes(PLANTED_SMTP) &&
+      !JSON.stringify(emailTest.payload).includes(PLANTED),
+  );
+
+  const emailAfterFailedTest = await admin("/api/admin/integrations/email");
+  check(
+    "a failed test moves the module to Failing rather than Connected",
+    emailAfterFailedTest.payload?.data?.module?.status === "FAILING",
+    emailAfterFailedTest.payload?.data?.module?.status,
+  );
+
+  const emailBadRecipient = await admin("/api/admin/integrations/email/test", {
+    method: "POST",
+    body: { recipient: "nonsense" },
+  });
+  check("a malformed test recipient is refused before any provider is called", emailBadRecipient.status === 422);
+
+  // Disabling has consequences, including for this screen.
+  await admin("/api/admin/integrations/email", { method: "PATCH", body: { enabled: false } });
+  const emailDisabledTest = await admin("/api/admin/integrations/email/test", { method: "POST", body: {} });
+  check(
+    "a switched-off module refuses to be tested rather than pretending",
+    !emailDisabledTest.ok,
+    `status ${emailDisabledTest.status}`,
+  );
+  const emailDisabled = await admin("/api/admin/integrations/email");
+  check("and reports itself as disabled", emailDisabled.payload?.data?.module?.status === "DISABLED");
+
+  // A disabled email module must not stop somebody signing up: the send is
+  // skipped, the registration still completes. This is the runtime half of the
+  // switch — the part that makes it more than a database value (§39).
+  const disabledEmailSignup = await createClient()("/api/auth/register", {
+    method: "POST",
+    body: {
+      role: "PARENT",
+      firstName: "Qa",
+      lastName: "Nomail",
+      email: `qa-nomail-${Date.now()}@example.com`,
+      password: PASSWORD,
+      confirmPassword: PASSWORD,
+      acceptTerms: true,
+    },
+  });
+  check(
+    "an account can still be created while email is switched off",
+    disabledEmailSignup.ok,
+    JSON.stringify(disabledEmailSignup.payload?.error),
+  );
+
+  // Clearing a secret is explicit and takes effect. The module is on SMTP by
+  // now, and the schema is strict per provider — naming Resend's key here
+  // would be refused, which is itself the behaviour asserted further up.
+  await admin("/api/admin/integrations/email", { method: "PATCH", body: { enabled: true } });
+  const emailCleared = await admin("/api/admin/integrations/email", {
+    method: "PATCH",
+    body: { secrets: { password: null } },
+  });
+  check("a secret can be removed outright", emailCleared.payload?.data?.module?.secrets?.password?.set === false,
+    JSON.stringify(emailCleared.payload?.error));
+  check("and removing one leaves the others alone", emailCleared.payload?.data?.module?.secrets?.apiKey?.set === true);
+
+  // --- Payments: modes, masking, and not breaking what already works -------
+  const stripeMismatch = await admin("/api/admin/integrations/payment", {
+    method: "PATCH",
+    body: { provider: "stripe", config: { environment: "test" }, secrets: { secretKey: "sk_live_qa000000000000000000" } },
+  });
+  check(
+    "a live key cannot be saved into a module declared as test mode",
+    stripeMismatch.status === 422,
+    `status ${stripeMismatch.status}`,
+  );
+  check(
+    "and the refusal explains which way round the mismatch is",
+    /live mode key/i.test(JSON.stringify(stripeMismatch.payload?.error?.details?.fieldErrors ?? {})),
+  );
+
+  const stripeShape = await admin("/api/admin/integrations/payment", {
+    method: "PATCH",
+    body: { provider: "stripe", config: { environment: "test" }, secrets: { secretKey: "definitely-not-a-stripe-key" } },
+  });
+  check("a value that is not a Stripe key at all is refused", stripeShape.status === 422);
+
+  const stripeWebhookShape = await admin("/api/admin/integrations/payment", {
+    method: "PATCH",
+    body: { provider: "stripe", secrets: { webhookSecret: "not-a-signing-secret" } },
+  });
+  check("a webhook signing secret that is not one is refused", stripeWebhookShape.status === 422);
+
+  const PLANTED_STRIPE = "sk_test_qa000000000000000abcd";
+  const stripeSave = await admin("/api/admin/integrations/payment", {
+    method: "PATCH",
+    body: {
+      provider: "stripe",
+      config: { environment: "test", currency: "CAD" },
+      secrets: { secretKey: PLANTED_STRIPE, webhookSecret: "whsec_qa0000000000000000" },
+    },
+  });
+  check("a matching test-mode key is accepted", stripeSave.ok, JSON.stringify(stripeSave.payload?.error));
+  check(
+    "the Stripe secret key is shown only by its last four characters",
+    stripeSave.payload?.data?.module?.secrets?.secretKey?.last4 === "abcd" &&
+      !JSON.stringify(stripeSave.payload).includes(PLANTED_STRIPE),
+  );
+  check(
+    "the webhook signing secret reveals nothing at all",
+    stripeSave.payload?.data?.module?.secrets?.webhookSecret?.set === true &&
+      stripeSave.payload?.data?.module?.secrets?.webhookSecret?.last4 == null,
+  );
+
+  const stripeModeSwitch = await admin("/api/admin/integrations/payment", {
+    method: "PATCH",
+    body: { config: { environment: "live" } },
+  });
+  check(
+    "switching to live mode without a live key is refused",
+    stripeModeSwitch.status === 422,
+    `status ${stripeModeSwitch.status}`,
+  );
+
+  // The payment module is now pointing at a Stripe key that does not exist, so
+  // the webhook endpoint must still refuse everything it cannot verify — the
+  // configuration changed, the signature rule did not.
+  const hookAfterConfig = await anon("/api/webhooks/payments", {
+    method: "POST",
+    body: { id: "evt_qa_cfg", type: "checkout.session.completed", data: { object: {} } },
+  });
+  check("an unsigned webhook is still refused after the module is reconfigured", hookAfterConfig.status === 400);
+
+  // Put payments back the way the rest of the suite expects. Leaving a bogus
+  // Stripe key behind would break every later checkout assertion, which would
+  // be this section breaking the others rather than finding a real fault.
+  //
+  // Clearing the *secrets* would not do it: the stored record would still name
+  // Stripe, and a Stripe module with no key refuses every checkout — which
+  // would be this section breaking the rest of the suite rather than finding a
+  // fault. Removing the record entirely is the real escape hatch, and an
+  // operator who configured a module by mistake needs exactly this.
+  const paymentRestored = await admin("/api/admin/integrations/payment", { method: "DELETE" });
+  check("a module's stored configuration can be removed outright", paymentRestored.ok);
+  check(
+    "and the module goes back to the deployment environment",
+    paymentRestored.payload?.data?.module?.source !== "database",
+    paymentRestored.payload?.data?.module?.source,
+  );
+  check(
+    "with every credential it was holding destroyed",
+    paymentRestored.payload?.data?.module?.secrets?.secretKey?.set === false,
+  );
+
+  const checkoutStillWorks = await parent("/api/bookings");
+  check("existing payment flows are untouched by all of this", checkoutStillWorks.ok);
+
+  // --- SMS ------------------------------------------------------------------
+  const PLANTED_TWILIO = `twilio_qa_${Date.now()}_donotleak`;
+  const smsNoSender = await admin("/api/admin/integrations/sms", {
+    method: "PATCH",
+    body: {
+      provider: "twilio",
+      config: { accountSid: "AC" + "0".repeat(32) },
+      secrets: { authToken: PLANTED_TWILIO },
+    },
+  });
+  check(
+    "Twilio without a from number or messaging service is refused",
+    smsNoSender.status === 422,
+    `status ${smsNoSender.status}`,
+  );
+
+  const smsBadNumber = await admin("/api/admin/integrations/sms", {
+    method: "PATCH",
+    body: { provider: "twilio", config: { accountSid: "AC" + "0".repeat(32), fromNumber: "416-555-0123" } },
+  });
+  check("a from number that is not in E.164 form is refused", smsBadNumber.status === 422);
+
+  const smsSave = await admin("/api/admin/integrations/sms", {
+    method: "PATCH",
+    body: {
+      enabled: true,
+      provider: "twilio",
+      config: { accountSid: "AC" + "0".repeat(32), fromNumber: "+16475550123" },
+      secrets: { authToken: PLANTED_TWILIO },
+    },
+  });
+  check("a complete Twilio configuration saves", smsSave.ok, JSON.stringify(smsSave.payload?.error));
+  check(
+    "the auth token is stored and never returned",
+    smsSave.payload?.data?.module?.secrets?.authToken?.set === true &&
+      !JSON.stringify(smsSave.payload).includes(PLANTED_TWILIO),
+  );
+  check(
+    "the account SID is shown in full, because it is not a secret",
+    smsSave.payload?.data?.module?.config?.accountSid?.startsWith("AC"),
+  );
+
+  const smsTest = await admin("/api/admin/integrations/sms/test", { method: "POST", body: {} });
+  check("the SMS test reaches the carrier and reports back", smsTest.ok);
+  check("invalid Twilio credentials are reported as invalid", smsTest.payload?.data?.result?.ok === false);
+  check(
+    "and the auth token is not in the answer",
+    !JSON.stringify(smsTest.payload).includes(PLANTED_TWILIO),
+  );
+
+  const smsBadPhone = await admin("/api/admin/integrations/sms/test", {
+    method: "POST",
+    body: { phone: "5551234" },
+  });
+  check("a malformed test number is refused before the carrier is called", smsBadPhone.status === 422);
+
+  await admin("/api/admin/integrations/sms", { method: "PATCH", body: { enabled: false } });
+  const smsDisabledTest = await admin("/api/admin/integrations/sms/test", { method: "POST", body: {} });
+  check("a switched-off SMS module cannot be made to send", !smsDisabledTest.ok);
+
+  // --- Calendar -------------------------------------------------------------
+  const calSave = await admin("/api/admin/integrations/calendar", {
+    method: "PATCH",
+    body: {
+      enabled: true,
+      provider: "google",
+      providers: ["google"],
+      config: { clientId: "qa-client-id.apps.googleusercontent.com" },
+      secrets: { clientSecret: "qa-client-secret-value" },
+    },
+  });
+  check("a calendar app registration saves", calSave.ok, JSON.stringify(calSave.payload?.error));
+  check(
+    "the client secret is stored and never returned",
+    calSave.payload?.data?.module?.secrets?.clientSecret?.set === true &&
+      !JSON.stringify(calSave.payload).includes("qa-client-secret-value"),
+  );
+  check(
+    "entering client credentials does not by itself count as connected",
+    calSave.payload?.data?.module?.status === "CONFIGURED",
+    calSave.payload?.data?.module?.status,
+  );
+
+  const calUnknown = await admin("/api/admin/integrations/calendar", {
+    method: "PATCH",
+    body: { providers: ["google", "myspace"] },
+  });
+  check("a platform this build does not know is refused", calUnknown.status === 422);
+
+  const calTest = await admin("/api/admin/integrations/calendar/test", { method: "POST", body: {} });
+  check("the calendar test probes the provider and reports back", calTest.ok);
+  check("invalid client credentials are reported as invalid", calTest.payload?.data?.result?.ok === false);
+
+  // A tutor's own calendar screen must keep working throughout — the admin
+  // module configures the app registration, it does not connect anybody.
+  const tutorCalendar = await tutor("/api/tutor/calendar");
+  check("a tutor's calendar screen still loads", tutorCalendar.ok);
+  check(
+    "and it carries no client secret",
+    !JSON.stringify(tutorCalendar.payload).includes("qa-client-secret-value"),
+  );
+
+  await admin("/api/admin/integrations/calendar", { method: "PATCH", body: { enabled: false } });
+  const tutorCalendarOff = await tutor("/api/tutor/calendar");
+  check("a tutor's calendar screen still loads with the module switched off", tutorCalendarOff.ok);
+
+  // --- Storage --------------------------------------------------------------
+  const storageModule = await admin("/api/admin/integrations/storage");
+  check("the storage module reports where its configuration comes from", Boolean(storageModule.payload?.data?.module?.source));
+  check(
+    "a deployment with storage in its environment is offered the import",
+    typeof storageModule.payload?.data?.module?.environment?.available === "boolean",
+  );
+  check(
+    "the environment offer names variables, never their values",
+    !JSON.stringify(storageModule.payload?.data?.module?.environment ?? {}).match(
+      new RegExp(String(process.env.STORAGE_SECRET_KEY ?? "@@nothing@@")),
+    ),
+  );
+
+  // --- Cross-module ---------------------------------------------------------
+  const everything = JSON.stringify((await admin("/api/admin/integrations")).payload);
+  check(
+    "no planted credential appears anywhere in the module list",
+    ![PLANTED, PLANTED_SMTP, PLANTED_TWILIO, PLANTED_STRIPE, "qa-client-secret-value"].some((secret) =>
+      everything.includes(secret),
+    ),
+  );
+  check(
+    "and no ciphertext is exposed either",
+    !everything.includes("v1."),
+  );
+
+  // Settings and integrations stay separate: a credential must not appear in
+  // the platform settings document, which reaches client components.
+  const settingsAfter = await admin("/api/admin/settings");
+  check(
+    "platform settings still carry no credentials",
+    ![PLANTED, PLANTED_SMTP, PLANTED_TWILIO, PLANTED_STRIPE].some((secret) =>
+      JSON.stringify(settingsAfter.payload).includes(secret),
+    ),
+  );
+
+  // Persistence across a new session: the configuration is stored, not held in
+  // whatever request happened to write it.
+  const secondAdmin = createClient();
+  await login(secondAdmin, "admin@apluslearn.ca");
+  const afterRelogin = await secondAdmin("/api/admin/integrations/sms");
+  check(
+    "a saved configuration survives signing out and back in",
+    afterRelogin.payload?.data?.module?.config?.fromNumber === "+16475550123",
+  );
+  check(
+    "and its secret is still stored, still unreadable",
+    afterRelogin.payload?.data?.module?.secrets?.authToken?.set === true &&
+      !JSON.stringify(afterRelogin.payload).includes(PLANTED_TWILIO),
+  );
+
+  // The admin page itself renders and leaks nothing.
+  const integrationsPage = await admin("/admin/settings/integrations", { raw: true });
+  const integrationsHtml = await integrationsPage.text();
+  check("the external modules page renders for an administrator", integrationsPage.status === 200);
+  check(
+    "and the rendered HTML carries no credential",
+    ![PLANTED, PLANTED_SMTP, PLANTED_TWILIO, PLANTED_STRIPE, "qa-client-secret-value"].some((secret) =>
+      integrationsHtml.includes(secret),
+    ),
+  );
+
+  // Next renders a redirect as a shell document rather than a 3xx on a dynamic
+  // page, so the status is not the thing to assert — the absence of the page
+  // is. The API permission above is the actual control; this checks the page
+  // guard did not simply render for them.
+  const parentPage = await parent("/admin/settings/integrations", { raw: true });
+  const parentHtml = await parentPage.text();
+  check(
+    "a parent is not shown the external modules page",
+    !parentHtml.includes("Webhook signing secret") && !parentHtml.includes("Import from environment"),
+  );
+  check(
+    "and the shell they get carries no configuration at all",
+    ![PLANTED, PLANTED_SMTP, PLANTED_TWILIO, PLANTED_STRIPE].some((secret) => parentHtml.includes(secret)),
+  );
+
+  // Audit: the change is recorded, the value is not.
+  const auditAfter = await admin("/api/admin/users?page=1");
+  check("admin endpoints still work after all the module churn", auditAfter.ok);
+
+  // Leave every module as the suite found it, so a second run starts clean and
+  // no later section inherits a half-configured provider.
+  for (const key of ["email", "payment", "calendar", "sms", "storage"]) {
+    const cleared = await admin(`/api/admin/integrations/${key}`, { method: "DELETE" });
+    check(`the ${key} module is cleared down`, cleared.ok, JSON.stringify(cleared.payload?.error));
+  }
+
+  const modulesRestored = await admin("/api/admin/integrations");
+  check(
+    "every module is back on the deployment environment for the next run",
+    modulesRestored.payload?.data?.modules?.every((m) => m.source !== "database"),
+    modulesRestored.payload?.data?.modules?.map((m) => `${m.module}=${m.source}`).join(" "),
+  );
+  check(
+    "and no credential survives the clear-down",
+    !JSON.stringify(modulesRestored.payload).match(/donotleak/),
+  );
+
 
   // --- Booking authorization ------------------------------------------------
   //

@@ -2,7 +2,7 @@ import "server-only";
 import { BRANDING_ASSETS, BRANDING_ASSET_KEYS } from "@/constants";
 import { BusinessRuleError, NotFoundError, ValidationError } from "@/lib/api/errors";
 import { validateImage, extensionFor, describeTypes } from "@/lib/images/inspect";
-import { getStorageProvider, STORAGE_SCOPES } from "./external/storage-provider";
+import { getStorageProvider, getStorageProviderForRead, STORAGE_SCOPES } from "./external/storage-provider";
 import { getSettings, setBrandingAsset } from "./settings.service";
 
 /**
@@ -65,7 +65,7 @@ export async function uploadBrandingAsset({ assetKey, file }, actor) {
     throw new BusinessRuleError(inspection.reason, "UNSUPPORTED_FILE_TYPE");
   }
 
-  const stored = await getStorageProvider().put({
+  const stored = await (await getStorageProvider()).put({
     buffer,
     scope: STORAGE_SCOPES.BRANDING,
     contentType: inspection.contentType,
@@ -119,7 +119,7 @@ export async function removeBrandingAsset(assetKey, actor) {
 async function discard(asset) {
   if (!asset?.storageKey) return;
   try {
-    await getStorageProvider().remove({
+    await (await getStorageProvider()).remove({
       storageKey: asset.storageKey,
       scope: STORAGE_SCOPES.BRANDING,
     });
@@ -141,7 +141,7 @@ export async function readBrandingAsset(assetKey) {
   const asset = settings.branding?.[assetKey];
   if (!asset?.storageKey) throw new NotFoundError("No image is configured for that.");
 
-  const body = await getStorageProvider().get({
+  const body = await (await getStorageProviderForRead()).get({
     storageKey: asset.storageKey,
     scope: STORAGE_SCOPES.BRANDING,
   });

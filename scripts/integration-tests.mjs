@@ -103,6 +103,7 @@ async function main() {
   await promotionTests();
   await analyticsTests();
   await riskTests();
+  await integrationModuleTests();
 
   // The services open their own memoised connection via `lib/db/connect`, so
   // closing the one this file opened is not enough to let Node exit.
@@ -1844,18 +1845,18 @@ async function storageTests() {
   };
   const NO_MINIO = Object.fromEntries(Object.keys(MINIO_ENV).map((k) => [k, undefined]));
 
-  await withEnv({ APP_ENV: "development", STORAGE_PROVIDER: undefined, ...NO_MINIO }, () => {
+  await withEnv({ APP_ENV: "development", STORAGE_PROVIDER: undefined, ...NO_MINIO }, async () => {
     check("development still works with no credentials at all",
-      getStorageProvider() instanceof LocalStorageProvider);
+      (await getStorageProvider()) instanceof LocalStorageProvider);
   });
 
-  await withEnv({ APP_ENV: "development", STORAGE_PROVIDER: undefined, ...MINIO_ENV }, () => {
+  await withEnv({ APP_ENV: "development", STORAGE_PROVIDER: undefined, ...MINIO_ENV }, async () => {
     check("development auto-detects MinIO once an endpoint and bucket are configured",
-      getStorageProvider() instanceof ObjectStorageProvider);
+      (await getStorageProvider()) instanceof ObjectStorageProvider);
   });
 
-  await withEnv({ APP_ENV: "production", STORAGE_PROVIDER: "minio", ...MINIO_ENV }, () => {
-    const provider = getStorageProvider();
+  await withEnv({ APP_ENV: "production", STORAGE_PROVIDER: "minio", ...MINIO_ENV }, async () => {
+    const provider = await getStorageProvider();
     check("production selects MinIO and reports itself as such",
       provider instanceof ObjectStorageProvider && provider.name === "MINIO");
     check("the configured endpoint is the one requests go to",
@@ -1863,26 +1864,26 @@ async function storageTests() {
     check("path-style addressing is the default", provider.client.forcePathStyle === true);
   });
 
-  await withEnv({ APP_ENV: "production", STORAGE_PROVIDER: "development", ...NO_MINIO }, () => {
-    const failed = await$throws(() => getStorageProvider());
+  await withEnv({ APP_ENV: "production", STORAGE_PROVIDER: "development", ...NO_MINIO }, async () => {
+    const failed = await await$throws(() => getStorageProvider());
     check("production REFUSES the local filesystem — the R33 deployment break cannot recur",
       failed.threw && failed.error.code === "PROVIDER_MISCONFIGURED", failed.error?.message);
   });
 
-  await withEnv({ APP_ENV: "production", STORAGE_PROVIDER: undefined, ...NO_MINIO }, () => {
-    const failed = await$throws(() => getStorageProvider());
+  await withEnv({ APP_ENV: "production", STORAGE_PROVIDER: undefined, ...NO_MINIO }, async () => {
+    const failed = await await$throws(() => getStorageProvider());
     check("production never silently guesses a storage provider",
       failed.threw && failed.error.code === "PROVIDER_MISCONFIGURED");
   });
 
-  await withEnv({ APP_ENV: "production", STORAGE_PROVIDER: "minio", ...NO_MINIO }, () => {
-    const failed = await$throws(() => getStorageProvider());
+  await withEnv({ APP_ENV: "production", STORAGE_PROVIDER: "minio", ...NO_MINIO }, async () => {
+    const failed = await await$throws(() => getStorageProvider());
     check("naming MinIO without its bucket and endpoint is a hard failure",
       failed.threw && /STORAGE_BUCKET/.test(failed.error.message), failed.error?.message);
   });
 
-  await withEnv({ APP_ENV: "production", STORAGE_PROVIDER: "s3", ...MINIO_ENV }, () => {
-    const failed = await$throws(() => getStorageProvider());
+  await withEnv({ APP_ENV: "production", STORAGE_PROVIDER: "s3", ...MINIO_ENV }, async () => {
+    const failed = await await$throws(() => getStorageProvider());
     check("the retired `s3` selector is rejected by name rather than silently ignored",
       failed.threw && /not a provider this build knows/.test(failed.error.message),
       failed.error?.message);
@@ -3080,8 +3081,8 @@ async function smsAdapterTests() {
 
   await withEnv({ SMS_PROVIDER: undefined, TWILIO_ACCOUNT_SID: undefined, TWILIO_AUTH_TOKEN: undefined }, async () => {
     check("with no credentials, SMS falls back to the development provider",
-      getSmsProvider().name === "CONSOLE");
-    check("and reports itself as not configured", smsConfigured() === false);
+      (await getSmsProvider()).name === "CONSOLE");
+    check("and reports itself as not configured", (await smsConfigured()) === false);
   });
 
   await withEnv({
@@ -3089,15 +3090,15 @@ async function smsAdapterTests() {
     TWILIO_FROM_NUMBER: "+15550000000", TWILIO_MESSAGING_SERVICE_SID: undefined,
   }, async () => {
     check("a fully configured Twilio selection produces the real adapter",
-      getSmsProvider().name === "TWILIO");
-    check("and reports itself as configured", smsConfigured() === true);
+      (await getSmsProvider()).name === "TWILIO");
+    check("and reports itself as configured", (await smsConfigured()) === true);
   });
 
   await withEnv({
     SMS_PROVIDER: "twilio", TWILIO_ACCOUNT_SID: "AC1", TWILIO_AUTH_TOKEN: "tok",
     TWILIO_FROM_NUMBER: undefined, TWILIO_MESSAGING_SERVICE_SID: undefined,
   }, async () => {
-    const misconfigured = await$throws(() => getSmsProvider());
+    const misconfigured = await await$throws(() => getSmsProvider());
     check("Twilio without a sender is refused at startup, not per message",
       misconfigured.threw && misconfigured.error?.code === "PROVIDER_MISCONFIGURED");
     check("the refusal names the missing variables, never a value",
@@ -3106,7 +3107,7 @@ async function smsAdapterTests() {
   });
 
   await withEnv({ SMS_PROVIDER: "carrier-pigeon" }, async () => {
-    const unknown = await$throws(() => getSmsProvider());
+    const unknown = await await$throws(() => getSmsProvider());
     check("an unknown SMS provider is refused", unknown.threw);
   });
 
@@ -3816,8 +3817,8 @@ async function calendarAdapterTests() {
     MICROSOFT_CALENDAR_CLIENT_ID: undefined, MICROSOFT_CALENDAR_CLIENT_SECRET: undefined,
   }, async () => {
     check("with no credentials, calendar sync uses the development implementation",
-      getCalendarProvider(CALENDAR_PROVIDERS.GOOGLE).name === "GOOGLE_DEVELOPMENT");
-    const status = calendarIntegrationsStatus();
+      (await getCalendarProvider(CALENDAR_PROVIDERS.GOOGLE)).name === "GOOGLE_DEVELOPMENT");
+    const status = await calendarIntegrationsStatus();
     check("both providers are still offered, because the fake is a working one",
       status.length === 2 && status.every((p) => p.available));
     check("and each says honestly that it is not the real service",
@@ -3830,9 +3831,9 @@ async function calendarAdapterTests() {
     MICROSOFT_CALENDAR_CLIENT_ID: "mid", MICROSOFT_CALENDAR_CLIENT_SECRET: "ms",
   }, async () => {
     check("both real adapters light up when both are configured",
-      getCalendarProvider(CALENDAR_PROVIDERS.GOOGLE).name === "GOOGLE" &&
-        getCalendarProvider(CALENDAR_PROVIDERS.OUTLOOK).name === "OUTLOOK");
-    check("and both report as live", calendarIntegrationsStatus().every((p) => p.live));
+      (await getCalendarProvider(CALENDAR_PROVIDERS.GOOGLE)).name === "GOOGLE" &&
+        (await getCalendarProvider(CALENDAR_PROVIDERS.OUTLOOK)).name === "OUTLOOK");
+    check("and both report as live", (await calendarIntegrationsStatus()).every((p) => p.live));
   });
 
   await withEnv({
@@ -3841,8 +3842,8 @@ async function calendarAdapterTests() {
     MICROSOFT_CALENDAR_CLIENT_ID: undefined, MICROSOFT_CALENDAR_CLIENT_SECRET: undefined,
   }, async () => {
     check("naming only Google leaves Outlook on the development implementation",
-      getCalendarProvider(CALENDAR_PROVIDERS.GOOGLE).name === "GOOGLE" &&
-        getCalendarProvider(CALENDAR_PROVIDERS.OUTLOOK).name === "OUTLOOK_DEVELOPMENT");
+      (await getCalendarProvider(CALENDAR_PROVIDERS.GOOGLE)).name === "GOOGLE" &&
+        (await getCalendarProvider(CALENDAR_PROVIDERS.OUTLOOK)).name === "OUTLOOK_DEVELOPMENT");
   });
 
   await withEnv({ CALENDAR_PROVIDER: "google", GOOGLE_CALENDAR_CLIENT_ID: "only-id",
@@ -6864,13 +6865,543 @@ async function riskTests() {
   }
 }
 
-/** Synchronous throw capture, for the factories that throw rather than reject. */
-function await$throws(fn) {
+/**
+ * Throw capture for the provider factories.
+ *
+ * They became asynchronous when provider credentials gained a database-backed
+ * source, so a refusal now arrives as a rejection rather than a throw. Both
+ * are captured, because the two paths must be equally hard failures.
+ */
+async function await$throws(fn) {
   try {
-    fn();
+    await fn();
     return { threw: false };
   } catch (error) {
     return { threw: true, error };
+  }
+}
+
+
+// --- 22. External modules --------------------------------------------------
+
+/**
+ * Admin-configurable integration settings (§26, §36).
+ *
+ * Two halves, and they are tested separately because they fail differently:
+ *
+ *   • The *resolver* — precedence between defaults, environment and stored
+ *     configuration, and what happens when a stored secret cannot be read.
+ *     This needs MongoDB and reports as skipped without one.
+ *   • The provider *adapters'* `verify()` methods, which are pure HTTP and
+ *     run against a stubbed `fetch`. No third-party service is contacted; the
+ *     responses are the real shapes each provider returns.
+ *
+ * What these exist to prove is the pair of claims the feature rests on: that a
+ * credential an administrator saves is actually the one the platform uses, and
+ * that the same credential can never be read back out.
+ */
+async function integrationModuleTests() {
+  section("External modules — storage, precedence and secrecy");
+
+  const { encryptSecret, decryptSecret } = await import("@/lib/security/crypto");
+  const { SECRET_LABEL } = await import("@/lib/config/integrations");
+
+  // --- encryption at rest ---------------------------------------------------
+  const plaintext = "sk_test_thisisnotarealkey0000";
+  const stored = encryptSecret(plaintext, SECRET_LABEL);
+
+  check("a credential is not stored in the clear", !stored.includes(plaintext));
+  check("it is stored in the versioned envelope", stored.startsWith("v1."));
+  check("and it round-trips", decryptSecret(stored, SECRET_LABEL) === plaintext);
+
+  check(
+    "the same value encrypts differently every time",
+    encryptSecret(plaintext, SECRET_LABEL) !== encryptSecret(plaintext, SECRET_LABEL),
+  );
+
+  // Key separation: an integration credential is not readable with the key
+  // that protects calendar tokens, so one being compromised does not hand
+  // over the other.
+  check(
+    "a credential cannot be read with another purpose's key",
+    decryptSecret(stored, "aplus:calendar-token") === null,
+  );
+
+  // Tampering is detected rather than yielding attacker-chosen plaintext —
+  // which is the whole reason for GCM over CBC.
+  const [v, iv, tag, ct] = stored.split(".");
+  const tampered = [v, iv, tag, ct.slice(0, -4) + "AAAA"].join(".");
+  check("a tampered ciphertext fails to decrypt rather than decrypting wrongly",
+    decryptSecret(tampered, SECRET_LABEL) === null);
+
+  // --- adapter verification, against stubbed providers ----------------------
+  await integrationVerifyTests();
+
+  // --- the resolver, against a real database --------------------------------
+  await integrationResolverTests();
+}
+
+/**
+ * Each adapter's `verify()`, against the response shapes the real provider
+ * returns. `fetch` is stubbed per case; nothing leaves this process.
+ */
+async function integrationVerifyTests() {
+  const { ResendEmailProvider, SmtpEmailProvider } = await import("@/services/external/email-provider");
+  const { TwilioSmsProvider } = await import("@/services/external/sms-provider");
+  const { GoogleCalendarProvider, MicrosoftCalendarProvider } = await import(
+    "@/services/external/calendar-provider"
+  );
+  const { StripePaymentProvider } = await import("@/services/external/payment-provider");
+
+  // --- Resend ---------------------------------------------------------------
+  const resendOk = new ResendEmailProvider({
+    apiKey: "re_live_secret_value",
+    fetchImpl: stubFetch(() => ({ body: { data: [{ name: "apluslearn.ca", status: "verified" }] } })),
+  });
+  const resendResult = await resendOk.verify();
+  check("Resend reports a working key with a verified domain as connected", resendResult.ok);
+  check("and names the domain count rather than the key",
+    !resendResult.message.includes("re_live_secret_value"));
+
+  const resendNoDomain = new ResendEmailProvider({
+    apiKey: "re_x",
+    fetchImpl: stubFetch(() => ({ body: { data: [] } })),
+  });
+  const noDomain = await resendNoDomain.verify();
+  check("a valid key with no sending domain is NOT reported as connected", noDomain.ok === false);
+  check("and says why, because mail would be rejected",
+    noDomain.code === "NO_SENDING_DOMAIN");
+
+  const resendPending = new ResendEmailProvider({
+    apiKey: "re_x",
+    fetchImpl: stubFetch(() => ({ body: { data: [{ name: "x.ca", status: "pending" }] } })),
+  });
+  check("a domain that is not verified yet is not connected either",
+    (await resendPending.verify()).code === "DOMAIN_UNVERIFIED");
+
+  const resendBad = new ResendEmailProvider({
+    apiKey: "re_wrong",
+    fetchImpl: stubFetch(() => ({ status: 401, body: { message: "API key is invalid: re_wrong" } })),
+  });
+  const resendBadResult = await resendBad.verify();
+  check("a rejected Resend key is reported as invalid credentials",
+    resendBadResult.code === "INVALID_CREDENTIALS");
+  check("and the provider's echo of the key is not passed through",
+    !resendBadResult.message.includes("re_wrong"));
+
+  const resendLimited = new ResendEmailProvider({
+    apiKey: "re_x",
+    fetchImpl: stubFetch(() => ({ status: 429, body: {} })),
+  });
+  check("rate limiting is reported as itself, not as bad credentials",
+    (await resendLimited.verify()).code === "RATE_LIMITED");
+
+  const resendDown = new ResendEmailProvider({
+    apiKey: "re_x",
+    fetchImpl: async () => { throw new Error("getaddrinfo ENOTFOUND api.resend.com"); },
+  });
+  check("an unreachable provider is reported as unreachable",
+    (await resendDown.verify()).code === "UNREACHABLE");
+
+  // --- SMTP -----------------------------------------------------------------
+  const smtpOk = new SmtpEmailProvider({
+    host: "smtp.example.com", port: 587,
+    transport: { verify: async () => true },
+  });
+  check("SMTP reports a working server as connected", (await smtpOk.verify()).ok);
+
+  const smtpAuth = new SmtpEmailProvider({
+    host: "smtp.example.com", port: 587, username: "admin@example.com",
+    transport: {
+      verify: async () => {
+        const error = new Error("535 5.7.8 Authentication credentials invalid for admin@example.com");
+        error.code = "EAUTH";
+        throw error;
+      },
+    },
+  });
+  const smtpAuthResult = await smtpAuth.verify();
+  check("a rejected SMTP login is reported as invalid credentials",
+    smtpAuthResult.code === "INVALID_CREDENTIALS");
+  check("and the server's echo of the username is not passed through",
+    !smtpAuthResult.message.includes("admin@example.com"));
+
+  const smtpRefused = new SmtpEmailProvider({
+    host: "nope.example.com", port: 587,
+    transport: {
+      verify: async () => { const e = new Error("connect ECONNREFUSED"); e.code = "ECONNREFUSED"; throw e; },
+    },
+  });
+  check("a refused connection names the host and port as the thing to check",
+    (await smtpRefused.verify()).code === "UNREACHABLE");
+
+  const smtpSendFail = new SmtpEmailProvider({
+    host: "smtp.example.com", port: 587,
+    transport: {
+      verify: async () => true,
+      sendMail: async () => { const e = new Error("535 auth failed for hunter2"); e.code = "EAUTH"; throw e; },
+    },
+  });
+  const smtpSend = await throws(() => smtpSendFail.send({ to: "a@b.ca", subject: "x", text: "y" }));
+  check("an SMTP send failure throws a tagged error", smtpSend.threw);
+  check("and the password the server echoed does not reach the caller",
+    !String(smtpSend.error?.message).includes("hunter2"));
+
+  // --- Twilio ---------------------------------------------------------------
+  const twilioOk = new TwilioSmsProvider({
+    accountSid: "AC" + "0".repeat(32), authToken: "the-auth-token", from: "+16475550123",
+    fetchImpl: stubFetch(() => ({ body: { friendly_name: "APlus Learn", status: "active" } })),
+  });
+  const twilioResult = await twilioOk.verify();
+  check("Twilio reports working credentials as connected", twilioResult.ok);
+  check("and the auth token is not in the answer",
+    !twilioResult.message.includes("the-auth-token"));
+
+  const twilioNoSender = new TwilioSmsProvider({
+    accountSid: "AC" + "0".repeat(32), authToken: "tok",
+    fetchImpl: stubFetch(() => ({ body: { friendly_name: "X", status: "active" } })),
+  });
+  check("valid credentials with no sender are not reported as connected",
+    (await twilioNoSender.verify()).code === "NO_SENDER");
+
+  const twilioSuspended = new TwilioSmsProvider({
+    accountSid: "AC" + "0".repeat(32), authToken: "tok", from: "+16475550123",
+    fetchImpl: stubFetch(() => ({ body: { friendly_name: "X", status: "suspended" } })),
+  });
+  check("a suspended account is not reported as connected, however valid the token",
+    (await twilioSuspended.verify()).code === "ACCOUNT_SUSPENDED");
+
+  const twilioBad = new TwilioSmsProvider({
+    accountSid: "AC" + "0".repeat(32), authToken: "wrong-token",
+    fetchImpl: stubFetch(() => ({ status: 401, body: { message: "Authenticate" } })),
+  });
+  const twilioBadResult = await twilioBad.verify();
+  check("a rejected Twilio token is reported as invalid credentials",
+    twilioBadResult.code === "INVALID_CREDENTIALS");
+  check("and the token is not echoed back",
+    !twilioBadResult.message.includes("wrong-token"));
+
+  // The verify call must never send anything: an operator checking a
+  // configuration should not be charged for a message.
+  const sendCounter = stubFetch((url) => {
+    check("the Twilio check is a read, not a send", !url.includes("/Messages.json"));
+    return { body: { friendly_name: "X", status: "active" } };
+  });
+  await new TwilioSmsProvider({
+    accountSid: "AC" + "0".repeat(32), authToken: "t", from: "+1", fetchImpl: sendCounter,
+  }).verify();
+
+  // --- Calendar app registrations -------------------------------------------
+  //
+  // The probe is a refresh grant that cannot succeed. `invalid_grant` means
+  // the client credentials were accepted and only the bogus token was
+  // refused — so it is the *success* case.
+  const googleOk = new GoogleCalendarProvider({
+    clientId: "id.apps.googleusercontent.com", clientSecret: "the-client-secret",
+    fetchImpl: stubFetch(() => ({ status: 400, body: { error: "invalid_grant" } })),
+  });
+  const googleResult = await googleOk.verify();
+  check("Google accepting the client and refusing the probe token reads as connected",
+    googleResult.ok);
+  check("and the client secret is not in the answer",
+    !googleResult.message.includes("the-client-secret"));
+
+  const googleBad = new GoogleCalendarProvider({
+    clientId: "id", clientSecret: "wrong",
+    fetchImpl: stubFetch(() => ({ status: 401, body: { error: "invalid_client" } })),
+  });
+  check("Google rejecting the client reads as invalid credentials",
+    (await googleBad.verify()).code === "INVALID_CREDENTIALS");
+
+  const googleProbeIsNotAToken = stubFetch((url, options) => {
+    check("the calendar probe never sends a real refresh token",
+      String(options.body).includes("aplus-credential-probe"));
+    return { status: 400, body: { error: "invalid_grant" } };
+  });
+  await new GoogleCalendarProvider({
+    clientId: "id", clientSecret: "s", fetchImpl: googleProbeIsNotAToken,
+  }).verify();
+
+  const msOk = new MicrosoftCalendarProvider({
+    clientId: "id", clientSecret: "s", tenantId: "common",
+    fetchImpl: stubFetch(() => ({ status: 400, body: { error: "invalid_grant" } })),
+  });
+  check("Microsoft accepting the app registration reads as connected", (await msOk.verify()).ok);
+
+  const msExpired = new MicrosoftCalendarProvider({
+    clientId: "id", clientSecret: "s",
+    fetchImpl: stubFetch(() => ({
+      status: 401,
+      body: { error: "invalid_client", error_description: "AADSTS7000222: The provided client secret keys for app are expired." },
+    })),
+  });
+  check("an expired Entra secret is told apart from a wrong one",
+    (await msExpired.verify()).code === "CREDENTIALS_EXPIRED");
+
+  const msWrongSecret = new MicrosoftCalendarProvider({
+    clientId: "id", clientSecret: "s",
+    fetchImpl: stubFetch(() => ({
+      status: 401,
+      body: { error: "invalid_client", error_description: "AADSTS7000215: Invalid client secret provided." },
+    })),
+  });
+  check("and a wrong one is reported as wrong",
+    (await msWrongSecret.verify()).code === "INVALID_CREDENTIALS");
+
+  const msUnknownApp = new MicrosoftCalendarProvider({
+    clientId: "id", clientSecret: "s",
+    fetchImpl: stubFetch(() => ({
+      status: 400,
+      body: { error: "unauthorized_client", error_description: "AADSTS700016: Application not found in the directory." },
+    })),
+  });
+  check("an app the tenant does not know names the tenant as the thing to check",
+    /tenant/i.test((await msUnknownApp.verify()).message));
+
+  // --- Stripe ---------------------------------------------------------------
+  const stripeOk = new StripePaymentProvider({
+    secretKey: "sk_test_0000",
+    client: {
+      accounts: {
+        retrieve: async () => ({ id: "acct_1", charges_enabled: true, business_profile: { name: "APlus" } }),
+      },
+    },
+  });
+  const stripeResult = await stripeOk.verify();
+  check("Stripe reports a working test key as connected", stripeResult.ok);
+  check("and reports the mode the key itself carries", stripeResult.livemode === false);
+  check("and never echoes the key", !stripeResult.message.includes("sk_test_0000"));
+
+  const stripeLive = new StripePaymentProvider({
+    secretKey: "sk_live_0000",
+    client: { accounts: { retrieve: async () => ({ id: "acct_2", charges_enabled: true }) } },
+  });
+  check("a live key is reported as live mode, from the key and not from APP_ENV",
+    (await stripeLive.verify()).livemode === true);
+
+  const stripeRestricted = new StripePaymentProvider({
+    secretKey: "sk_test_0000",
+    client: { accounts: { retrieve: async () => ({ id: "acct_3", charges_enabled: false }) } },
+  });
+  const restricted = await stripeRestricted.verify();
+  check("an account that cannot take charges is NOT reported as connected", restricted.ok === false);
+  check("and says onboarding is what is missing", restricted.code === "ACCOUNT_RESTRICTED");
+
+  const stripeBad = new StripePaymentProvider({
+    secretKey: "sk_test_wrong",
+    client: {
+      accounts: {
+        retrieve: async () => {
+          const error = new Error("Invalid API Key provided: sk_test_wrong");
+          error.type = "StripeAuthenticationError";
+          throw error;
+        },
+      },
+    },
+  });
+  const stripeBadResult = await stripeBad.verify();
+  check("a rejected Stripe key is reported as invalid credentials",
+    stripeBadResult.code === "INVALID_CREDENTIALS");
+  check("and Stripe's echo of the key does not reach the operator",
+    !stripeBadResult.message.includes("sk_test_wrong"));
+
+  const stripeDown = new StripePaymentProvider({
+    secretKey: "sk_test_0000",
+    client: {
+      accounts: {
+        retrieve: async () => { const e = new Error("connection"); e.type = "StripeConnectionError"; throw e; },
+      },
+    },
+  });
+  check("an unreachable Stripe is reported as unreachable, not as bad credentials",
+    (await stripeDown.verify()).code === "UNREACHABLE");
+}
+
+/**
+ * Precedence, masking and the disabled switch, against a real database.
+ *
+ * Writes directly to the `integrations` collection rather than going through
+ * the service for the setup, so what is being tested is the resolver's own
+ * reading of a stored document.
+ */
+async function integrationResolverTests() {
+  const uri = process.env.MONGODB_URI;
+  if (!uri) {
+    skip("external module resolution", "MONGODB_URI is not set");
+    return;
+  }
+  try {
+    await mongoose.connect(uri, { serverSelectionTimeoutMS: 2500 });
+  } catch {
+    skip("external module resolution", "MongoDB is not reachable");
+    return;
+  }
+
+  const { Integration } = await import("@/models");
+  const { encryptSecret } = await import("@/lib/security/crypto");
+  const {
+    resolveIntegrationConfig, requireIntegrationConfig, invalidateIntegrationCache, SECRET_LABEL,
+  } = await import("@/lib/config/integrations");
+
+  const saved = await Integration.findOne({ module: "sms" }).select("+secrets").lean();
+  const clean = async () => {
+    await Integration.deleteOne({ module: "sms" });
+    invalidateIntegrationCache("sms");
+  };
+
+  const withEnv = async (vars, fn) => {
+    const before = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]));
+    Object.assign(process.env, vars);
+    for (const [k, v] of Object.entries(vars)) if (v === undefined) delete process.env[k];
+    invalidateIntegrationCache("sms");
+    try {
+      return await fn();
+    } finally {
+      for (const [k, v] of Object.entries(before)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+      invalidateIntegrationCache("sms");
+    }
+  };
+
+  const ENV = {
+    SMS_PROVIDER: "twilio",
+    TWILIO_ACCOUNT_SID: "AC" + "1".repeat(32),
+    TWILIO_AUTH_TOKEN: "env-auth-token",
+    TWILIO_FROM_NUMBER: "+15550000001",
+  };
+
+  try {
+    // --- 1. No stored record: the deployment behaves exactly as before ------
+    await clean();
+    await withEnv(ENV, async () => {
+      const resolved = await resolveIntegrationConfig("sms", { fresh: true });
+      check("with nothing stored, a module reads the environment",
+        resolved.source === "environment" && resolved.provider === "twilio");
+      check("and is enabled, so upgrading does not switch a working channel off",
+        resolved.enabled === true);
+      check("and the environment's credential is the one that would be used",
+        resolved.secrets.authToken === "env-auth-token");
+    });
+
+    // --- 2. Stored configuration wins, per field ---------------------------
+    await Integration.create({
+      module: "sms",
+      enabled: true,
+      provider: "twilio",
+      config: { accountSid: "AC" + "2".repeat(32) },
+      secrets: { authToken: encryptSecret("stored-auth-token", SECRET_LABEL) },
+      secretMeta: { authToken: { set: true, updatedAt: new Date() } },
+    });
+
+    await withEnv(ENV, async () => {
+      const resolved = await resolveIntegrationConfig("sms", { fresh: true });
+      check("a stored configuration overrides the environment",
+        resolved.source === "database" && resolved.secrets.authToken === "stored-auth-token");
+      check("and overrides it field by field",
+        resolved.config.accountSid === "AC" + "2".repeat(32));
+      check("while a field it does not set still falls back to the environment",
+        resolved.config.fromNumber === "+15550000001");
+    });
+
+    // --- 3. The switch has teeth -------------------------------------------
+    await Integration.updateOne({ module: "sms" }, { $set: { enabled: false } });
+    invalidateIntegrationCache("sms");
+
+    await withEnv(ENV, async () => {
+      const refused = await throws(() => requireIntegrationConfig("sms"));
+      check("a switched-off module refuses at the point of use", refused.threw);
+      check("and says so with its own code rather than a misconfiguration",
+        refused.error?.code === "MODULE_DISABLED");
+
+      const { getSmsProvider, resetSmsProvider } = await import("@/services/external/sms-provider");
+      resetSmsProvider();
+      const factoryRefused = await throws(() => getSmsProvider());
+      check("so the provider factory cannot hand back an adapter for it",
+        factoryRefused.threw && factoryRefused.error?.code === "MODULE_DISABLED");
+      resetSmsProvider();
+    });
+
+    // --- 4. A credential that cannot be read is an error, never a fallback --
+    await Integration.updateOne(
+      { module: "sms" },
+      { $set: { enabled: true, "secrets.authToken": "v1.bm90.YXJlYWw.Y2lwaGVy" } },
+    );
+    invalidateIntegrationCache("sms");
+
+    await withEnv(ENV, async () => {
+      const resolved = await resolveIntegrationConfig("sms", { fresh: true });
+      check("a credential that will not decrypt leaves the module unconfigured",
+        resolved.configured === false);
+      check("and says what happened and how to repair it",
+        /AUTH_SECRET/.test(resolved.error ?? ""));
+      check(
+        "and it does NOT silently fall back to the environment's credential",
+        resolved.secrets.authToken === undefined,
+      );
+    });
+
+    // --- 5. Production still refuses a fake where one is not allowed -------
+    await Integration.updateOne({ module: "sms" }, { $set: { provider: "twilio" } });
+    await Integration.deleteOne({ module: "payment" });
+    await Integration.create({ module: "payment", enabled: true, provider: "development" });
+    invalidateIntegrationCache("payment");
+
+    const before = process.env.APP_ENV;
+    process.env.APP_ENV = "production";
+    invalidateIntegrationCache("payment");
+    const prodPayment = await resolveIntegrationConfig("payment", { fresh: true });
+    check(
+      "no stored configuration can put payments into development mode in production",
+      prodPayment.configured === false,
+    );
+    check("and the refusal names the module", /Payments/.test(prodPayment.error ?? ""));
+    process.env.APP_ENV = before;
+    await Integration.deleteOne({ module: "payment" });
+    invalidateIntegrationCache("payment");
+
+    // --- 6. The admin view never carries a credential ----------------------
+    await Integration.deleteOne({ module: "sms" });
+    await Integration.create({
+      module: "sms",
+      enabled: true,
+      provider: "twilio",
+      config: { accountSid: "AC" + "3".repeat(32), fromNumber: "+15550000002" },
+      secrets: { authToken: encryptSecret("top-secret-token", SECRET_LABEL) },
+      secretMeta: { authToken: { set: true, updatedAt: new Date() } },
+    });
+    invalidateIntegrationCache("sms");
+
+    const { getIntegrationModule } = await import("@/services/integration.service");
+    const view = await getIntegrationModule("sms");
+    const serialised = JSON.stringify(view);
+
+    check("the admin view says the credential is set", view.secrets.authToken.set === true);
+    check("without carrying its value", !serialised.includes("top-secret-token"));
+    check("or its ciphertext", !serialised.includes("v1."));
+    check("and a token the registry does not mark as revealable shows nothing at all",
+      view.secrets.authToken.last4 == null);
+    check("while the non-secret account SID is shown in full",
+      view.config.accountSid === "AC" + "3".repeat(32));
+
+    // --- 7. Stripe's mode comes from the key, and a mismatch is refused ----
+    const { stripeModeOf } = await import("@/lib/validation/integrations");
+    check("a live key is recognised as live", stripeModeOf("sk_live_abc") === "live");
+    check("a restricted live key too", stripeModeOf("rk_live_abc") === "live");
+    check("a test key as test", stripeModeOf("sk_test_abc") === "test");
+    check("and something that is not a Stripe key at all as neither",
+      stripeModeOf("hello") === null);
+  } finally {
+    await Integration.deleteOne({ module: "sms" });
+    await Integration.deleteOne({ module: "payment" });
+    if (saved) {
+      // Put back whatever the deployment had, so running the suite does not
+      // reconfigure the developer's own machine.
+      const { _id, ...rest } = saved;
+      await Integration.create(rest);
+    }
+    invalidateIntegrationCache();
   }
 }
 

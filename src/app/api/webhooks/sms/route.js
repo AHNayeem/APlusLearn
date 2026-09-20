@@ -2,7 +2,9 @@ import { NextResponse } from "next/server";
 import { connectToDatabase } from "@/lib/db/connect";
 import { applySmsKeyword } from "@/services/sms.service";
 import { verifyTwilioSignature } from "@/services/external/sms-provider";
-import { resolveIntegration, DEVELOPMENT } from "@/lib/config/env";
+import { DEVELOPMENT } from "@/lib/config/env";
+import { resolveIntegrationConfig } from "@/lib/config/integrations";
+import { INTEGRATION_MODULES } from "@/constants";
 import { envBaseUrl } from "@/lib/config/base-url";
 
 /**
@@ -23,11 +25,17 @@ import { envBaseUrl } from "@/lib/config/base-url";
  * session — none of the pipeline's steps apply.
  */
 export async function POST(request) {
-  const resolved = resolveIntegration("sms");
+  // Resolving needs the database now that the auth token may be stored there,
+  // and the signature is checked against that same token — so the connection
+  // is opened before anything is trusted rather than after.
+  await connectToDatabase();
+  const resolved = await resolveIntegrationConfig(INTEGRATION_MODULES.SMS);
 
-  // With no carrier configured there is nothing that could legitimately be
-  // calling this, so it is closed rather than left open in development.
-  if (!resolved.configured || resolved.name === DEVELOPMENT) {
+  // With no carrier configured — or with the module switched off — there is
+  // nothing that could legitimately be calling this, so it is closed rather
+  // than left open. A disabled module must not still be processing opt-outs
+  // on a signature it can no longer be sure of (§39).
+  if (!resolved.enabled || !resolved.configured || resolved.provider === DEVELOPMENT) {
     return twiml("", 404);
   }
 
@@ -43,7 +51,10 @@ export async function POST(request) {
     signature: request.headers.get("x-twilio-signature"),
     url,
     params,
-    authToken: process.env.TWILIO_AUTH_TOKEN,
+    // The same token the sending side uses, from the same resolved
+    // configuration — so rotating it in the admin panel keeps inbound
+    // callbacks verifiable without a second place to remember.
+    authToken: resolved.secrets.authToken,
   });
 
   if (!valid) {
@@ -51,7 +62,6 @@ export async function POST(request) {
     return twiml("", 403);
   }
 
-  await connectToDatabase();
   const result = await applySmsKeyword({ from: params.From, body: params.Body });
   console.info(`[sms] inbound keyword handled: ${result.action} (${result.accounts} account(s))`);
 

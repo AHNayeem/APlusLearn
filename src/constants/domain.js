@@ -449,6 +449,13 @@ export const SMS_SKIP_REASONS = {
   CHANNEL_DISABLED: "CHANNEL_DISABLED",
   OPTED_OUT: "OPTED_OUT",
   PLATFORM_DISABLED: "PLATFORM_DISABLED",
+  /**
+   * The SMS *module* is switched off in External modules — a different thing
+   * from `PLATFORM_DISABLED`, which is the notification preference. Held
+   * apart because the fix is different: one is a settings toggle, the other
+   * means there is no carrier behind the platform at all.
+   */
+  MODULE_DISABLED: "MODULE_DISABLED",
   NO_TEMPLATE: "NO_TEMPLATE",
   RATE_LIMITED: "RATE_LIMITED",
   DUPLICATE: "DUPLICATE",
@@ -460,6 +467,7 @@ export const SMS_SKIP_REASON_LABELS = {
   CHANNEL_DISABLED: "Text messages switched off by the recipient",
   OPTED_OUT: "Recipient replied STOP",
   PLATFORM_DISABLED: "Text messages switched off platform-wide",
+  MODULE_DISABLED: "The SMS module is switched off in External modules",
   NO_TEMPLATE: "No text version of this notification",
   RATE_LIMITED: "Too many texts to this number",
   DUPLICATE: "Already sent",
@@ -1060,4 +1068,18 @@ export const AUDIT_ACTIONS = {
   SCHEDULED_JOB_RUN: "SCHEDULED_JOB_RUN",
   SETTINGS_UPDATED: "SETTINGS_UPDATED",
   CURRICULUM_UPDATED: "CURRICULUM_UPDATED",
+
+  /**
+   * External modules (§26, §36). Credential *values* are never recorded —
+   * only which fields moved, and whether a secret was set, replaced or
+   * cleared. That is the whole point of auditing a rotation: you want to know
+   * it happened and who did it, not what the new key is.
+   */
+  INTEGRATION_UPDATED: "INTEGRATION_UPDATED",
+  INTEGRATION_ENABLED: "INTEGRATION_ENABLED",
+  INTEGRATION_DISABLED: "INTEGRATION_DISABLED",
+  INTEGRATION_PROVIDER_CHANGED: "INTEGRATION_PROVIDER_CHANGED",
+  INTEGRATION_SECRET_ROTATED: "INTEGRATION_SECRET_ROTATED",
+  INTEGRATION_TESTED: "INTEGRATION_TESTED",
+  INTEGRATION_IMPORTED_FROM_ENV: "INTEGRATION_IMPORTED_FROM_ENV",
 };

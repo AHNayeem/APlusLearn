@@ -17,6 +17,7 @@ export { Conversation, Message } from "./Messaging.js";
 export { TutorRequest, TutorMatch } from "./TutorRequest.js";
 export { Favourite, Review, Notification } from "./Engagement.js";
 export { Dispute, AuditLog, Settings } from "./Governance.js";
+export { Integration } from "./Integration.js";
 export { SmsMessage } from "./Sms.js";
 export { CalendarConnection } from "./CalendarConnection.js";
 export { ProgressReport } from "./ProgressReport.js";

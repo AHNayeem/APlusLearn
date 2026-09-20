@@ -37,7 +37,7 @@ export async function startPayoutOnboarding(tutorUserId) {
   const user = await User.findById(tutorUserId).select("email").lean();
   if (!user) throw new NotFoundError("We couldn't find your account.");
 
-  const provider = getPaymentProvider();
+  const provider = await getPaymentProvider();
   const existing = await PayoutAccount.findOne({ tutorUserId });
 
   if (existing?.onboardingStatus === "COMPLETE" && existing.payoutsEnabled) {
@@ -92,7 +92,7 @@ export async function refreshPayoutAccount(tutorUserId) {
   const account = await PayoutAccount.findOne({ tutorUserId });
   if (!account) throw new NotFoundError("Start payout setup first.");
 
-  const result = await getPaymentProvider().refreshConnectedAccount({
+  const result = await (await getPaymentProvider()).refreshConnectedAccount({
     accountId: account.providerAccountId,
   });
 
@@ -260,7 +260,7 @@ export async function updatePayoutStatus(payoutId, { status, note, scheduledFor 
       return toPlain(payout);
     }
 
-    const transfer = await getPaymentProvider().createTransfer({
+    const transfer = await (await getPaymentProvider()).createTransfer({
       accountId: account.providerAccountId,
       amountCents: payout.amountCents,
       currency: payout.currency,

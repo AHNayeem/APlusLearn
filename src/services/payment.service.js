@@ -49,7 +49,7 @@ export async function createPaymentForBooking({ bookings, purchaserId, tutorUser
     { subtotalCents: 0, commissionCents: 0, tutorEarningsCents: 0, totalCents: 0 },
   );
 
-  const provider = getPaymentProvider();
+  const provider = await getPaymentProvider();
 
   // The Payment row is written first so the provider's session can carry our
   // id in its metadata. That is what lets a webhook find the right payment
@@ -103,7 +103,7 @@ export async function createPaymentForBooking({ bookings, purchaserId, tutorUser
  * here is which field on the Payment names what was bought.
  */
 export async function createPaymentForPackage({ purchase, purchaserId, tutorUserId }) {
-  const provider = getPaymentProvider();
+  const provider = await getPaymentProvider();
 
   const payment = await Payment.create({
     packagePurchaseId: purchase._id,
@@ -146,7 +146,12 @@ export async function createPaymentForPackage({ purchase, purchaserId, tutorUser
  * over lunch, `checkoutUrlFor()` calls this again rather than showing them a
  * dead page. The amount always comes from the Payment row.
  */
-async function openCheckoutSession(payment, booking, provider = getPaymentProvider(), { bookingIds, packageTitle, reference } = {}) {
+async function openCheckoutSession(payment, booking, provider, { bookingIds, packageTitle, reference } = {}) {
+  // Resolving the provider is asynchronous now that its credentials may be
+  // stored rather than deployed, so it cannot be a default parameter. Every
+  // caller already passes one; this is the belt to that braces.
+  provider ??= await getPaymentProvider();
+
   const [purchaser, settings] = await Promise.all([
     User.findById(payment.purchaserId).select("email paymentCustomerId").lean(),
     getSettings(),
@@ -220,7 +225,7 @@ export async function checkoutUrlFor(paymentId, actor) {
     throw new AuthorizationError("You do not have access to this payment.");
   }
 
-  const provider = getPaymentProvider();
+  const provider = await getPaymentProvider();
   if (!provider.hostedCheckout) return { hosted: false, url: null };
 
   if (payment.status === PAYMENT_STATUS.PAID) {
@@ -255,7 +260,7 @@ export async function checkoutUrlFor(paymentId, actor) {
 export async function capturePayment(paymentId, { card }, actor) {
   requireVerifiedEmail(actor, "Confirm your email address before paying for a lesson.");
 
-  const provider = getPaymentProvider();
+  const provider = await getPaymentProvider();
   if (provider.hostedCheckout) {
     throw new BusinessRuleError(
       "Card details are entered on our payment provider's secure page. Continue to checkout to complete this payment.",
@@ -319,7 +324,7 @@ export async function refundPayment(paymentId, { amountCents, reason, issuedBy }
     return toPlain(payment);
   }
 
-  const result = await getPaymentProvider().processRefund({
+  const result = await (await getPaymentProvider()).processRefund({
     paymentIntentId: payment.providerPaymentIntentId,
     amountCents,
     reason,
@@ -399,7 +404,7 @@ export async function refundPayment(paymentId, { amountCents, reason, issuedBy }
  *   opened yet has no provider object to name.
  */
 export async function providerPaymentStatus(payment) {
-  const provider = getPaymentProvider();
+  const provider = await getPaymentProvider();
 
   // Only a provider that confirms by webhook has remote state worth reading.
   // The development provider does not, and must never be consulted here.

@@ -7,10 +7,12 @@ import {
   CALENDAR_EVENT_STATE,
   BOOKING_STATUS,
   AUDIT_ACTIONS,
+  INTEGRATION_MODULES,
 } from "@/constants";
 import { NotFoundError, AuthorizationError, BusinessRuleError } from "@/lib/api/errors";
 import { encryptSecret, decryptSecret, signState, verifyState } from "@/lib/security/crypto";
 import { envBaseUrl } from "@/lib/config/base-url";
+import { resolveIntegrationConfig } from "@/lib/config/integrations";
 import { addDays } from "@/lib/utils/time";
 import { formatDate, formatTime } from "@/lib/utils/format";
 import {
@@ -83,8 +85,26 @@ export async function listConnections(userId) {
 
   return {
     connections: connections.map(toPublicConnection),
-    providers: calendarIntegrationsStatus(),
+    providers: await calendarIntegrationsStatus(),
   };
+}
+
+/**
+ * Whether calendar work may run at all right now (§39).
+ *
+ * The module switch has to be checked *here* rather than in the provider
+ * factory, because the factory's fall back to the development implementation
+ * is load-bearing for a deployment that simply has no Google credentials —
+ * and reusing it for "switched off" would mean a disabled module quietly
+ * writing simulated events onto tutors' real connections, which is worse than
+ * either doing nothing or failing.
+ *
+ * Existing connections are untouched: a module switched back on resumes where
+ * it left off, which is what the panel promises.
+ */
+async function calendarModuleEnabled() {
+  const resolved = await resolveIntegrationConfig(INTEGRATION_MODULES.CALENDAR);
+  return resolved.enabled;
 }
 
 // --- Connecting ------------------------------------------------------------
@@ -108,7 +128,7 @@ export async function beginConnection(actor, { provider }) {
     { label: STATE_LABEL },
   );
 
-  const authorizationUrl = getCalendarProvider(provider).getAuthorizationUrl({
+  const authorizationUrl = (await getCalendarProvider(provider)).getAuthorizationUrl({
     redirectUri: redirectUriFor(provider),
     state,
     loginHint: user.email,
@@ -133,7 +153,7 @@ export async function completeConnection({ code, state }) {
   const provider = claims.provider;
   assertKnownProvider(provider);
 
-  const adapter = getCalendarProvider(provider);
+  const adapter = await getCalendarProvider(provider);
   const user = await User.findById(claims.userId).select("email").lean();
   if (!user) throw new NotFoundError("We couldn't find your account.");
 
@@ -204,7 +224,7 @@ export async function completeConnection({ code, state }) {
 /** The calendars a connected account can write to, for the picker. */
 export async function listAvailableCalendars(connectionId, actor) {
   const connection = await ownedConnection(connectionId, actor);
-  const adapter = getCalendarProvider(connection.provider);
+  const adapter = await getCalendarProvider(connection.provider);
 
   const calendars = await withAccessToken(connection, (token) =>
     adapter.listCalendars({ accessToken: token }),
@@ -222,7 +242,7 @@ export async function updateConnection(connectionId, patch, actor) {
   const connection = await ownedConnection(connectionId, actor);
 
   if (patch.calendarId !== undefined && patch.calendarId !== connection.calendarId) {
-    const adapter = getCalendarProvider(connection.provider);
+    const adapter = await getCalendarProvider(connection.provider);
     const calendars = await withAccessToken(connection, (token) =>
       adapter.listCalendars({ accessToken: token }),
     );
@@ -257,7 +277,7 @@ export async function updateConnection(connectionId, patch, actor) {
  */
 export async function disconnectCalendar(connectionId, actor) {
   const connection = await ownedConnection(connectionId, actor);
-  const adapter = getCalendarProvider(connection.provider);
+  const adapter = await getCalendarProvider(connection.provider);
 
   await removeAllEventsFor(connection).catch((error) => {
     console.warn("[calendar] could not clean up events on disconnect:", error.message);
@@ -297,8 +317,9 @@ export async function syncConnection(connectionId, { now = new Date(), windowDay
   );
   if (!connection) throw new NotFoundError("That calendar connection no longer exists.");
   if (!connection.syncBusy) return { skipped: "SYNC_DISABLED" };
+  if (!(await calendarModuleEnabled())) return { skipped: "MODULE_DISABLED" };
 
-  const adapter = getCalendarProvider(connection.provider);
+  const adapter = await getCalendarProvider(connection.provider);
   const to = addDays(now, windowDays);
 
   try {
@@ -440,6 +461,7 @@ export async function pushBookingEvent(bookingOrId) {
   const booking = await loadBooking(bookingOrId);
   if (!booking) return { pushed: 0 };
   if (booking.status !== BOOKING_STATUS.CONFIRMED) return { pushed: 0, skipped: "NOT_CONFIRMED" };
+  if (!(await calendarModuleEnabled())) return { pushed: 0, skipped: "MODULE_DISABLED" };
 
   const connections = await writableConnectionsFor(booking.tutorProfileId);
   if (!connections.length) return { pushed: 0 };
@@ -452,7 +474,7 @@ export async function pushBookingEvent(bookingOrId) {
     const existing = booking.externalEvents?.find(
       (link) => String(link.connectionId) === String(connection._id),
     );
-    const adapter = getCalendarProvider(connection.provider);
+    const adapter = await getCalendarProvider(connection.provider);
 
     // Stable per booking per connection: if our own link is lost but the
     // provider supports it, the provider still recognises the repeat.
@@ -519,7 +541,7 @@ export async function removeBookingEvent(bookingOrId) {
     );
     if (!link?.eventId || link.state === CALENDAR_EVENT_STATE.DELETED) continue;
 
-    const adapter = getCalendarProvider(connection.provider);
+    const adapter = await getCalendarProvider(connection.provider);
     try {
       await withAccessToken(connection, (token) =>
         adapter.deleteEvent({
@@ -600,7 +622,7 @@ async function withAccessToken(connection, fn) {
       throw error;
     }
 
-    const adapter = getCalendarProvider(doc.provider);
+    const adapter = await getCalendarProvider(doc.provider);
     const refreshed = await adapter.refreshAccessToken({ refreshToken });
 
     accessToken = refreshed.accessToken;

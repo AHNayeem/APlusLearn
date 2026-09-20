@@ -52,7 +52,7 @@ const STUCK_AFTER_MS = 5 * 60 * 1000;
  *   and a second signing secret.
  */
 export async function handlePaymentWebhook({ payload, signature, connect = false }) {
-  const provider = getPaymentProvider();
+  const provider = await getPaymentProvider();
 
   // 1. Authenticity. Throws before anything is read or written.
   const event = await provider.verifyWebhook({ payload, signature, connect });

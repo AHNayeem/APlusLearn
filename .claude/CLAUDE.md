@@ -92,12 +92,52 @@ options and the page-level `searchParams` parsing. Add the schema there rather t
 ### External services
 
 Each integration in [src/services/external/](src/services/external/) is an abstract class + a
-working development implementation + a `get*Provider()` factory that picks based on env vars
+working development implementation + an **async** `get*Provider()` factory
 (`MockPaymentProvider`, `ConsoleEmailProvider`, deterministic meeting links, bundled Canadian
 geocoding table, `LocalStorageProvider` under `.storage/`). Wiring a real provider means
 implementing the interface and returning it from the factory — no service or UI change.
-Selection rules live only in [src/lib/config/env.js](src/lib/config/env.js): production never
-guesses, and `development` is refused for payments, email and storage.
+
+**Two layers of configuration, and they answer different questions.**
+[src/lib/config/env.js](src/lib/config/env.js) is the deployment-level truth — which providers
+this build knows, and which may run as a fake: production never guesses, and `development` is
+refused for payments, email and storage. [src/lib/config/integrations.js](src/lib/config/integrations.js)
+is the runtime, database-aware view that every factory resolves through:
+
+```
+built-in defaults  →  environment variables  →  stored admin configuration
+```
+
+merged **per field**, so a deployment that has never opened the admin panel behaves exactly as
+before. The guards do not bend: no stored row can select a fake for payments/email/storage in
+production, and a credential that will not decrypt is an explicit error state — never a silent
+fallback to the environment.
+
+The factories are `async` because of this. Five of them — email, payment, sms, calendar, storage
+— so every call site does `await (await getXProvider()).method()`. `env.js` stays synchronous for
+the boot gate, which must not depend on a database round-trip.
+
+### Admin-configurable modules
+
+Five integrations are operator-editable at `/admin/settings/integrations`: email (Resend or SMTP),
+payment (Stripe), calendar (Google/Outlook app registration), SMS (Twilio), storage (S3/MinIO).
+
+- **One registry drives everything** — [src/constants/integrations.js](src/constants/integrations.js)
+  declares each module, provider, field, kind, secrecy and env fallback. The Zod schemas, the
+  Mongoose sub-documents, the masking and the admin form are all derived from it. Add a provider
+  there, not in eight files.
+- **Credentials live in their own collection**, never in `Settings` — that document is memoised
+  and reaches client components as branding, so a key kept there would be one prop from a browser.
+  `Integration.secrets` is AES-256-GCM encrypted under the `aplus:integration-secret` label and
+  `select: false`.
+- **Secrets are write-only.** No endpoint returns one. An omitted secret on PATCH keeps what is
+  stored; `null` clears it. Only the Stripe secret key reveals a last-4.
+- **Status is a claim, and it is narrow.** Filled-in fields get `CONFIGURED`; only a real provider
+  round-trip gets `CONNECTED`, recorded against the provider it ran for.
+- **`enabled` has runtime teeth** — payments refuse checkout, email/SMS record a skip, calendar
+  sync no-ops, storage refuses uploads **but still serves reads** (breaking retrieval of identity
+  documents is an incident, not a setting).
+- `DELETE` hands a module back to the environment; `POST` imports the environment's values.
+- Permission is `ADMIN_INTEGRATION_MANAGE`, held apart from `ADMIN_SETTINGS_MANAGE`.
 
 Two integrations are shaped slightly differently and it matters:
 

@@ -1,7 +1,8 @@
 import "server-only";
 import { randomUUID } from "node:crypto";
-import { CALENDAR_PROVIDERS } from "@/constants";
-import { resolveIntegration, DEVELOPMENT } from "@/lib/config/env";
+import { CALENDAR_PROVIDERS, INTEGRATION_MODULES } from "@/constants";
+import { DEVELOPMENT } from "@/lib/config/env";
+import { resolveIntegrationConfig } from "@/lib/config/integrations";
 
 /**
  * External calendar sync (§18, §41 Phase 2).
@@ -77,6 +78,21 @@ export class CalendarProvider {
   async revoke() {
     return { revoked: false };
   }
+
+  /**
+   * Prove the *application registration* is valid — the client id and secret
+   * this platform presents when a tutor authorises their calendar.
+   *
+   * This is explicitly not a claim that anybody's calendar is connected. A
+   * tutor's connection is their own OAuth grant and lives on
+   * `CalendarConnection`; conflating the two would be telling an operator
+   * something nobody has checked (§39).
+   *
+   * @returns {Promise<{ ok: boolean, code: string, message: string }>}
+   */
+  async verify() {
+    return { ok: false, code: "NOT_SUPPORTED", message: "This provider cannot be tested." };
+  }
 }
 
 // --- Development -----------------------------------------------------------
@@ -96,6 +112,15 @@ export class DevelopmentCalendarProvider extends CalendarProvider {
 
   get name() {
     return `${this.provider}_DEVELOPMENT`;
+  }
+
+  async verify() {
+    return {
+      ok: true,
+      code: "DEVELOPMENT",
+      message:
+        "Simulated calendar. Events are created, updated and returned as busy periods, but no Google or Microsoft account is involved.",
+    };
   }
 
   get configured() {
@@ -205,6 +230,63 @@ export class GoogleCalendarProvider extends CalendarProvider {
 
   get configured() {
     return Boolean(this.clientId && this.clientSecret);
+  }
+
+  /**
+   * Probe Google's token endpoint with a refresh grant that cannot succeed.
+   *
+   * The trick is that Google reports the two failures differently, and the
+   * difference is exactly the question being asked:
+   *
+   *   invalid_client  → the client id or secret is wrong
+   *   invalid_grant   → the client is fine; only the (deliberately bogus)
+   *                     refresh token was rejected
+   *
+   * So a response of `invalid_grant` is the *success* case here. Nothing is
+   * created, nothing is charged, and no user is involved.
+   */
+  async verify() {
+    if (!this.configured) {
+      return { ok: false, code: "NOT_CONFIGURED", message: "A client ID and client secret are required." };
+    }
+
+    let response;
+    let payload = {};
+    try {
+      response = await this.fetch(GOOGLE_TOKEN, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          client_id: this.clientId,
+          client_secret: this.clientSecret,
+          grant_type: "refresh_token",
+          refresh_token: "aplus-credential-probe",
+        }).toString(),
+      });
+      payload = await response.json().catch(() => ({}));
+    } catch (error) {
+      return { ok: false, code: "UNREACHABLE", message: `Google could not be reached: ${error.message}` };
+    }
+
+    if (payload.error === "invalid_grant") {
+      return {
+        ok: true,
+        code: "OK",
+        message: "Google accepted the client ID and secret. Tutors can now connect their own calendars.",
+      };
+    }
+    if (payload.error === "invalid_client" || response.status === 401) {
+      return { ok: false, code: "INVALID_CREDENTIALS", message: "Google rejected the client ID or client secret." };
+    }
+    if (response.status === 429) {
+      return { ok: false, code: "RATE_LIMITED", message: "Google is rate limiting this client. Try again shortly." };
+    }
+    return {
+      ok: false,
+      code: "PROVIDER_ERROR",
+      // `error` is a short, documented OAuth code — never a credential.
+      message: `Google answered unexpectedly (${payload.error ?? `HTTP ${response.status}`}).`,
+    };
   }
 
   getAuthorizationUrl({ redirectUri, state, loginHint }) {
@@ -473,6 +555,79 @@ export class MicrosoftCalendarProvider extends CalendarProvider {
     return Boolean(this.clientId && this.clientSecret);
   }
 
+  /**
+   * The same deliberately-doomed refresh grant Google gets, against the
+   * tenant's token endpoint. Microsoft is more specific about which half
+   * failed, and the extra detail is worth surfacing: "the secret expired" is
+   * a different Tuesday from "the secret is wrong", and Entra secrets do
+   * expire on a schedule an operator forgets.
+   */
+  async verify() {
+    if (!this.configured) {
+      return { ok: false, code: "NOT_CONFIGURED", message: "A client ID and client secret are required." };
+    }
+
+    let response;
+    let payload = {};
+    try {
+      response = await this.fetch(MS_TOKEN(this.tenantId), {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          client_id: this.clientId,
+          client_secret: this.clientSecret,
+          grant_type: "refresh_token",
+          refresh_token: "aplus-credential-probe",
+          scope: MicrosoftCalendarProvider.SCOPES.join(" "),
+        }).toString(),
+      });
+      payload = await response.json().catch(() => ({}));
+    } catch (error) {
+      return { ok: false, code: "UNREACHABLE", message: `Microsoft could not be reached: ${error.message}` };
+    }
+
+    const detail = String(payload.error_description ?? "");
+
+    if (payload.error === "invalid_grant") {
+      return {
+        ok: true,
+        code: "OK",
+        message: "Microsoft accepted the app registration. Tutors can now connect their own calendars.",
+      };
+    }
+    // AADSTS7000215 is specifically "invalid client secret provided".
+    if (detail.includes("AADSTS7000215")) {
+      return { ok: false, code: "INVALID_CREDENTIALS", message: "Microsoft rejected the client secret." };
+    }
+    // AADSTS7000222 is a secret that has passed its expiry date.
+    if (detail.includes("AADSTS7000222")) {
+      return {
+        ok: false,
+        code: "CREDENTIALS_EXPIRED",
+        message: "The client secret has expired. Create a new one in the Entra app registration.",
+      };
+    }
+    // AADSTS700016 is an application the tenant does not know.
+    if (detail.includes("AADSTS700016") || payload.error === "unauthorized_client") {
+      return {
+        ok: false,
+        code: "INVALID_CREDENTIALS",
+        message: "That application ID is not registered in this directory. Check the client and tenant IDs.",
+      };
+    }
+    if (payload.error === "invalid_client" || response.status === 401) {
+      return { ok: false, code: "INVALID_CREDENTIALS", message: "Microsoft rejected the client ID or client secret." };
+    }
+    if (response.status === 429) {
+      return { ok: false, code: "RATE_LIMITED", message: "Microsoft is rate limiting this client. Try again shortly." };
+    }
+    return {
+      ok: false,
+      code: "PROVIDER_ERROR",
+      message: `Microsoft answered unexpectedly (${payload.error ?? `HTTP ${response.status}`}).`,
+    };
+  }
+
   getAuthorizationUrl({ redirectUri, state, loginHint }) {
     const url = new URL(MS_AUTH(this.tenantId));
     url.searchParams.set("client_id", this.clientId);
@@ -690,31 +845,50 @@ const cache = new Map();
  * labelled as such everywhere it surfaces, so nobody believes their Google
  * account is attached when it is not.
  */
-export function getCalendarProvider(provider = CALENDAR_PROVIDERS.GOOGLE) {
+export async function getCalendarProvider(provider = CALENDAR_PROVIDERS.GOOGLE) {
   const key = String(provider).toUpperCase();
-  if (cache.has(key)) return cache.get(key);
 
-  const resolved = resolveIntegration("calendar");
-  const live = resolved.configured && resolved.names.includes(nameFor(key));
+  const resolved = await resolveIntegrationConfig(INTEGRATION_MODULES.CALENDAR);
+  const cacheKey = `${key}:${resolved.source}:${resolved.updatedAt?.getTime?.() ?? 0}`;
+  if (cache.has(cacheKey)) return cache.get(cacheKey);
 
-  let instance;
-  if (!live) {
-    instance = new DevelopmentCalendarProvider(key);
-  } else if (key === CALENDAR_PROVIDERS.GOOGLE) {
-    instance = new GoogleCalendarProvider({
-      clientId: process.env.GOOGLE_CALENDAR_CLIENT_ID,
-      clientSecret: process.env.GOOGLE_CALENDAR_CLIENT_SECRET,
-    });
-  } else {
-    instance = new MicrosoftCalendarProvider({
-      clientId: process.env.MICROSOFT_CALENDAR_CLIENT_ID,
-      clientSecret: process.env.MICROSOFT_CALENDAR_CLIENT_SECRET,
-      tenantId: process.env.MICROSOFT_CALENDAR_TENANT_ID || "common",
+  const instance = buildCalendarProvider(key, resolved);
+  cache.set(cacheKey, instance);
+  return instance;
+}
+
+/**
+ * Build one adapter from a resolved configuration.
+ *
+ * Exported so the connection test can build a provider for a specific
+ * platform from a configuration that has been saved but not yet switched on.
+ */
+export function buildCalendarProvider(providerKey, resolved) {
+  const key = String(providerKey).toUpperCase();
+  const name = nameFor(key);
+
+  // Enabled matters here as well as at the service: a disabled module gets
+  // the development implementation rather than an error, because calendar
+  // sync is additive and a tutor who connects nothing still takes bookings.
+  const live =
+    resolved.enabled &&
+    resolved.configured &&
+    (resolved.providers ?? []).includes(name);
+
+  if (!live) return new DevelopmentCalendarProvider(key);
+
+  if (key === CALENDAR_PROVIDERS.GOOGLE) {
+    return new GoogleCalendarProvider({
+      clientId: resolved.config.clientId,
+      clientSecret: resolved.secrets.clientSecret,
     });
   }
 
-  cache.set(key, instance);
-  return instance;
+  return new MicrosoftCalendarProvider({
+    clientId: resolved.config.clientId,
+    clientSecret: resolved.secrets.clientSecret,
+    tenantId: resolved.config.tenantId || "common",
+  });
 }
 
 /** `INTEGRATIONS` names providers in lower snake case; the domain uses enums. */
@@ -723,14 +897,15 @@ function nameFor(provider) {
 }
 
 /** What the tutor's calendar screen shows about each provider. */
-export function calendarIntegrationsStatus() {
-  const resolved = resolveIntegration("calendar");
+export async function calendarIntegrationsStatus() {
+  const resolved = await resolveIntegrationConfig(INTEGRATION_MODULES.CALENDAR);
 
   return Object.values(CALENDAR_PROVIDERS).map((provider) => {
     const live =
+      resolved.enabled &&
       resolved.configured &&
-      resolved.name !== DEVELOPMENT &&
-      resolved.names.includes(nameFor(provider));
+      resolved.provider !== DEVELOPMENT &&
+      (resolved.providers ?? []).includes(nameFor(provider));
 
     return {
       provider,

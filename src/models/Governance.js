@@ -440,9 +440,14 @@ const NotificationSettingsSchema = new mongoose.Schema(
  * at runtime — commission, cancellation windows, booking guard rails (§20, §26)
  * — plus the application's own identity, appearance and feature availability.
  *
- * No credential, key or secret is ever stored here. Provider configuration
- * lives in the environment and is reported, never edited, by the admin panel
- * (§36, `src/lib/config/env.js`).
+ * No credential, key or secret is ever stored here — and that is a stronger
+ * rule than it looks, because this document is memoised and its values reach
+ * *client* components through `getAppConfig()` as branding. A credential kept
+ * here would be one careless prop away from a browser.
+ *
+ * Provider credentials live in the `integrations` collection instead
+ * (`src/models/Integration.js`), encrypted at rest, behind their own
+ * permission, and are edited at Admin → External modules (§36).
  */
 const SettingsSchema = new mongoose.Schema(
   {

@@ -10,9 +10,14 @@ Every numbered section of `docs/Project.md`, mapped to what implements it.
 - **Partial** — working, with a named limitation
 - **Phase 2/3** — deliberately deferred, with the architecture in place
 
-Verified on a clean database: `npm run seed` → `npx eslint src scripts` (clean)
-→ `npm run build` (passes) → `npm run test:integrations` (111/111) →
-`npm run qa` (226/226).
+Verified: `bun run lint` (clean) → `bun run build` (clean) →
+`bun run test:integrations` (981 passed, 2 failed) → `bun run qa`
+(626 passed, 9 failed).
+
+The 11 failures are one environment problem, not a code one: the MinIO
+credentials in this machine's `.env.local` are refused by the bucket, so every
+upload and every document/branding read fails. They are identical before and
+after the External modules work.
 
 ---
 
@@ -297,7 +302,7 @@ taking a page down.
 | Every setting has a safe default | `DEFAULT_SETTINGS`; `getSettings()` deep-merges each group so a document written before a setting existed still answers for it | Implemented |
 | Server-side validation | `platformSettingsSchema` — colour contrast, email, http(s)-only URLs, postal code, commission range, length limits, min < max rate | Implemented |
 | Admin-only | `PERMISSIONS.ADMIN_SETTINGS_MANAGE` on every settings and branding endpoint; QA asserts anonymous → 401 and parent/tutor → 403 on both | Implemented |
-| No secrets in settings | Provider credentials stay in the environment (`lib/config/env.js`) and are reported, never edited; QA asserts the payload carries no credentials | Implemented |
+| No secrets in settings | Provider credentials are never stored in, or readable through, the Settings document — it is memoised and reaches client components as branding. They live in the separate `integrations` collection (§26 External modules below); QA asserts the settings payload carries no credentials | Implemented |
 | Audit trail | `AUDIT_ACTIONS.SETTINGS_UPDATED` with a per-field old/new diff and the sections touched; uploads record dimensions and size, never bytes | Implemented |
 | Change propagation | 30-second memo invalidated on every write; `router.refresh()` after a save; branding URLs versioned by upload time; `robots.txt` and `sitemap.xml` revalidate hourly | Implemented |
 
@@ -305,7 +310,7 @@ taking a page down.
 
 | Excluded | Why |
 |---|---|
-| Provider API keys, webhook secrets, `AUTH_SECRET`, `MONGODB_URI` | Deployment configuration, not application settings (§36) |
+| `AUTH_SECRET`, `MONGODB_URI`, `CRON_SECRET`, `NEXT_PUBLIC_APP_URL` | Infrastructure. The application cannot read its own database or verify its own sessions without them, so editing them through a database-backed screen would saw off the branch (§36) |
 | Tutor approval before appearing in search | `isSearchable` is derived; making it optional would let an unverified tutor surface (§16) |
 | Password reset / verification / security-alert email | An operator who could disable these could lock people out of their own accounts |
 | Rating scale | 1–5 is baked into the schema, indexes and every aggregate |
@@ -314,6 +319,46 @@ taking a page down.
 | Roles and permissions | `src/constants/roles.js`, enforced server-side |
 | Terms / Privacy body text | Version-controlled; only the identity it names is substituted |
 | Legal page structure, private-route disallow list | Properties of the application, not preferences |
+
+### External modules — admin-configurable integrations
+
+Provider credentials were previously environment-only, and deliberately so. That was
+reversed to give operators a way to configure and rotate integrations without a
+deployment; the guard rails that made the original rule safe are preserved rather
+than dropped.
+
+| Requirement | Implementation | Status |
+|---|---|---|
+| One registry drives everything | `src/constants/integrations.js` — every module, provider, field, kind, secrecy and environment fallback. The Zod schemas, the Mongoose sub-documents, the masking and the admin form are all derived from it | Implemented |
+| Persistence | `Integration` model, one document per module, in its own collection — never in `Settings`, which is memoised and reaches client components as branding | Implemented |
+| Secrets encrypted at rest | `encryptSecret`/`decryptSecret` (AES-256-GCM, HKDF from `AUTH_SECRET`) under the `aplus:integration-secret` label, so a leaked calendar-token key does not open a Stripe key. `secrets` is `select: false` | Implemented |
+| Secrets never returned | `GET` reduces each to `{ set, updatedAt }`; last four characters only for the Stripe secret key, which Stripe's own dashboard also shows. QA plants unique values and asserts they appear in no response, no rendered HTML and no audit record | Implemented |
+| Update without disclosure | An omitted secret keeps what is stored, `null` clears it. A port can be changed without holding the password, and an accidental save cannot blank a credential | Implemented |
+| Configuration precedence | defaults → environment → stored admin configuration, merged per field (`lib/config/integrations.js`). A deployment that has never opened the panel behaves exactly as before | Implemented |
+| Precedence does not bend | `fakeAllowedInProduction: false` still refuses a development provider for payments, email and storage under `APP_ENV=production`, whatever the database says | Implemented |
+| Undecryptable credential | Reported as `NEEDS_ATTENTION` with the `AUTH_SECRET` explanation. It never silently falls back to the environment — a configuration quietly reverting to different credentials would look like it worked | Implemented |
+| Reversible | `DELETE` removes the stored record and its credentials, handing the module back to the environment. Without it, opening the screen once would be irreversible | Implemented |
+| Adopting an existing deployment | `POST` imports the environment's values server-side, encrypted on the way in; nothing passes through the browser | Implemented |
+| Configuration is consumed at runtime | The five provider factories became asynchronous and resolve through the merged view. A saved credential takes effect on the next call — both caches are dropped on write | Implemented |
+| Enable/disable has teeth | Payments refuse checkout; email records a skip; SMS records `MODULE_DISABLED` in the delivery log; calendar sync and push no-op without touching existing connections; storage refuses uploads **but still serves reads**, because breaking retrieval of identity documents is an incident, not a setting | Implemented |
+| Connection tests are real | Resend `GET /domains`, SMTP `transport.verify()`, Stripe `accounts.retrieve()`, Twilio `GET /Accounts/{sid}`, Google/Microsoft token-endpoint probe, storage `headBucket()`. A module reaches "Connected" only after a round-trip succeeds, and the result is recorded against the provider it ran for | Implemented |
+| Test endpoints test what is stored | The body carries a destination only, never credentials, so a pass cannot be manufactured from an unsaved key | Implemented |
+| Stripe mode cannot be got wrong | The key carries its own mode; a declared environment that disagrees is refused, as is switching mode without a matching key | Implemented |
+| Provider errors are safe | Each adapter returns a sanitised verdict; `safeProviderMessage` replaces anything that still looks like a credential | Implemented |
+| Validation | Strict per module *and* provider — a field belonging to another provider is a field error, not a dropped key. E.164 numbers, http(s) URLs, port range, Stripe/Twilio identifier formats, Twilio's either-or sender, SMTP 465-without-TLS | Implemented |
+| Authorization | `ADMIN_INTEGRATION_MANAGE`, held apart from `ADMIN_SETTINGS_MANAGE` so a future limited-admin can edit branding without rotating a payment key. QA asserts anonymous → 401 and parent/tutor → 403 on every endpoint and method | Implemented |
+| Audit | `INTEGRATION_UPDATED`, `_ENABLED`, `_DISABLED`, `_PROVIDER_CHANGED`, `_SECRET_ROTATED`, `_TESTED`, `_IMPORTED_FROM_ENV`. A rotation records which field changed and by whom — never a value, masked or otherwise | Implemented |
+| Boot validation | `instrumentation.js` reports the merged view through `integration-report.js`, which cannot decrypt and so keeps `node:crypto` out of the Edge bundle. Stored problems are reported, not asserted — a broken stored record must not stop a deployment whose environment is still valid | Implemented |
+| Accessibility | Status as icon + words, never colour alone; the state is part of each tab's own label; secret state in a live region; labelled switches; field-bound errors | Implemented |
+
+### Deliberately not admin-configurable
+
+| Excluded | Why |
+|---|---|
+| `AUTH_SECRET`, `MONGODB_URI`, `CRON_SECRET`, `NEXT_PUBLIC_APP_URL` | Infrastructure — the application cannot read its own database or verify its own sessions without them |
+| `STORAGE_SSE`, `STORAGE_SESSION_TOKEN`, `STORAGE_TIMEOUT_MS` | Properties of the bucket's deployment, not preferences; getting them wrong fails every write rather than mis-saving one |
+| OAuth sign-in, geocoding, meeting links | Not in this scope. The registry is built to take them without rework |
+| A platform-level calendar connection | No such thing exists: OAuth here binds a *tutor's* account. The module configures the app registration; an admin "Connect" button would be a fake button (§39) |
 
 ## 27. Online / in-person
 

@@ -2,7 +2,9 @@ import "server-only";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, writeFile, readFile, unlink, stat } from "node:fs/promises";
 import path from "node:path";
-import { requireIntegration } from "@/lib/config/env";
+import { requireIntegrationConfig, resolveIntegrationConfig } from "@/lib/config/integrations";
+import { ConfigurationError } from "@/lib/config/env";
+import { INTEGRATION_MODULES } from "@/constants";
 import { ObjectStoreClient } from "./object-storage";
 
 /**
@@ -254,31 +256,68 @@ let cached = null;
  * writing identity documents to a disk that will not exist on the next
  * request is the exact failure this provider exists to prevent.
  */
-export function getStorageProvider() {
-  const { name } = requireIntegration("storage");
-  if (cached?.key === name) return cached.provider;
+/**
+ * Build the adapter one resolved configuration describes.
+ *
+ * Exported so the connection test can reach a bucket an operator has just
+ * described but not yet switched on.
+ */
+export function buildStorageProvider(resolved) {
+  if (resolved.provider !== "minio") return new LocalStorageProvider();
 
-  const provider =
-    name === "minio"
-      ? new ObjectStorageProvider({
-          label: "MINIO",
-          bucket: process.env.STORAGE_BUCKET,
-          region: process.env.STORAGE_REGION || "us-east-1",
-          accessKeyId: process.env.STORAGE_ACCESS_KEY,
-          secretAccessKey: process.env.STORAGE_SECRET_KEY,
-          sessionToken: process.env.STORAGE_SESSION_TOKEN || undefined,
-          endpoint: process.env.STORAGE_ENDPOINT || undefined,
-          // Path style is what MinIO serves, and works everywhere;
-          // virtual-hosted style is opt-in for buckets that require it.
-          forcePathStyle: process.env.STORAGE_FORCE_PATH_STYLE !== "false",
-          prefix: process.env.STORAGE_PREFIX || "",
-          // Off unless asked for: MinIO refuses per-object SSE without a KMS.
-          serverSideEncryption: process.env.STORAGE_SSE || null,
-          timeoutMs: Number(process.env.STORAGE_TIMEOUT_MS) || undefined,
-        })
-      : new LocalStorageProvider();
+  return new ObjectStorageProvider({
+    label: "MINIO",
+    bucket: resolved.config.bucket,
+    region: resolved.config.region || "us-east-1",
+    accessKeyId: resolved.config.accessKey,
+    secretAccessKey: resolved.secrets.secretKey,
+    sessionToken: process.env.STORAGE_SESSION_TOKEN || undefined,
+    endpoint: resolved.config.endpoint || undefined,
+    // Path style is what MinIO serves, and works everywhere; virtual-hosted
+    // style is opt-in for buckets that require it.
+    forcePathStyle: resolved.config.forcePathStyle !== false,
+    prefix: resolved.config.prefix || "",
+    // Off unless asked for: MinIO refuses per-object SSE without a KMS. Left
+    // in the environment deliberately — it is a property of the bucket's
+    // deployment, not a preference, and getting it wrong makes every write
+    // fail rather than mis-save.
+    serverSideEncryption: process.env.STORAGE_SSE || null,
+    timeoutMs: Number(process.env.STORAGE_TIMEOUT_MS) || undefined,
+  });
+}
 
-  cached = { key: name, provider };
+export async function getStorageProvider() {
+  const resolved = await requireIntegrationConfig(INTEGRATION_MODULES.STORAGE);
+  return fromResolved(resolved);
+}
+
+/**
+ * The store, for reading only.
+ *
+ * Switching the storage module off stops *new* uploads. It deliberately does
+ * not stop reads, because the files already in the bucket include tutors'
+ * identity documents and the platform's own logo: an operator turning a
+ * provider off while they reconfigure it should not thereby break
+ * verification review and every page's branding. That would be an incident,
+ * not a setting (§39).
+ *
+ * The configuration still has to be *valid* — a disabled module with no
+ * credentials cannot serve a read either, and says so.
+ */
+export async function getStorageProviderForRead() {
+  const resolved = await resolveIntegrationConfig(INTEGRATION_MODULES.STORAGE);
+  if (!resolved.configured) {
+    throw new ConfigurationError(resolved.error ?? "File storage is not configured.");
+  }
+  return fromResolved(resolved);
+}
+
+function fromResolved(resolved) {
+  const key = `${resolved.provider}:${resolved.source}:${resolved.updatedAt?.getTime?.() ?? 0}`;
+  if (cached?.key === key) return cached.provider;
+
+  const provider = buildStorageProvider(resolved);
+  cached = { key, provider };
   return provider;
 }
 

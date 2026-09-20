@@ -27,11 +27,12 @@ export default async function TutorPayoutsPage() {
   const user = await enforceRole(ROLES.TUTOR, "/tutor/payouts");
   await connectToDatabase();
 
-  const [account, { items }, earnings, settings] = await Promise.all([
+  const [account, { items }, earnings, settings, payments] = await Promise.all([
     getPayoutAccount(user.id),
     listPayouts(user, { pageSize: 25 }),
     tutorEarnings(user.id, { days: 365 }),
     getSettings(),
+    paymentProviderStatus(),
   ]);
 
   const paidTotal = items
@@ -117,7 +118,7 @@ export default async function TutorPayoutsPage() {
         </Card>
 
         <div className="lg:order-2">
-          <PayoutOnboarding account={account} mode={paymentProviderStatus().mode} />
+          <PayoutOnboarding account={account} mode={payments.mode} />
         </div>
       </div>
     </DashboardPage>

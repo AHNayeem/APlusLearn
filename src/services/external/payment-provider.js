@@ -1,9 +1,10 @@
 import "server-only";
 import { randomUUID } from "node:crypto";
 import Stripe from "stripe";
-import { requireIntegration, resolveIntegration, DEVELOPMENT } from "@/lib/config/env";
+import { DEVELOPMENT } from "@/lib/config/env";
+import { requireIntegrationConfig, resolveIntegrationConfig } from "@/lib/config/integrations";
 import { AppError } from "@/lib/api/errors";
-import { CHECKOUT_HOLD } from "@/constants";
+import { CHECKOUT_HOLD, INTEGRATION_MODULES } from "@/constants";
 
 /**
  * Payment provider abstraction (§20, §38).
@@ -73,6 +74,16 @@ export class PaymentProvider {
    */
   async verifyWebhook() {
     throw new Error("not implemented");
+  }
+
+  /**
+   * Prove the credentials open the account, and report which mode they are
+   * for. Read-only: it never creates a charge, a customer or an account.
+   *
+   * @returns {Promise<{ ok: boolean, code: string, message: string, livemode?: boolean }>}
+   */
+  async verify() {
+    return { ok: false, code: "NOT_SUPPORTED", message: "This provider cannot be tested." };
   }
 }
 
@@ -208,6 +219,15 @@ export class MockPaymentProvider extends PaymentProvider {
       status: 503,
       code: "NOT_CONFIGURED",
     });
+  }
+
+  async verify() {
+    return {
+      ok: true,
+      code: "DEVELOPMENT",
+      livemode: false,
+      message: "Simulated payments. No money moves and no card is ever charged.",
+    };
   }
 }
 
@@ -477,6 +497,73 @@ export class StripePaymentProvider extends PaymentProvider {
       });
     }
   }
+
+  /**
+   * A real, read-only Stripe call — `accounts.retrieve()` for the platform
+   * account itself.
+   *
+   * Chosen over `balance.retrieve()` because it answers two questions at
+   * once: the key works, and the account is in a state that can actually take
+   * money. It creates nothing, so an operator can press the button as often
+   * as they like.
+   *
+   * The reported `livemode` comes from Stripe's answer rather than from the
+   * key prefix, which makes this the one place that can catch a key whose
+   * prefix and account disagree.
+   */
+  async verify() {
+    try {
+      const account = await this.stripe.accounts.retrieve();
+      const mode = this.livemode ? "Live" : "Test";
+      const name = account.business_profile?.name || account.email || account.id;
+
+      if (!account.charges_enabled) {
+        return {
+          ok: false,
+          code: "ACCOUNT_RESTRICTED",
+          livemode: this.livemode,
+          message: `${mode} mode credentials are valid for ${name}, but the account cannot accept charges yet. Finish onboarding in Stripe.`,
+        };
+      }
+
+      return {
+        ok: true,
+        code: "OK",
+        livemode: this.livemode,
+        message: `Connected to ${name} in ${mode.toLowerCase()} mode.`,
+      };
+    } catch (error) {
+      return { ok: false, livemode: this.livemode, ...describeStripeFailure(error) };
+    }
+  }
+}
+
+/**
+ * Turn a Stripe error into something an operator can act on, without echoing
+ * anything Stripe said back about the credential itself (§36).
+ */
+function describeStripeFailure(error) {
+  const type = error?.type ?? "";
+
+  if (type === "StripeAuthenticationError") {
+    return { code: "INVALID_CREDENTIALS", message: "Stripe rejected the secret key." };
+  }
+  if (type === "StripePermissionError") {
+    return {
+      code: "INSUFFICIENT_PERMISSIONS",
+      message: "The key is valid but is not allowed to read this account. A restricted key may need more scopes.",
+    };
+  }
+  if (type === "StripeRateLimitError") {
+    return { code: "RATE_LIMITED", message: "Stripe is rate limiting this key. Try again shortly." };
+  }
+  if (type === "StripeConnectionError") {
+    return { code: "UNREACHABLE", message: "Stripe could not be reached from this server." };
+  }
+  if (error?.code === "ETIMEDOUT" || type === "StripeAPIError") {
+    return { code: "PROVIDER_ERROR", message: "Stripe did not answer. Check status.stripe.com and try again." };
+  }
+  return { code: "PROVIDER_ERROR", message: "Stripe refused the request." };
 }
 
 /** Stripe account -> the provider-agnostic shape PayoutAccount stores. */
@@ -545,49 +632,68 @@ function idOf(value) {
 }
 
 /**
- * Resolve the configured provider. Cached per provider name so a changed
- * configuration is picked up rather than being pinned by the first call.
+ * Resolve the configured provider.
+ *
+ * Cached per resolved configuration rather than per provider name, so a
+ * credential an administrator rotates from the admin panel is picked up on
+ * the next call instead of being pinned by the first one.
  */
 let cached = null;
 
-export function getPaymentProvider() {
-  const { name } = requireIntegration("payment");
-  if (cached?.key === name) return cached.provider;
+/**
+ * Build the adapter one resolved configuration describes.
+ *
+ * Exported so a connection test can construct a provider from a configuration
+ * that has been saved but not yet switched on — which is the order an
+ * operator actually does things in.
+ */
+export function buildPaymentProvider(resolved) {
+  if (resolved.provider !== "stripe") return new MockPaymentProvider();
 
-  const provider =
-    name === "stripe"
-      ? new StripePaymentProvider({
-          secretKey: process.env.STRIPE_SECRET_KEY,
-          webhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
-          connectWebhookSecret:
-            process.env.STRIPE_CONNECT_WEBHOOK_SECRET || process.env.STRIPE_WEBHOOK_SECRET,
-        })
-      : new MockPaymentProvider();
+  return new StripePaymentProvider({
+    secretKey: resolved.secrets.secretKey,
+    webhookSecret: resolved.secrets.webhookSecret,
+    // One endpoint by default; a separate Connect endpoint is opt-in.
+    connectWebhookSecret: resolved.secrets.connectWebhookSecret || resolved.secrets.webhookSecret,
+  });
+}
 
-  cached = { key: name, provider };
+export async function getPaymentProvider() {
+  const resolved = await requireIntegrationConfig(INTEGRATION_MODULES.PAYMENT);
+
+  const key = `${resolved.provider}:${resolved.source}:${resolved.updatedAt?.getTime?.() ?? 0}`;
+  if (cached?.key === key) return cached.provider;
+
+  const provider = buildPaymentProvider(resolved);
+  cached = { key, provider };
   return provider;
 }
 
 /**
  * Drop the memoised provider.
  *
- * Exists for the integration suite, which switches `PAYMENT_PROVIDER` between
- * sections to exercise both adapters in one process. Nothing in the running
- * application calls it — the provider does not change under a live server.
+ * Used by the integration suite, which switches providers between sections to
+ * exercise both adapters in one process, and by the settings service when an
+ * administrator saves a new configuration.
  */
 export function resetPaymentProvider() {
   cached = null;
 }
 
 /** Which mode payments are running in, for the UI and the admin health panel. */
-export function paymentProviderStatus() {
-  const resolved = resolveIntegration("payment");
+export async function paymentProviderStatus() {
+  const resolved = await resolveIntegrationConfig(INTEGRATION_MODULES.PAYMENT);
+  const live = resolved.enabled && resolved.configured && resolved.provider !== DEVELOPMENT;
+
   return {
-    provider: resolved.name,
+    provider: resolved.provider,
     label: resolved.label,
-    mode: resolved.name === DEVELOPMENT ? "development" : "production",
-    ok: resolved.configured,
-    hostedCheckout: resolved.configured && resolved.name !== DEVELOPMENT,
-    webhooksConfigured: Boolean(process.env.STRIPE_WEBHOOK_SECRET),
+    mode: resolved.provider === DEVELOPMENT ? "development" : "production",
+    ok: resolved.enabled && resolved.configured,
+    enabled: resolved.enabled,
+    hostedCheckout: live,
+    // The signing secret is what makes an incoming event trustworthy; whether
+    // one is present is a configuration fact, and its value is never read here.
+    webhooksConfigured: Boolean(resolved.secrets?.webhookSecret),
   };
 }

@@ -51,6 +51,13 @@ export const INTEGRATIONS = {
     fakeAllowedInProduction: false,
     providers: {
       resend: { label: "Resend", required: ["RESEND_API_KEY", "EMAIL_FROM"], optional: ["EMAIL_REPLY_TO"] },
+      smtp: {
+        label: "SMTP",
+        required: ["SMTP_HOST", "SMTP_PORT", "EMAIL_FROM"],
+        // A relay that authenticates by IP needs no username or password, so
+        // neither can be required — the adapter simply omits AUTH.
+        optional: ["SMTP_USER", "SMTP_PASSWORD", "SMTP_SECURE", "SMTP_REJECT_UNAUTHORIZED", "EMAIL_REPLY_TO"],
+      },
     },
   },
   oauth: {

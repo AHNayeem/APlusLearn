@@ -172,6 +172,7 @@ export const ADMIN_NAV = [
   { href: "/admin/moderation", label: "Reported chats", icon: "MessageSquareWarning", badge: "reportedConversations" },
   { href: "/admin/sms", label: "Text messages", icon: "Smartphone" },
   { href: "/admin/settings", label: "Settings", icon: "Settings" },
+  { href: "/admin/settings/integrations", label: "External modules", icon: "Plug" },
 ];
 
 /**
