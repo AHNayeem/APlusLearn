@@ -260,6 +260,52 @@ const groupSettingsSchema = z
     { message: "The smallest group cannot be larger than the biggest.", path: ["minParticipants"] },
   );
 
+/**
+ * Promoted profiles. `maxPromotedPerSearch` is capped at 10 here as well as in
+ * the schema: the ceiling exists to stop a page of results turning into a page
+ * of adverts, so it is not an operator's to remove.
+ */
+const promotionSettingsSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    maxPromotedPerSearch: z.coerce.number().int().min(0).max(10).optional(),
+    maxActive: z.coerce.number().int().min(0).max(500).optional(),
+    defaultDurationDays: z.coerce.number().int().min(1).max(365).optional(),
+    maxDurationDays: z.coerce.number().int().min(1).max(365).optional(),
+  })
+  .refine(
+    (v) =>
+      v.defaultDurationDays === undefined ||
+      v.maxDurationDays === undefined ||
+      v.defaultDurationDays <= v.maxDurationDays,
+    {
+      message: "The default window cannot be longer than the longest allowed one.",
+      path: ["defaultDurationDays"],
+    },
+  );
+
+/**
+ * Fraud and risk. `highScore` must sit at or above `reviewScore`, or a case
+ * would be called HIGH before it was worth opening.
+ */
+const riskSettingsSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    signalWindowDays: z.coerce.number().int().min(1).max(365).optional(),
+    reviewScore: z.coerce.number().int().min(1).max(20).optional(),
+    highScore: z.coerce.number().int().min(1).max(20).optional(),
+    noShowThreshold: z.coerce.number().int().min(1).max(50).optional(),
+    paymentFailureThreshold: z.coerce.number().int().min(1).max(50).optional(),
+    disputeThreshold: z.coerce.number().int().min(1).max(50).optional(),
+  })
+  .refine(
+    (v) => v.reviewScore === undefined || v.highScore === undefined || v.highScore >= v.reviewScore,
+    {
+      message: "A case cannot be called high risk before it is worth reviewing.",
+      path: ["highScore"],
+    },
+  );
+
 export const platformSettingsSchema = z
   .object({
     commissionPercent: z.coerce.number().min(0).max(50).optional(),
@@ -295,6 +341,8 @@ export const platformSettingsSchema = z
     referrals: referralSettingsSchema.optional(),
     packages: packageSettingsSchema.optional(),
     groups: groupSettingsSchema.optional(),
+    promotions: promotionSettingsSchema.optional(),
+    risk: riskSettingsSchema.optional(),
   })
   // Unknown keys are dropped rather than rejected — `updatedBy`, `key` and the
   // timestamps come back on every GET and a round-tripping form would resend
@@ -357,6 +405,19 @@ export const courseSchema = z.object({
   isActive: z.boolean().default(true),
 });
 
+/**
+ * A reporting period (§25, §41 Phase 2).
+ *
+ * `days` is the rolling window the dashboards use; `from`/`to` are the
+ * explicit range a report can be pinned to. `timeZone` decides what a "day"
+ * means when a series is bucketed — the service falls back to the
+ * marketplace's own zone when it is absent or unusable, so a bad value
+ * degrades to the right answer rather than to an error.
+ */
 export const analyticsQuerySchema = z.object({
-  days: z.coerce.number().int().min(7).max(365).default(30),
+  days: z.coerce.number().int().min(1).max(366).optional(),
+  from: z.iso.datetime({ offset: true }).optional(),
+  to: z.iso.datetime({ offset: true }).optional(),
+  timeZone: z.string().trim().max(64).optional(),
+  limit: z.coerce.number().int().min(1).max(50).optional(),
 });

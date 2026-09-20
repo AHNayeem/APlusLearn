@@ -323,6 +323,82 @@ export const DEFAULT_SETTINGS = {
   },
 
   /**
+   * Fraud and risk (§41 Phase 2).
+   *
+   * §41 names "fraud/risk tools" and defines no signal, threshold, score or
+   * penalty whatsoever, so every number here belongs to the operator and the
+   * shipped values are deliberately cautious — a false positive costs a real
+   * family a real lesson.
+   *
+   * Two things are *not* settings, because there is no defensible value for
+   * them:
+   *
+   *   Nothing is ever restricted automatically. A case is opened and an
+   *   administrator decides. There is no "auto-suspend at score N" switch,
+   *   because the requirements authorise no penalty at all and a platform
+   *   that invents one is a platform that suspends somebody by arithmetic.
+   *
+   *   Every signal counts the same. Weighting a dispute above a declined card
+   *   would be a risk model nobody specified. The score is simply how many
+   *   distinct kinds of trouble fired inside the window, which is a number an
+   *   administrator can check by reading the case.
+   *
+   * Cancellation abuse deliberately has no threshold here: it already has one
+   * in `cancellationAbuseThreshold` above, and a second copy would drift.
+   */
+  risk: {
+    enabled: true,
+    /** How far back a signal still counts toward the current picture. */
+    signalWindowDays: 30,
+    /** Distinct signals before a case is opened for review at all. */
+    reviewScore: 2,
+    /** Distinct signals at which a case is called HIGH. */
+    highScore: 4,
+    /** Unattended lessons inside the window before the signal fires. */
+    noShowThreshold: 3,
+    /** Declined payments inside the window before the signal fires. */
+    paymentFailureThreshold: 3,
+    /** Disputes raised *against* an account before the signal fires. */
+    disputeThreshold: 2,
+  },
+
+  /**
+   * Promoted tutor profiles (§41 Phase 2).
+   *
+   * §41 names "promoted profiles" and defines no placement count, duration,
+   * price or eligibility rule beyond the marketplace's own, so the only
+   * numbers fixed here are the ones that keep discovery honest, and they are
+   * the operator's to change:
+   *
+   *   A promotion moves a tutor up the *default* ordering only. When a
+   *   visitor has asked for a specific order — cheapest first, closest
+   *   first, highest rated — that is an instruction, and a paid placement
+   *   that quietly overrode it would make the sort control a lie. That rule
+   *   is not a setting, because there is no defensible value for "ignore
+   *   what the visitor asked for".
+   *
+   *   `maxPromotedPerSearch` is the fairness ceiling: however many
+   *   promotions are running, only this many results are ever moved up in one
+   *   result set, so page one cannot become an advertisement board. It ships
+   *   at 3 out of a 12-result page — a quarter, visible but not dominant.
+   *
+   *   Promoted results are always labelled in the UI. That is not negotiable
+   *   either: undisclosed paid placement is an advertising-standards problem,
+   *   not a design preference.
+   */
+  promotions: {
+    enabled: true,
+    /** Results moved up in any one result set. The fairness ceiling. */
+    maxPromotedPerSearch: 3,
+    /** Promotions that may run at the same moment across the marketplace. */
+    maxActive: 20,
+    /** Window length when an administrator does not name an end date. */
+    defaultDurationDays: 30,
+    /** Longest window an administrator may set in one go. */
+    maxDurationDays: 365,
+  },
+
+  /**
    * Referrals (§41 Phase 2).
    *
    * §41 names "referrals" and defines no reward, so the amounts ship at zero
@@ -464,7 +540,7 @@ export const DEFAULT_SETTINGS = {
  */
 export const SETTINGS_GROUPS = [
   "branding", "theme", "seo", "contact", "social", "footer", "features", "notifications",
-  "matching", "matchWeights", "referrals", "packages", "groups",
+  "matching", "matchWeights", "referrals", "packages", "groups", "promotions", "risk",
 ];
 
 export const PAGE_SIZES = {

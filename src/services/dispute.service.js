@@ -15,6 +15,7 @@ import { formatMoney } from "@/lib/utils/format";
 import { refundPayment } from "./payment.service";
 import { notify } from "./notification.service";
 import { recordAudit } from "./audit.service";
+import { checkDisputePattern } from "./risk.service";
 
 /** Disputes and admin adjudication (§26). */
 
@@ -61,6 +62,10 @@ export async function createDispute(input, actor) {
 
   booking.status = BOOKING_STATUS.DISPUTED;
   await booking.save();
+
+  // Counted against the person the dispute is *about*. Raising one is a
+  // right, so the person who raised it is never the subject (§41 Phase 2).
+  await checkDisputePattern({ againstUserId, disputeId: dispute._id });
 
   await notify({
     userId: againstUserId,

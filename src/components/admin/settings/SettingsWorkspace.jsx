@@ -9,6 +9,8 @@ import { SeoSettings } from "./SeoSettings";
 import { MarketplaceSettings } from "./MarketplaceSettings";
 import { MatchingSettings } from "./MatchingSettings";
 import { ReferralSettings } from "./ReferralSettings";
+import { PromotionSettings } from "./PromotionSettings";
+import { RiskSettings } from "./RiskSettings";
 import { FeatureSettings } from "./FeatureSettings";
 import { NotificationSettings } from "./NotificationSettings";
 
@@ -31,6 +33,8 @@ const TABS = [
   { value: "marketplace", label: "Marketplace" },
   { value: "matching", label: "Matching" },
   { value: "referrals", label: "Referrals" },
+  { value: "promotions", label: "Promotions" },
+  { value: "risk", label: "Risk" },
   { value: "features", label: "Features" },
   { value: "notifications", label: "Notifications" },
 ];
@@ -49,6 +53,8 @@ export function SettingsWorkspace({ settings, assetRules, smsProvider }) {
     marketplace: <MarketplaceSettings settings={settings} />,
     matching: <MatchingSettings settings={settings} />,
     referrals: <ReferralSettings settings={settings} />,
+    promotions: <PromotionSettings settings={settings} />,
+    risk: <RiskSettings settings={settings} />,
     features: <FeatureSettings settings={settings} />,
     notifications: <NotificationSettings settings={settings} smsProvider={smsProvider} />,
   };

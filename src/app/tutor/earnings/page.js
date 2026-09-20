@@ -1,9 +1,10 @@
 import Link from "next/link";
-import { TrendingUp, Banknote, Clock, Receipt } from "lucide-react";
+import { TrendingUp, Banknote, Clock, Receipt, Repeat, Star } from "lucide-react";
 import { connectToDatabase } from "@/lib/db/connect";
 import { enforceRole } from "@/lib/auth/guards";
 import { ROLES } from "@/constants";
 import { tutorEarnings } from "@/services/payment.service";
+import { tutorAnalytics } from "@/services/analytics.service";
 import { getSettings } from "@/services/settings.service";
 import {
   Alert, Badge, Button, Card, CardBody, CardHeader, EmptyState, LinkTabs, StatCard,
@@ -26,8 +27,11 @@ export default async function TutorEarningsPage({ searchParams }) {
   await connectToDatabase();
 
   const { days = "90" } = await searchParams;
-  const [earnings, settings] = await Promise.all([
+  const [earnings, performance, settings] = await Promise.all([
     tutorEarnings(user.id, { days: Number(days) }),
+    // The tutor's own analytics, resolved from the session — there is no id
+    // in the URL that could point this at somebody else (§8, §10).
+    tutorAnalytics(user.id, { days: Number(days) }),
     getSettings(),
   ]);
 
@@ -95,6 +99,79 @@ export default async function TutorEarningsPage({ searchParams }) {
           tabs={PERIODS.map((p) => ({ ...p, href: `/tutor/earnings?days=${p.value}` }))}
         />
       </div>
+
+      <h2 className="mb-4 mt-8 text-sm font-bold text-ink-900">How your teaching is going</h2>
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <StatCard
+          label="Lessons completed"
+          value={performance.lessons.completed}
+          trend={performance.lessons.completedChange}
+          hint={`${performance.lessons.teachingHours} teaching hours`}
+          icon={<TrendingUp className="size-5" />}
+        />
+        <StatCard
+          label="Completion rate"
+          value={`${performance.lessons.completionRate}%`}
+          hint={
+            performance.lessons.cancelledByMe > 0
+              ? `${performance.lessons.cancelledByMe} cancelled by you`
+              : "No lessons cancelled by you"
+          }
+        />
+        <StatCard
+          label="Students who came back"
+          value={`${performance.students.repeatRate}%`}
+          hint={`${performance.students.returning} of ${performance.students.taught} students`}
+          icon={<Repeat className="size-5" />}
+        />
+        <StatCard
+          label="Reviews in this period"
+          value={performance.reviews.count}
+          hint={
+            performance.reviews.count
+              ? `${performance.reviews.average} average`
+              : "No reviews yet"
+          }
+          icon={<Star className="size-5" />}
+          href="/tutor/reviews"
+        />
+      </div>
+
+      {performance.courses.length > 0 && (
+        <Card className="mt-6">
+          <CardHeader
+            title="Where your earnings come from"
+            description="Completed lessons in this period, by course."
+          />
+          <CardBody className="p-0">
+            <Table className="min-w-0">
+              <THead>
+                <TH>Course</TH>
+                <TH align="center">Lessons</TH>
+                <TH align="right">You earned</TH>
+              </THead>
+              <TBody>
+                {performance.courses.map((course) => (
+                  <TR key={`${course.code}-${course.name}`}>
+                    <TD>
+                      <span className="font-semibold text-ink-900">
+                        {course.code ?? course.name}
+                      </span>
+                      {course.code && (
+                        <span className="block text-xs text-ink-500">{course.name}</span>
+                      )}
+                    </TD>
+                    <TD align="center">{course.lessons}</TD>
+                    <TD align="right" className="font-semibold text-success-700">
+                      {formatMoney(course.earningsCents)}
+                    </TD>
+                  </TR>
+                ))}
+              </TBody>
+            </Table>
+          </CardBody>
+        </Card>
+      )}
 
       <Card className="mt-6">
         <CardHeader

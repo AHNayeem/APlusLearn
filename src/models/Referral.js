@@ -119,6 +119,8 @@ const CreditEntrySchema = new mongoose.Schema(
 
 CreditEntrySchema.index({ idempotencyKey: 1 }, { unique: true, sparse: true });
 CreditEntrySchema.index({ userId: 1, createdAt: -1 });
+// "How much credit did the referral scheme grant this month" (§41 Phase 2).
+CreditEntrySchema.index({ reason: 1, createdAt: -1 });
 
 export const CreditEntry =
   mongoose.models.CreditEntry || mongoose.model("CreditEntry", CreditEntrySchema);

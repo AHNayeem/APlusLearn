@@ -1,0 +1,36 @@
+# APlus Learn — verified failure baseline
+#
+# Measured on this machine before any P2.10–P2.12 work, and unchanged after it.
+# Run the dev server with PAYMENT_PROVIDER=development: the repository's Stripe
+# test credentials are not valid, and a live Stripe failure takes the whole QA
+# run down rather than failing one assertion.
+#
+# Re-seed (`bun run seed`) before a QA run. The suite consumes seeded fixtures
+# by design, and a second consecutive run reports extra failures that are
+# fixture exhaustion, not regressions.
+
+=== bun run test:integrations  —  2 failures ===
+✗ the bucket is reachable with the configured credentials
+    Object storage refused the request: the credentials are wrong or lack
+    permission on this bucket. (MinIO / STORAGE_* env)
+✗ and each records a full refund
+    Group tutoring settlement. Reproduces identically on the untouched
+    baseline; not caused by any Phase 2.10–2.12 change.
+
+=== bun run qa  —  9 failures, all the same MinIO credential problem ===
+✗ a tutor can upload a verification document
+✗ a valid logo uploads
+✗ the stored logo records its real dimensions
+✗ the logo is served publicly
+✗ the logo is served as an image and not sniffed
+✗ the bytes served are the bytes that were stored
+✗ a logo can be replaced
+✗ the replacement gets its own storage key, so the URL version changes
+✗ the replacement is what gets served, not the original
+
+=== Totals ===
+                       before P2.10–P2.12      after
+test:integrations      734 passed, 2 failed    913 passed, 2 failed
+qa                     431 passed, 9 failed    525 passed, 9 failed
+
+No new failures. No changed failure signatures. No new stack traces.

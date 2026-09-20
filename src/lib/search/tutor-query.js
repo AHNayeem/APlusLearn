@@ -96,22 +96,30 @@ export function availabilityWindowFilter(windows = []) {
   };
 }
 
+/**
+ * `_id` closes every sort.
+ *
+ * Without a unique final key, two tutors with identical ratings can swap
+ * places between two reads of the same query — which shows up as a result
+ * appearing twice on page one and never on page two. It costs nothing and it
+ * is what makes paging through search results trustworthy.
+ */
 export function buildTutorSort(sort) {
   switch (sort) {
     case "RATING":
-      return { "stats.ratingAverage": -1, "stats.ratingCount": -1 };
+      return { "stats.ratingAverage": -1, "stats.ratingCount": -1, _id: 1 };
     case "PRICE_ASC":
-      return { hourlyRateCents: 1, "stats.ratingAverage": -1 };
+      return { hourlyRateCents: 1, "stats.ratingAverage": -1, _id: 1 };
     case "PRICE_DESC":
-      return { hourlyRateCents: -1, "stats.ratingAverage": -1 };
+      return { hourlyRateCents: -1, "stats.ratingAverage": -1, _id: 1 };
     case "EXPERIENCE":
-      return { yearsExperience: -1, "stats.ratingAverage": -1 };
+      return { yearsExperience: -1, "stats.ratingAverage": -1, _id: 1 };
     case "AVAILABILITY":
-      return { nextAvailableAt: 1, "stats.ratingAverage": -1 };
+      return { nextAvailableAt: 1, "stats.ratingAverage": -1, _id: 1 };
     case "DISTANCE":
       // Distance ordering is applied after the geo query resolves; fall back
       // to quality so the result is still deterministic.
-      return { "stats.ratingAverage": -1 };
+      return { "stats.ratingAverage": -1, _id: 1 };
     case "RELEVANCE":
     default:
       // Verified, well-rated, active tutors first — the marketplace's default
@@ -120,6 +128,7 @@ export function buildTutorSort(sort) {
         "stats.ratingAverage": -1,
         "stats.ratingCount": -1,
         "stats.completedLessons": -1,
+        _id: 1,
       };
   }
 }

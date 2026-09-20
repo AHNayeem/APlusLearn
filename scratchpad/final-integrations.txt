@@ -1,0 +1,1262 @@
+$ node --env-file=.env.local --import ./scripts/lib/register-loader.mjs scripts/integration-tests.mjs
+
+APlus Learn — integration adapters
+────────────────────────────────────────────────────────
+
+▸ Configuration and provider selection
+  ✓ development falls back to the development payment provider
+  ✓ development auto-detects Stripe once a key is present
+  ✓ production REFUSES a development payment provider
+  ✓ production REFUSES a development email provider
+  ✓ production fails loudly when Stripe is named but unconfigured
+  ✓ production never guesses a provider
+  ✓ production requires an https app URL
+  ✓ a short AUTH_SECRET is a configuration error
+  ✓ the status report never contains a secret value
+
+▸ Payments — Stripe adapter
+<claude-code-hint v="1" type="plugin" value="stripe@claude-plugins-official" />
+  ✓ checkout charges the server-calculated amount, in cents
+  ✓ checkout currency is lower-cased for Stripe
+  ✓ checkout sends an idempotency key
+  ✓ checkout metadata carries our own payment id
+  ✓ checkout returns the hosted URL
+  ✓ checkout session expires, so a slot is not held forever
+  ✓ test-mode charges are recorded as such
+  ✓ Stripe declares itself a hosted checkout
+  ✓ a raw card is REFUSED by the Stripe adapter (PCI scope)
+  ✓ refund sends the policy-resolved amount unchanged
+  ✓ refund is idempotent
+  ✓ the real cancellation policy survives in refund metadata
+  ✓ refund result reports success
+  ✓ Connect onboarding returns a hosted link
+  ✓ a new connected account is not payable yet
+  ✓ outstanding requirements are surfaced to the tutor
+  ✓ payouts are set to manual so the platform controls the hold period
+  ✓ a verified account becomes payable
+  ✓ only masked bank details are returned
+  ✓ payout transfers the tutor's net earnings
+  ✓ payout transfer is idempotent
+  ✓ transfer is reported as paid
+  ✓ development provider is not a hosted checkout
+  ✓ development provider still models a declined card
+  ✓ development provider cannot verify a webhook, and says so
+
+▸ Webhooks — signature, idempotency, amount checks
+  ✓ a webhook signed with the wrong secret is REJECTED
+  ✓ a rejected webhook writes nothing
+  ✓ a signature replayed an hour later is REJECTED
+  ✓ a correctly signed payment event is processed
+  ✓ the payment is settled
+  ✓ the settled amount is the server-priced total
+  ✓ the SAME event delivered twice is recognised as a duplicate
+  ✓ a duplicate delivery creates no second event record
+  ✓ the retry is counted on the original record
+  ✓ the webhook record stores no card or customer data
+  ✓ an event whose amount disagrees with the booking is REFUSED
+  ✓ an event that names a payment it carries no identifier for is IGNORED
+  ✓ the misdirected event settled nothing
+  ✓ a refused amount leaves the payment unsettled
+  ✓ a webhook that could not be processed is recorded as FAILED, so it is retried
+  ✓ redelivering a FAILED event re-attempts it rather than dropping it as a duplicate
+  ✓ the retry is counted on the same record, not a second one
+  ✓ once the cause is gone, the redelivered event finally settles the payment
+  ✓ and the payment is PAID
+  ✓ the event record ends PROCESSED after the successful retry
+  ✓ a PROCESSED event redelivered again IS dropped as a duplicate
+  ✓ a delivery arriving while another is genuinely in flight is dropped
+  ✓ but a claim abandoned by a dead process IS reclaimed on redelivery
+  ✓ a late failure event cannot un-pay a settled payment
+  ✓ only the card brand and last four are stored
+  ✓ a refund issued in the Stripe dashboard is reconciled
+  ✓ the same refund arriving again does not double-count
+  ✓ an unexpanded charge.refunded is deferred to refund.* rather than silently ignored
+  ✓ a dashboard refund delivered as refund.created IS reconciled
+  ✓ and the operator's own reason is kept, not Stripe's coarse enum
+  ✓ the same refund seen again through refund.updated does not double-count
+  ✓ a refund that has not succeeded yet is NOT counted as money returned
+  ✓ an unrecognised event is acknowledged rather than retried
+
+▸ Email — Resend adapter and templates
+  ✓ the message is sent to Resend
+  ✓ the API key travels in the Authorization header, not the URL
+  ✓ delivery is idempotent
+  ✓ both an HTML and a plain-text part are sent
+  ✓ the provider message id is returned
+  ✓ a rejected message throws with the provider's reason
+[email] delivery failed (Booking confirmed): network down
+  ✓ a delivery outage does not throw into the calling service
+  ✓ template verifyEmail renders a complete, responsive message
+  ✓ template resetPassword renders a complete, responsive message
+  ✓ template passwordChanged renders a complete, responsive message
+  ✓ template bookingConfirmed renders a complete, responsive message
+  ✓ template bookingCancelled renders a complete, responsive message
+  ✓ template bookingRescheduled renders a complete, responsive message
+  ✓ template refundIssued renders a complete, responsive message
+  ✓ template applicationSubmitted renders a complete, responsive message
+  ✓ template applicationApproved renders a complete, responsive message
+  ✓ template applicationNeedsAttention renders a complete, responsive message
+  ✓ template payoutsEnabled renders a complete, responsive message
+  ✓ template payoutSent renders a complete, responsive message
+  ✓ template payoutOnboardingRequired renders a complete, responsive message
+  ✓ template input is HTML-escaped
+  ✓ a reset link expires and says so
+  ✓ a security notification carries no token
+
+──────────────── ✉️  outgoing email ────────────────
+To:      a@b.c
+Subject: s
+
+t
+────────────────────────────────────────────────────
+
+  ✓ the development transport still works
+
+▸ OAuth — ID token verification
+  ✓ a valid Google ID token yields a verified identity
+  ✓ the provider's verified-email flag is carried through
+  ✓ a token minted for another application is REJECTED
+  ✓ a token from the wrong issuer is REJECTED
+  ✓ a tampered signature is REJECTED
+  ✓ a token carrying somebody else's nonce is REJECTED (replay / CSRF)
+  ✓ an identity with no email address is refused with a usable message
+  ✓ Apple's string booleans are understood
+  ✓ an Apple private relay address is flagged
+  ✓ Apple's one-time name is picked up from outside the token
+  ✓ an unconfigured provider says so instead of trusting the token
+
+▸ Geocoding — production lookups, fallback and privacy
+  ✓ a Canadian postal code resolves
+  ✓ the lookup is component-filtered to Canada
+  ✓ the postal code prefix is kept for display
+  ✓ a ROOFTOP coordinate is coarsened before it leaves the geocoder
+  ✓ coarsening keeps the point inside about a kilometre
+  ✓ an unknown location resolves to null rather than throwing
+[geocode] Google returned REQUEST_DENIED: key invalid
+  ✓ a rejected API key degrades to null, not an exception
+[geocode] lookup failed: ECONNREFUSED
+  ✓ a network failure degrades to null
+[geocode] lookup failed: network down
+  ✓ a geocoder outage falls back to the bundled table rather than breaking search
+  ✓ the development table still resolves a known FSA
+  ✓ an unknown FSA degrades to the province rather than nothing
+  ✓ distance between Toronto and Mississauga is about 22 km
+  ✓ distance is symmetric
+
+▸ Meeting links — Zoom adapter
+  ✓ Zoom is authenticated with Server-to-Server credentials
+  ✓ a scheduled meeting is created at the lesson's start time
+  ✓ the waiting room is on and join-before-host is off
+  ✓ recording is off by default
+  ✓ the join URL is returned
+  ✓ the host start URL is NEVER returned or stored
+  ✓ only the meeting id, join URL and passcode are kept
+  ✓ a reschedule PATCHes the existing meeting, keeping the join link
+  ✓ the access token is cached between calls
+  ✓ a cancellation tears the room down
+  ✓ bad Zoom credentials fail with a clear error
+
+▸ Meeting links — Google Meet adapter
+  ✓ Google Meet authenticates with a signed service-account assertion
+  ✓ the assertion asks only for calendar.events scope
+  ✓ domain-wide delegation impersonates the platform's own calendar owner
+  ✓ a conference is explicitly requested with conferenceDataVersion=1
+  ✓ the event is created at the lesson's start time for its duration
+  ✓ NO participant is named to Google — no attendees on the event
+  ✓ the event is private and guests cannot invite or see each other
+  ✓ the Meet join URL is returned
+  ✓ the calendar event id is the handle kept for updates
+  ✓ the provider is recorded as GOOGLE_MEET
+  ✓ no organiser identity is returned or stored
+  ✓ only join information is kept
+  ✓ a reschedule PATCHes the same event, so the Meet link survives
+  ✓ the Google access token is cached between calls
+  ✓ a cancellation deletes the event
+  ✓ an invalid service-account key fails without echoing key material
+  ✓ rejected Google credentials fail with a clear error
+  ✓ an event created without a Meet link is an error, not a silent empty link
+
+▸ Meeting links — Microsoft Teams adapter
+  ✓ Teams authenticates with client credentials against the tenant
+  ✓ the client secret is sent in the body, never in a URL
+  ✓ the meeting is created under the platform's own organiser account
+  ✓ the meeting spans the lesson
+  ✓ NO participant is named to Microsoft
+  ✓ the lobby lets the two participants in without an organiser present
+  ✓ recording is off by default
+  ✓ the Teams join URL is returned
+  ✓ the provider is recorded as MICROSOFT_TEAMS
+  ✓ the dial-in conference id is NEVER returned or stored
+  ✓ the organiser identity is NEVER returned or stored
+  ✓ only join information is kept
+  ✓ a reschedule PATCHes the same meeting, keeping the join link
+  ✓ the Graph access token is cached between calls
+  ✓ a cancellation deletes the meeting
+  ✓ bad Teams credentials fail with a clear error
+  ✓ a meeting created without a join link is an error, not a silent empty link
+
+▸ Meeting links — provider selection
+  ✓ with no credentials every platform falls back to the development provider
+  ✓ no platform is reported as live
+  ✓ development auto-detects Google Meet from its credentials alone
+  ✓ a platform without credentials still degrades to the development provider
+  ✓ all three adapters can be live at once
+  ✓ all three are reported as live
+  ✓ production honours an explicit list of platforms
+  ✓ a platform left out of the list is NOT used even with credentials present
+  ✓ naming a platform without its secrets is a hard failure, not a quiet downgrade
+  ✓ an unknown platform name resolves to the development provider, not an adapter
+
+▸ File storage — MinIO, selection and privacy
+  ✓ SigV4 reproduces AWS's published signature exactly
+  ✓ the payload hash is sent as a header and binds the body to the signature
+  ✓ an upload round-trips through MinIO
+  ✓ the same bytes always produce the same checksum
+  ✓ the recorded size is the real byte length
+  ✓ the uploader's filename is NOT trusted — the key is generated
+  ✓ no part of the uploaded filename survives into the key
+  ✓ requests are addressed path-style, the way MinIO serves them
+  ✓ documents land under a scoped, prefixed path
+  ✓ nothing is written into public/ — the object store has no web root
+  ✓ no ACL is set, so the object inherits the bucket's private default
+  ✓ no per-object SSE header is sent by default — MinIO refuses it without a KMS
+  ✓ the request is signed and carries no credentials in the URL
+  ✓ the provider returns NO url — there is no object link to leak
+  ✓ at-rest encryption is requested when STORAGE_SSE names an algorithm
+  ✓ metadata comes back from a HEAD, without the bytes
+  ✓ HEAD on a missing object answers null rather than throwing
+  ✓ a bucket probe proves reachability without reading an object
+  ✓ a storage key that tries to escape its scope is flattened, not followed
+  ✓ and it resolves to nothing rather than another scope's object
+  ✓ branding uses the same provider, in its own scope
+  ✓ a documents key cannot be read through the branding scope
+  ✓ a replacement gets its own key rather than overwriting the old one
+  ✓ branding removal works through the same interface
+  ✓ the replaced object is gone and the replacement is still readable
+  ✓ removing something already gone is not an error
+  ✓ a provider failure throws a tagged storage error
+  ✓ the error message names no bucket internals to the caller
+  ✓ and the credential is redacted out of the detail kept for the log
+  ✓ bad credentials are reported as bad credentials, not as a missing file
+  ✓ a store that cannot encrypt per object says so, and names the setting
+  ✓ a network failure is tagged as a storage error rather than escaping raw
+  ✓ a store that stops answering times out instead of holding the request open
+  ✓ a provider built without credentials refuses to exist
+  ✓ development still works with no credentials at all
+  ✓ development auto-detects MinIO once an endpoint and bucket are configured
+  ✓ production selects MinIO and reports itself as such
+  ✓ the configured endpoint is the one requests go to
+  ✓ path-style addressing is the default
+  ✓ production REFUSES the local filesystem — the R33 deployment break cannot recur
+  ✓ production never silently guesses a storage provider
+  ✓ naming MinIO without its bucket and endpoint is a hard failure
+  ✓ the retired `s3` selector is rejected by name rather than silently ignored
+
+▸ File storage — live MinIO round trip
+  ✗ the bucket is reachable with the configured credentials — Object storage refused the request: the credentials are wrong or lack permission on this bucket.
+
+▸ Booking holds — abandoned checkout releases the slot (R41)
+  ✓ EXPIRED is NOT a status that blocks a slot
+  ✓ PENDING_PAYMENT still blocks a slot while the hold is live
+  ✓ a PENDING_PAYMENT booking blocks its slot
+  ✓ a FRESH hold is not expired by the sweep
+  ✓ and its slot is still blocked
+  ✓ the policy explains why it was kept
+  ✓ a stale hold still blocks its slot before the sweep
+  ✓ a STALE hold is expired by the sweep
+  ✓ the sweep reports what it released
+  ✓ the EXPIRED booking NO LONGER blocks the slot
+  ✓ a new learner's lesson in that window would now pass the overlap rule
+  ✓ the release is recorded in the audit log
+  ✓ the purchaser is told their held time was released
+  ✓ the abandoned payment stops being payable
+  ✓ the fresh hold was untouched by the same sweep
+  ✓ a booking whose payment is PAID is NEVER expired, however old the hold
+  ✓ the policy refuses it by name
+  ✓ three overlapping sweeps release the booking exactly once
+  ✓ and it is EXPIRED
+  ✓ only one audit entry was written for it
+  ✓ a re-run after the fact changes nothing
+  ✓ a booking orphaned by a crash before its payment existed is released too
+  ✓ a hold is NOT released while the provider's own session is still live
+  ✓ the hold deadline is the later of ours and the provider's
+  ✓ the provider's stated expiry carries the anti-race grace
+  ✓ our own window carries none — it is measured from our own timestamp
+  ✓ the lost-webhook booking looks exactly like an abandoned one
+
+──────────────── ✉️  outgoing email ────────────────
+To:      priya.sharma@example.com
+Subject: Lesson confirmed — Advanced Functions on Monday, Mar 3, 2031
+
+Your lesson is confirmed
+
+Hi Priya,
+Everything is booked. Here are the details.
+
+Course: Advanced Functions
+With: your student
+When: Monday, Mar 3, 2031 at 8:00 p.m.
+Length: 1 hour
+Type: Online
+Total: $60.00
+Reference: APL-T3B28D292
+
+View the lesson: https://test.apluslearn.ca/bookings/6aaf73b8318dcf7d73220bf9
+
+You'll find the joining details on the lesson page.
+
+— The APlus Learn team
+────────────────────────────────────────────────────
+
+
+──────────────── ✉️  outgoing email ────────────────
+To:      priya.sharma@example.com
+Subject: Lesson confirmed — Advanced Functions on Monday, Mar 3, 2031
+
+Your lesson is confirmed
+
+Hi Priya,
+Everything is booked. Here are the details.
+
+Course: Advanced Functions
+With: your student
+When: Monday, Mar 3, 2031 at 10:00 p.m.
+Length: 1 hour
+Type: Online
+Total: $60.00
+Reference: APL-T4FFB6854
+
+View the lesson: https://test.apluslearn.ca/bookings/6aaf73b9318dcf7d73220bfe
+
+You'll find the joining details on the lesson page.
+
+— The APlus Learn team
+────────────────────────────────────────────────────
+
+  ✓ a payment that is PAID at the provider is settled by the sweep, not released
+  ✓ its lesson is CONFIRMED rather than EXPIRED
+  ✓ and the slot stays blocked, because the lesson is real
+  ✓ the catch-up is audited as a reconciliation, distinguishable from a webhook
+  ✓ running the sweep again confirms nothing twice
+[booking-expiry] could not reconcile payment 6aaf73b9318dcf7d73220c0a with the provider: Stripe is unreachable
+  ✓ a booking is NOT released while the provider cannot be asked
+  ✓ the sweep reports it as held rather than expired
+  ✓ once the provider confirms it was never paid, the slot IS released
+[booking-expiry] payment 6aaf73b9318dcf7d73220c11 is paid at the provider but could not be settled: Paid amount 1 does not match the 6000 owed on this payment.
+  ✓ a provider amount that disagrees with the priced total settles NOTHING
+  ✓ and the hold is kept for a human rather than released on a discrepancy
+  ✓ checkout.session.expired releases the slot IMMEDIATELY, without waiting for the sweep
+  ✓ and the slot is free again
+  ✓ a duplicate checkout.session.expired delivery is recognised and dropped
+  ✓ the duplicate released nothing further
+  ✓ an OLD session expiring does not release a booking the purchaser is still paying for
+  ✓ a decline inside a LIVE checkout session keeps the slot, so a second card still works
+  ✓ but the payment is marked failed
+  ✓ a decline with NO checkout session left releases the slot immediately
+  ✓ a late failure event cannot release a PAID booking
+  ✓ an event naming another user's payment CANNOT release their booking
+  ✓ the crafted event is refused as a mismatch, not silently applied
+  ✓ the victim's slot is still theirs
+  ✓ releaseBookingsForFailedPayment refuses a settled payment outright
+
+▸ Matching — scoring, weights and eligibility
+  ✓ shipped weights normalise to 100
+  ✓ weights are relative — scaling them all changes nothing
+  ✓ a partial weight map keeps the shipped value for every other factor
+  ✓ all-zero weights fall back to the shipped set rather than zeroing every score
+  ✓ an unknown factor in stored settings is ignored
+  ✓ teaching the exact course outscores teaching only the subject
+  ✓ a score is bounded to 0–100
+  ✓ scoring is deterministic
+  ✓ a tutor far over budget scores below one inside it
+  ✓ the language the family asked for counts
+  ✓ verification badges a moderator granted count toward the score
+  ✓ a tutor with no published availability loses the schedule factor
+  ✓ raising a weight changes points, not the underlying fit
+  ✓ ranking puts the highest score first
+  ✓ a tie is broken by rating, then lessons, then id — deterministically
+  ✓ the same candidates always come back in the same order
+  ✓ an eligible tutor passes
+  ✓ an unapproved profile is never recommended
+  ✓ a profile that is not searchable is never recommended
+  ✓ a tutor not taking new students is never recommended
+  ✓ a suspended account is never recommended
+  ✓ a deleted account is never recommended
+  ✓ a tutor who does not teach the subject is never recommended
+  ✓ a tutor who does not offer the lesson type is never recommended
+  ✓ an in-person-only request never reaches a tutor outside the travel radius
+  ✓ a tutor cannot be matched to their own request
+  ✓ a high score does not make an ineligible tutor eligible
+  ✓ the candidate query filters on the searchable gate and approved status
+  ✓ an in-person-only request bounds the query geographically
+  ✓ a request that also accepts online is not geo-bounded
+  ✓ a strong match explains itself in plain language
+  ✓ an exact course match says so
+  ✓ an old match explains itself against the weights it was scored with
+
+▸ Tutor requests — lifecycle, visibility and expiry
+  ✓ posting a request stores it OPEN
+  ✓ a request gets a public reference
+  ✓ the matcher suggested at least the tutor who teaches this course
+  ✓ a stored match keeps the weights it was scored with
+  ✓ a stored match keeps a per-factor breakdown
+  ✓ a stranger cannot edit someone else's request
+  ✓ a stranger cannot cancel someone else's request
+  ✓ a learner who does not own a request cannot read it
+  ✓ editing records what changed
+  ✓ editing bumps the edit counter
+  ✓ an edit that changes nothing is a no-op
+  ✓ course and learner cannot be changed by an edit
+  ✓ a tutor declining is recorded, not deleted
+  ✓ a tutor cannot decline the same request twice
+  ✓ a tutor who declined cannot then pitch
+  ✓ re-running the matcher never revives a match a tutor closed
+  ✓ an uninvited tutor cannot even see an invite-only request exists
+  ✓ an uninvited tutor cannot respond to an invite-only request
+  ✓ inviting a tutor opens the request to them
+  ✓ an invited tutor sees the request and may respond
+  ✓ only the owner may invite tutors
+  ✓ a tutor already invited is not invited again
+  ✓ a tutor's pitch is stored against the match
+  ✓ the interested count reflects the pitch
+  ✓ a tutor cannot pitch twice
+  ✓ withdrawing a pitch decrements the interested count
+  ✓ cancelling moves the request to CANCELLED
+  ✓ a closed request cannot be edited
+  ✓ a closed request accepts no new responses
+  ✓ the matcher does nothing for a closed request
+  ✓ the expiry sweep closes an aged-out request
+  ✓ the expired request is EXPIRED
+  ✓ running the expiry sweep again finds nothing left to do
+  ✓ a request about to expire warns the family once
+  ✓ the warning is stamped so it cannot be sent twice
+  ✓ a second sweep does not warn the same family again
+  ✓ a moderator can remove a request
+  ✓ removal is recorded in the moderation history
+  ✓ a removed request is invisible to tutors
+  ✓ a removed request can be restored
+  ✓ the restore is recorded too
+  ✓ a request cannot be removed twice
+  ✓ a request that was never removed cannot be restored
+  ✓ creating a request is audited
+  ✓ editing a request is audited
+  ✓ cancelling a request is audited
+  ✓ inviting a tutor is audited
+  ✓ moderating a request is audited
+  ✓ every audit row names a valid action
+  ✓ tutors are notified about a public request
+  ✓ an invited tutor is notified by name
+  ✓ the family is warned before their request expires
+  ✓ no notification about an invite-only request was broadcast to the board
+
+▸ SMS — Twilio adapter, development provider and callback signatures
+
+──────────────── 📱 simulated SMS (no provider configured) ────────────────
+To:   +14165550142
+Body: hello
+This message was NOT sent to a carrier.
+───────────────────────────────────────────────────────────────────────────
+
+  ✓ the development provider never reports delivery
+  ✓ it says plainly that the message was simulated
+  ✓ the development provider reports itself as unconfigured
+  ✓ the send goes to Twilio's Messages endpoint for the account
+  ✓ credentials travel as HTTP basic auth, never in the body
+  ✓ the destination and body are form-encoded
+  ✓ a from-number is sent when no messaging service is configured
+  ✓ the idempotency key reaches Twilio
+  ✓ a successful send returns the provider's message id
+  ✓ a messaging service is used in place of a from-number
+  ✓ a provider rejection surfaces its code
+  ✓ a permanent rejection is not marked retryable
+  ✓ the failure message never contains the text that was sent
+  ✓ a throttled send is marked retryable
+  ✓ with no credentials, SMS falls back to the development provider
+  ✓ and reports itself as not configured
+  ✓ a fully configured Twilio selection produces the real adapter
+  ✓ and reports itself as configured
+  ✓ Twilio without a sender is refused at startup, not per message
+  ✓ the refusal names the missing variables, never a value
+  ✓ an unknown SMS provider is refused
+  ✓ a correctly signed callback verifies
+  ✓ an unsigned callback is refused
+  ✓ a callback whose body was tampered with is refused
+  ✓ a callback replayed against a different URL is refused
+  ✓ a signature made with the wrong token is refused
+  ✓ verification needs a token to check against
+  ✓ only whitelisted notification types have a text version
+  ✓ a text carries the platform name
+  ✓ every text carries an opt-out path
+  ✓ a reminder fits one message segment
+  ✓ a notification with no template renders nothing
+  ✓ a long notification is clipped rather than sent as three segments
+  ✓ clipping stays inside the GSM-7 alphabet, so one segment stays one segment
+  ✓ clipping cuts on a word boundary
+  ✓ a confirmation code text says it expires
+  ✓ a confirmation code text warns it will never be asked for
+  ✓ a unicode body is costed against the smaller segment size
+
+▸ SMS — consent, idempotency, verification and opt-out
+  ✓ no number on the account means no text
+  ✓ an unconfirmed number is never texted
+  ✓ a recipient who has texts switched off is not texted
+  ✓ a STOP on record outranks the account's own preference
+  ✓ a notification with no text version is not texted
+  ✓ a message that was deliberately not sent is still recorded
+  ✓ and the record says which gate stopped it
+  ✓ an operator switching texts off stops every one of them
+
+──────────────── 📱 simulated SMS (no provider configured) ────────────────
+To:   +14165550114
+Body: APlus Learn: Lesson tomorrow. MHF4U at 5:00 PM. Reply STOP to opt out.
+This message was NOT sent to a carrier.
+───────────────────────────────────────────────────────────────────────────
+
+  ✓ with no carrier configured, a text is recorded as simulated
+  ✓ a simulated text is never reported as sent
+  ✓ the simulated message is in the delivery log
+  ✓ the log keeps a preview of what would have been sent
+  ✓ the same notification is never texted twice
+  ✓ a retry is refused as a duplicate, not silently re-sent
+
+──────────────── 📱 simulated SMS (no provider configured) ────────────────
+To:   +14165550199
+Body: APlus Learn: 618721 is your confirmation code. It expires in 10 minutes. We will never ask you for it.
+This message was NOT sent to a carrier.
+───────────────────────────────────────────────────────────────────────────
+
+  ✓ asking for a code reports whether a carrier is actually behind it
+  ✓ the code is stored only as a hash
+  ✓ the number is bound to the token, not read back from the request
+  ✓ a confirmation code is never previewed in the delivery log
+  ✓ a wrong code is refused
+  ✓ a wrong code leaves the number unconfirmed
+  ✓ a code is burned after repeated wrong guesses
+(node:73190) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓ the right code confirms the number
+  ✓ confirming turns the text channel on
+  ✓ a confirmed code cannot be used twice
+  ✓ a number confirmed on one account cannot be claimed by another
+  ✓ texts cannot be switched on without a confirmed number
+  ✓ a STOP cannot be undone from the settings screen
+  ✓ STOP applies to every account holding that handset
+  ✓ STOP also switches the channel off
+  ✓ START clears the block
+  ✓ but START does not switch the channel back on by itself
+  ✓ an unrelated reply is ignored
+
+──────────────── 📱 simulated SMS (no provider configured) ────────────────
+To:   +14165550166
+Body: APlus Learn: Lesson tomorrow. MHF4U at 5:00 PM. Reply STOP to opt out.
+This message was NOT sent to a carrier.
+───────────────────────────────────────────────────────────────────────────
+
+  ✓ notifying writes the in-app record as always
+  ✓ and the SMS path runs without the caller asking for it
+  ✓ a simulated text does not mark the notification as delivered by SMS
+  ✓ the delivery log masks phone numbers
+  ✓ the delivery log reports whether a carrier is configured
+
+▸ Secret storage — encryption at rest and signed OAuth state
+  ✓ a stored secret round-trips
+  ✓ the stored form does not contain the plaintext
+  ✓ the stored form is versioned
+  ✓ encrypting twice produces different ciphertext
+  ✓ a secret cannot be read with a different purpose label
+  ✓ a tampered ciphertext fails rather than decrypting to something else
+  ✓ garbage decrypts to null rather than throwing
+  ✓ an empty secret encrypts to nothing
+  ✓ a secret encrypted after rotation is unreadable with the pre-rotation key
+  ✓ and the two ciphertexts are not interchangeable
+  ✓ encryption refuses to run without a usable AUTH_SECRET
+  ✓ a signed state round-trips
+  ✓ state signed with one purpose is not accepted under another
+  ✓ a forged state signature is refused
+  ✓ a state body swapped under a valid signature is refused
+  ✓ an expired state is refused
+  ✓ a missing state is refused
+
+▸ Calendar — Google and Microsoft adapters
+  ✓ Google consent asks for offline access, or the connection dies in an hour
+  ✓ Google consent forces the prompt, so a reconnect still yields a refresh token
+  ✓ Google consent asks only for event write and read-only free/busy
+  ✓ the signed state is carried through
+  ✓ the client secret never appears in a URL the browser follows
+  ✓ a Google exchange yields both tokens
+  ✓ the connected account is identified from the id token
+  ✓ an exchange with no refresh token is refused rather than stored
+  ✓ a rejected refresh is distinguishable from a transient failure
+  ✓ Google not rotating the refresh token keeps the one we have
+  ✓ Google free/busy is read through the freeBusy endpoint
+  ✓ busy periods come back as real dates
+  ✓ the access token travels as a bearer header, never in the query string
+  ✓ a deleted calendar is reported as such, not as an empty week
+  ✓ creating a Google event returns its id
+  ✓ the event carries an IANA zone, so it survives a DST change
+  ✓ no attendees are added, so no learner lands in a tutor's address book
+  ✓ no client-chosen event id is sent, which Google would reject
+  ✓ deleting an event that is already gone is a success, not a failure
+  ✓ Microsoft consent asks for offline_access, or there is no refresh token
+  ✓ Microsoft consent asks for calendar read/write
+  ✓ the tenant defaults to common, so personal accounts can connect
+  ✓ the Microsoft client secret never appears in a browser URL
+  ✓ Graph busy time is read from the chosen calendar's view, not the mailbox
+  ✓ time the tutor marked free does not block their availability
+  ✓ a cancelled Outlook event does not block availability either
+  ✓ Graph's naive local strings are parsed as real instants
+  ✓ creating a Graph event returns its id
+  ✓ Graph gets a wall-clock time plus a named zone, not an offset
+  ✓ the lesson shows as busy on the tutor's calendar
+  ✓ no attendees are invited on Outlook either
+  ✓ the transaction id makes a repeated create idempotent at Graph
+  ✓ the development provider redirects straight back with a code
+  ✓ the development exchange says plainly that it is simulated
+  ✓ the development provider creates a real, identified event
+  ✓ a development event really does come back as busy time
+  ✓ a cancelled development event does not
+  ✓ an event outside the window is not returned
+  ✓ with no credentials, calendar sync uses the development implementation
+  ✓ both providers are still offered, because the fake is a working one
+  ✓ and each says honestly that it is not the real service
+  ✓ both real adapters light up when both are configured
+  ✓ and both report as live
+  ✓ naming only Google leaves Outlook on the development implementation
+  ✓ naming Google without its secret is a configuration error
+
+▸ Calendar — connection lifecycle, sync and booking integration
+  ✓ starting a connection returns a consent URL
+  ✓ the consent URL carries a signed state
+  ✓ a callback with an unverifiable state is refused before any exchange
+  ✓ a state naming an account that does not exist is refused
+  ✓ consent produces a connected calendar
+  ✓ the connection is labelled as the development implementation
+  ✓ a calendar is chosen automatically so the connection is usable
+  ✓ the connection is linked to the tutor profile, not just the account
+  ✓ the refresh token is encrypted at rest
+  ✓ the access token is encrypted at rest
+  ✓ and it decrypts back to something usable
+  ✓ no token ever reaches the shape a browser is given
+  ✓ the tutor sees their connection
+  ✓ no token appears in the list either
+  ✓ reconnecting the same account updates the connection rather than duplicating it
+  ✓ a tutor cannot touch someone else's calendar connection
+  ✓ nor disconnect it
+  ✓ a confirmed lesson is pushed to the connected calendar
+  ✓ the event is linked to the booking
+  ✓ pushing the same lesson twice updates rather than duplicating
+  ✓ syncing finds the lesson we just put on the calendar
+  ✓ the lesson comes back as busy time for availability
+  ✓ busy periods outside the window asked for are not returned
+  ✓ a tutor who turns off availability sync stops contributing busy time
+  ✓ a rescheduled lesson moves on the calendar rather than appearing twice
+  ✓ a cancelled lesson is taken off the calendar
+  ✓ and stops blocking the tutor's availability
+  ✓ removing an already-removed event is a no-op, not an error
+  ✓ a tutor who turns off event push gets no lessons written to their calendar
+  ✓ an unpaid lesson never reaches anybody's calendar
+  ✓ the sweep refreshes a connection whose cache has aged out
+  ✓ and finds nothing to do on the next run
+  ✓ disconnecting succeeds
+  ✓ and the connection is gone
+  ✓ the lessons we added were taken off the calendar first
+  ✓ a disconnected calendar contributes no busy time
+  ✓ connecting a calendar is audited
+  ✓ disconnecting one is audited
+  ✓ no audit row carries a token
+
+▸ Progress reports — authorship, privacy and revision history
+(node:73190) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+  ✓ a tutor cannot report on a student they have never taught
+  ✓ a report starts as a draft
+  ✓ the lessons it covers are resolved from completed bookings
+  ✓ the learner's own goals are carried into the report
+  ✓ the paying account is recorded so reads are a single lookup
+  ✓ a second draft for the same student is refused
+  ✓ a family cannot see an unfinished draft
+  ✓ nor can an administrator
+  ✓ a draft never appears in the family's history
+  ✓ a family cannot edit a tutor's report
+  ✓ another tutor cannot edit it either
+  ✓ a family cannot share a report on the tutor's behalf
+  ✓ a report with no summary cannot be shared
+  ✓ sharing moves the report out of draft
+  ✓ a goal marked achieved reaches the learner's own record
+  ✓ a report cannot be shared twice
+  ✓ the family can now read it
+  ✓ the family may acknowledge but not edit
+  ✓ the tutor's private note is never loaded for the family
+  ✓ the family sees who wrote it
+  ✓ an unrelated account cannot read it
+  ✓ the author still sees their own private note
+  ✓ the learner's name is masked for the tutor unless the family opted in
+  ✓ an administrator can read a shared report for support
+  ✓ but not the tutor's private note
+  ✓ only the family may acknowledge
+  ✓ acknowledging records who read it and when
+  ✓ acknowledging changes nothing the tutor wrote
+  ✓ acknowledging twice does not move the timestamp
+  ✓ editing a shared report keeps the previous version
+  ✓ the kept version is what the family actually read
+  ✓ the revision records why
+  ✓ and the report now shows the new text
+  ✓ every revision is kept, not just the last one
+  ✓ the family can see the history too
+  ✓ a tutor can archive a report
+  ✓ an archived report cannot be edited
+  ✓ but the family keeps their copy
+  ✓ the family is told when a report is shared
+  ✓ and when it is revised
+  ✓ sharing a report is audited
+  ✓ revising one is audited
+  ✓ archiving one is audited
+  ✓ the picker offers a learner this tutor has actually taught
+  ✓ the picker offers nobody to a tutor with no profile
+
+▸ Referrals — attribution, qualifying, credit and abuse
+(node:73190) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+  ✓ an account gets a referral code on first use
+  ✓ asking again returns the same code
+  ✓ the code avoids characters that are misread aloud
+  ✓ a valid code resolves to a name
+  ✓ the lookup never exposes a surname
+  ✓ an unknown code simply does not resolve
+  ✓ a sign-up with a code is attributed
+  ✓ the referral starts pending
+  ✓ the sign-up address is hashed, never stored
+  ✓ an account can only ever be introduced once
+(node:73190) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+  ✓ nobody can refer themselves
+  ✓ an unknown code is a quiet no-op, not a failed registration
+  ✓ a referral does not qualify on sign-up alone
+  ✓ and no credit was granted
+(node:73190) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+(node:73190) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+  ✓ a completed, paid lesson qualifies the referral
+  ✓ the referrer is credited
+  ✓ the new account gets its welcome credit
+  ✓ qualifying twice grants nothing more
+  ✓ the referral records what was actually granted
+  ✓ and which lesson earned it
+(node:73190) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+(node:73190) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+(node:73190) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+  ✓ two concurrent checkouts cannot spend the same credit twice
+  ✓ and the balance lands at zero, never below
+  ✓ retrying the same payment reports what was already applied, not more
+(node:73190) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+  ✓ credit returned from an abandoned checkout comes back
+  ✓ releasing the same payment twice returns it once
+(node:73190) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+  ✓ a bill larger than the balance spends only what is there
+  ✓ every movement is on the statement
+  ✓ the statement's balance matches the account's
+  ✓ each entry records the balance it produced
+(node:73190) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+(node:73190) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+  ✓ a referral can be reversed
+  ✓ and the credit is taken back
+  ✓ a referral cannot be reversed twice
+(node:73190) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+(node:73190) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+  ✓ a claw-back recovers only what is left
+  ✓ and never leaves a negative balance
+(node:73190) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+  ✓ two accounts sharing a confirmed mobile number are flagged
+  ✓ but the referral is still recorded rather than silently refused
+  ✓ flagged referrals reach the admin queue
+(node:73190) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+  ✓ a suspended referrer is not credited
+  ✓ but the new account still gets its welcome credit
+  ✓ no referral is attributed while the scheme is off
+  ✓ and a code stops resolving
+(node:73190) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+  ✓ with no reward configured a referral still qualifies
+  ✓ and grants nothing, which is the operator's decision rather than a failure
+  ✓ a person sees their own code and stats
+  ✓ names on the referral page are first name plus initial
+  ✓ a referrer is told when somebody joins with their code
+  ✓ and when the reward lands
+  ✓ attribution is audited
+  ✓ qualifying is audited
+  ✓ reversal is audited
+
+▸ Packages — pricing, consumption, cancellation and expiry
+  ✓ a package divides into per-session figures
+  ✓ commission is taken per session, the same way a lesson is
+  ✓ an awkward price keeps its remainder rather than losing cents
+  ✓ the rounding remainder rides on the first lesson
+  ✓ every session's commission and earnings still add up exactly
+  ✓ a package that costs more per hour than booking singly is refused
+  ✓ a package below the platform minimum rate is refused
+  ✓ a genuine discount is accepted and its saving computed
+  ✓ a tutor cannot sell a package dearer than their own rate
+  ✓ a package starts as a draft
+  ✓ its per-session and hourly figures are derived, not supplied
+  ✓ the saving against the tutor's own rate is computed
+  ✓ only the tutor who made a package can edit it
+  ✓ a draft package cannot be bought
+  ✓ nobody can buy a package for somebody else's child
+  ✓ buying creates a purchase awaiting payment
+  ✓ and an ordinary payment beside it
+  ✓ the payment is for the package, not a booking
+  ✓ the payment total matches the package price
+  ✓ the tutor's share is the sum of the sessions
+  ✓ an unpaid package has no lessons to draw
+  ✓ a settled payment activates the package
+  ✓ activating twice does nothing
+  ✓ the purchase is active with its lessons intact
+  ✓ its validity is counted from activation, not from the click
+  ✓ repricing an offer does not change what somebody already bought
+(node:73190) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+  ✓ a lesson can be drawn
+  ✓ a package cannot pay for a different tutor's lesson
+  ✓ nor a different course
+  ✓ nor a longer lesson than was bought
+  ✓ somebody else cannot spend your package
+(node:73190) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+(node:73190) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+(node:73190) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+(node:73190) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+(node:73190) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+  ✓ concurrent draws never take more than the balance holds
+  ✓ and the counter lands exactly on the total, never past it
+(node:73190) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+  ✓ an empty package refuses a further draw
+(node:73190) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+  ✓ a cancelled lesson goes back into the package
+  ✓ and the balance reflects it
+(node:73190) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+  ✓ returning the same lesson twice cannot mint a session
+  ✓ only the unused lessons are worth refunding
+  ✓ somebody else cannot cancel your package
+
+──────────────── ✉️  outgoing email ────────────────
+To:      jennifer.chen@example.com
+Subject: $60.00 refunded
+
+A refund has been issued
+
+Hi Jennifer,
+We've refunded $60.00 to your original payment method.
+
+Amount: $60.00
+Reason: Package cancelled — 1 unused lessons
+Reference: 73220D0A
+
+View your payments: https://test.apluslearn.ca/payments
+
+Refunds usually arrive within 5–10 business days, depending on your bank.
+
+— The APlus Learn team
+────────────────────────────────────────────────────
+
+  ✓ cancelling refunds the unused lessons
+  ✓ and marks the purchase refunded
+  ✓ a package cannot be cancelled twice
+  ✓ the refund went through the ordinary payment record
+  ✓ and never more than was charged
+
+──────────────── ✉️  outgoing email ────────────────
+To:      jennifer.chen@example.com
+Subject: $270.00 refunded
+
+A refund has been issued
+
+Hi Jennifer,
+We've refunded $270.00 to your original payment method.
+
+Amount: $270.00
+Reason: Package expired with unused lessons
+Reference: 73220D18
+
+View your payments: https://test.apluslearn.ca/payments
+
+Refunds usually arrive within 5–10 business days, depending on your bank.
+
+— The APlus Learn team
+────────────────────────────────────────────────────
+
+  ✓ the expiry sweep closes an out-of-date package
+  ✓ and refunds the lessons that were never delivered
+  ✓ the expired package is marked as such
+  ✓ running the sweep again refunds nothing twice
+  ✓ a package about to expire warns the family
+  ✓ and never warns them twice
+  ✓ archiving an offer leaves existing balances alone
+  ✓ and the archived offer is off sale
+  ✓ publishing a package is audited
+  ✓ buying one is audited
+  ✓ cancelling one is audited
+
+▸ Group tutoring — capacity, enrolment and settlement
+  ✓ a minimum larger than the maximum is refused
+  ✓ a session starts as a draft
+  ✓ its seats start empty
+  ✓ a draft session cannot be joined
+  ✓ only the tutor can publish their own session
+  ✓ publishing opens it for sign-ups
+  ✓ and sets the deadline by which it has to fill
+  ✓ a session cannot be published twice
+  ✓ a tutor cannot join their own session
+  ✓ nobody can enrol somebody else's child
+(node:73190) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+  ✓ joining creates an enrolment awaiting payment
+  ✓ and an ordinary booking for that learner
+  ✓ the booking is linked to the session
+  ✓ the seat is taken immediately, before payment
+  ✓ the booking is priced from the seat price
+  ✓ and commission is taken the ordinary way
+  ✓ the same learner cannot join twice
+(node:73190) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+(node:73190) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+(node:73190) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+(node:73190) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+(node:73190) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+(node:73190) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+(node:73190) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+(node:73190) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+  ✓ concurrent joins never oversell the seats
+  ✓ everybody else goes on the waiting list rather than being refused
+  ✓ the seat counter lands exactly on the maximum
+  ✓ and the waiting list is counted
+  ✓ only seated learners got a booking
+  ✓ nobody on the waiting list was charged
+  ✓ reaching the minimum confirms the session
+  ✓ and stamps when that happened
+(node:73190) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+
+──────────────── ✉️  outgoing email ────────────────
+To:      jennifer.chen@example.com
+Subject: $12.50 refunded
+
+A refund has been issued
+
+Hi Jennifer,
+We've refunded $12.50 to your original payment method.
+
+Amount: $12.50
+Reason: Cancellation — LATE_CANCELLATION
+Reference: 73220D2F
+
+View your payments: https://test.apluslearn.ca/payments
+
+Refunds usually arrive within 5–10 business days, depending on your bank.
+
+— The APlus Learn team
+────────────────────────────────────────────────────
+
+
+──────────────── ✉️  outgoing email ────────────────
+To:      jennifer.chen@example.com
+Subject: Lesson cancelled — Advanced Functions on Sunday, Sep 20, 2026
+
+Your lesson was cancelled
+
+Hi Jennifer,
+The lesson below has been cancelled.
+
+Course: Advanced Functions
+When: Sunday, Sep 20, 2026 at 10:00 a.m.
+Refund: $12.50
+Reference: APL-63ZCRQ
+
+Find another time: https://test.apluslearn.ca/bookings
+
+Refunds are returned to the original payment method and usually arrive within 5–10 business days.
+
+— The APlus Learn team
+────────────────────────────────────────────────────
+
+
+──────────────── ✉️  outgoing email ────────────────
+To:      priya.sharma@example.com
+Subject: Lesson cancelled — Advanced Functions on Sunday, Sep 20, 2026
+
+Your lesson was cancelled
+
+Hi Priya,
+The lesson below has been cancelled.
+
+Course: Advanced Functions
+When: Sunday, Sep 20, 2026 at 10:00 a.m.
+Refund: —
+Reference: APL-63ZCRQ
+
+Find another time: https://test.apluslearn.ca/bookings
+
+Refunds are returned to the original payment method and usually arrive within 5–10 business days.
+
+— The APlus Learn team
+────────────────────────────────────────────────────
+
+  ✓ cancelling a place cancels the learner's booking
+  ✓ and the seat goes back into the session
+  ✓ the enrolment records that the place was given up
+  ✓ the first person waiting is told a seat opened up
+  ✓ releasing the same seat twice cannot invent capacity
+  ✓ and the seat count is unchanged by the second attempt
+  ✓ a family cannot see who else is in the class
+  ✓ but does see their own places
+  ✓ the tutor sees the roster
+  ✓ and it is names only, masked for minors
+  ✓ the tutor can manage the session
+  ✓ an anonymous visitor sees neither roster nor meeting link
+  ✓ and never a private address
+  ✓ only the tutor or an administrator can cancel a session
+
+──────────────── ✉️  outgoing email ────────────────
+To:      jennifer.chen@example.com
+Subject: $25.00 refunded
+
+A refund has been issued
+
+Hi Jennifer,
+We've refunded $25.00 to your original payment method.
+
+Amount: $25.00
+Reason: Group session cancelled
+Reference: 73220D3A
+
+View your payments: https://test.apluslearn.ca/payments
+
+Refunds usually arrive within 5–10 business days, depending on your bank.
+
+— The APlus Learn team
+────────────────────────────────────────────────────
+
+  ✓ cancelling refunds everybody who paid
+  ✓ the session is marked cancelled
+  ✓ and every seat is given back
+  ✓ every booking still in the session was cancelled by the tutor
+  ✓ no booking survived the cancellation as confirmed
+  ✗ and each records a full refund
+  ✓ a session cannot be cancelled twice
+  ✓ a cancelled session cannot be joined
+(node:73190) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+  ✓ one person does not confirm a session that needs three
+
+──────────────── ✉️  outgoing email ────────────────
+To:      jennifer.chen@example.com
+Subject: $25.00 refunded
+
+A refund has been issued
+
+Hi Jennifer,
+We've refunded $25.00 to your original payment method.
+
+Amount: $25.00
+Reason: Group session cancelled
+Reference: 73220D5A
+
+View your payments: https://test.apluslearn.ca/payments
+
+Refunds usually arrive within 5–10 business days, depending on your bank.
+
+— The APlus Learn team
+────────────────────────────────────────────────────
+
+  ✓ an under-subscribed session is cancelled at its deadline
+  ✓ and everybody is refunded in full
+  ✓ the under-filled session is marked cancelled
+  ✓ with a reason the family can read
+  ✓ running settlement again refunds nothing twice
+(node:73190) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+  ✓ the seat price cannot change once somebody has joined
+  ✓ capacity cannot be cut below the people already in it
+  ✓ but the description and title can still be improved
+  ✓ publishing a session is audited
+  ✓ joining one is audited
+  ✓ cancelling one is audited
+
+▸ Promoted profiles — eligibility, ranking, pagination and expiry
+  ✓ promotion applies to the default 'best match' ordering
+  ✓ a visitor's own sort order is never overridden by a promotion
+  ✓ page one leads with the promoted block and fills the rest normally
+  ✓ page two carries no promoted results and resumes where page one stopped
+  ✓ deeper pages keep the offset consistent, so nothing is skipped or repeated
+  ✓ more promoted tutors than fit on a page spill onto the next one in order
+  ✓ and the spill picks up at the right promoted offset
+  ✓ with nothing promoted the arithmetic is the ordinary skip/limit
+  ✓ promotion limits fall back to 'off' rather than to a guess
+  ✓ a disabled platform reports promotions as off
+  ✓ liveness is a time window, not just a stored status
+  ✓ an unapproved profile cannot be promoted
+  ✓ an approved but hidden profile cannot be promoted
+  ✓ a suspended account cannot be promoted
+  ✓ a closed account cannot be promoted
+  ✓ an approved, searchable, active tutor can be
+  ✓ the service refuses to promote a profile that is not searchable
+  ✓ a promotion with no start date begins immediately
+  ✓ and ends on the platform's default window, not forever
+  ✓ creating one is audited
+  ✓ and the tutor is told their profile is being featured
+  ✓ one tutor cannot hold two promotions at once
+  ✓ a promotion cannot end before it starts
+  ✓ a promotion cannot be created already finished
+  ✓ a promotion cannot exceed the configured maximum window
+  ✓ a live promotion lifts the tutor to the top of the default ordering
+  ✓ and the result is labelled as promoted
+  ✓ everybody else in the results is not labelled
+  ✓ no tutor appears twice on the page
+  ✓ the total is unchanged by promotion — it reorders, it does not add
+  ✓ an explicit price sort is honoured exactly, promotion or not
+  ✓ and nothing is labelled promoted when the visitor chose the order
+  ✓ paging through a promoted result set shows every tutor exactly once
+  ✓ and the promoted tutor is the very first of them
+  ✓ a promoted tutor who fails a filter is still filtered out
+  ✓ a paused promotion stops affecting search immediately
+  ✓ pausing is audited
+  ✓ pausing twice is not an error
+  ✓ a paused promotion can be switched back on
+  ✓ activating twice is not an error
+  ✓ a tutor suspended since the promotion was granted cannot be reactivated
+  ✓ 'extend' cannot be used to shorten a promotion
+  ✓ extending moves the end of the window
+  ✓ extending is audited
+  ✓ a promotion whose window has closed stops affecting search before any job runs
+  ✓ even though the stored status still says it is active
+  ✓ the expiry sweep closes the finished promotion
+  ✓ and the record reads as finished afterwards
+  ✓ expiry is audited
+  ✓ running the sweep again expires nothing twice
+  ✓ and writes no second audit entry
+  ✓ a finished promotion cannot be activated
+  ✓ a finished promotion cannot be paused
+  ✓ a finished promotion cannot be cancelled
+  ✓ a finished promotion cannot be extended
+  ✓ a promotion starting later is scheduled, not active
+  ✓ a scheduled promotion does not affect search before its window opens
+  ✓ the sweep opens a scheduled promotion whose start has arrived
+  ✓ and opening it is audited
+  ✓ and opening it again does nothing
+  ✓ a tutor can see their own promotion's status and window
+  ✓ but never the internal note or who granted it
+  ✓ the marketplace-wide ceiling refuses one promotion too many
+  ✓ a zero per-search ceiling records promotions but lifts nobody
+  ✓ switching promotions off stops them affecting search
+  ✓ and no new promotion can be created while it is off
+
+▸ Analytics — periods, aggregation correctness and scoping
+  ✓ a rolling window ends now and starts the requested number of days back
+  ✓ the previous window is the same length and immediately before it
+  ✓ the two windows do not overlap on a single instant
+  ✓ explicit dates win over a rolling window
+  ✓ and an explicit range reports its own length
+  ✓ a backwards range is corrected rather than reporting nothing
+  ✓ an absurd window is capped rather than scanning everything
+  ✓ a zero-day window falls back to the default rather than to nothing
+  ✓ an unusable time zone degrades to the marketplace's own
+  ✓ a real time zone is honoured
+  ✓ short periods bucket by day
+  ✓ medium periods bucket by week
+  ✓ long periods bucket by month
+  ✓ a series is bucketed in the reporting zone, not in UTC
+  ✓ date windows are half-open, so adjacent periods partition the timeline
+  ✓ percentage change is null when there is no baseline to compare with
+  ✓ percentage change is a whole percentage against the baseline
+  ✓ a rate over an empty denominator is zero, not NaN
+  ✓ gross sales come from settled payments only
+  ✓ an abandoned checkout is never counted as revenue
+  ✓ a payment settled outside the window is not in it
+  ✓ refunds are reported
+  ✓ net collected subtracts refunds
+  ✓ platform revenue subtracts each payment's own refunded commission
+  ✓ unpaid and expired bookings are excluded from every lesson rate
+  ✓ the completion rate counts completions over real lessons
+  ✓ the cancellation rate does not count an abandoned checkout
+  ✓ no-shows are counted apart from cancellations
+  ✓ teaching hours count only lessons actually delivered
+  ✓ average lesson value divides gross by settled payments
+  ✓ the reported period is the one that was asked for
+  ✓ referral credit is reported as a cost, not as a discount on the lesson
+  ✓ and it is taken off platform revenue, never off the tutor's earnings
+  ✓ subject breakdown counts the fixture's real lessons
+  ✓ a 31-day period is bucketed by day
+  ✓ the series only covers days that had lessons
+  ✓ every bucket is a date string in the reporting zone
+  ✓ the series totals match the overview, so nothing is double counted
+  ✓ a long period buckets by month rather than emitting 300 bars
+  ✓ and its buckets are year-months
+  ✓ an empty period reports zeros rather than failing
+  ✓ and its rates are zero rather than NaN
+  ✓ the period start is inclusive — a lesson exactly on it is counted
+  ✓ and the period end is exclusive — the next day's lesson is not
+  ✓ a tutor's own analytics see their own lessons
+  ✓ and their own earnings, never the platform's commission
+  ✓ a tutor is never shown platform revenue
+  ✓ repeat business is computed from distinct students
+  ✓ another tutor's analytics contain none of this tutor's lessons
+  ✓ the leaderboard counts the same lessons the tutor's own view does
+  ✓ and reports a completion rate consistent with them
+  ✓ request analytics report a match rate between 0 and 100
+  ✓ package utilisation never exceeds what was sold
+  ✓ group fill rate never exceeds the seats offered
+  ✓ referral conversion never exceeds the sign-ups it is measured against
+  ✓ referral credit is reported separately from revenue
+  ✓ matching reports the states a match can actually be in
+  ✓ promotion analytics are reported alongside the rest
+
+▸ Risk — detection, idempotency, review and evidence
+  ✓ the score is how many *kinds* of signal fired, not how many events
+  ✓ different kinds of signal each add to the score
+  ✓ a signal older than the window stops counting toward the score
+  ✓ no signals is a score of zero, not an error
+  ✓ levels follow the operator's thresholds
+  ✓ the boundaries are inclusive at the threshold itself
+  ✓ a signal opens a case for the account
+  ✓ the case starts needing review
+  ✓ it carries a public reference
+  ✓ one signal is below the review threshold, so the level stays low
+  ✓ opening a case is audited
+  ✓ the same event recorded again changes nothing
+  ✓ and the case still holds exactly one signal
+  ✓ and no second audit entry was written
+  ✓ ten concurrent replays of one event still record one signal
+  ✓ a different kind of signal joins the existing case rather than opening a second
+  ✓ the score and level are recomputed, never supplied
+  ✓ one account never holds two open cases at once
+  ✓ a third kind of signal reaches the high-risk threshold
+  ✓ every signal on the case says what it was and when
+  ✓ and the evidence behind one is readable
+  ✓ the case names the account it is about
+  ✓ reaching high risk never restricts the account on its own
+  ✓ an administrator can take a case for review
+  ✓ taking it twice is not an error
+  ✓ taking a case is audited
+  ✓ a case cannot be confirmed without recording why
+  ✓ a case cannot be resolved into a status that does not exist
+  ✓ an administrator can confirm a case
+  ✓ what was done about it is recorded on the case
+  ✓ and the signals are kept, not cleared away
+  ✓ resolving is audited, with the signals that drove it
+  ✓ a warning reaches the account holder
+  ✓ confirming a case still does not restrict the account by itself
+  ✓ a resolved case cannot be reviewed again
+  ✓ a resolved case cannot be resolved again
+  ✓ an old event replayed after resolution cannot open a fresh case
+  ✓ but genuinely new trouble opens a fresh case
+  ✓ and the resolved case is still there as evidence
+  ✓ a case can be cleared without a note — being found fine needs no excuse
+  ✓ and clearing records that no action was taken
+  ✓ a signal without a type or key is refused
+  ✓ a signal about an account that does not exist opens nothing
+  ✓ the no-show detector stays quiet below its threshold
+  ✓ the payment-failure detector stays quiet below its threshold
+  ✓ the dispute detector stays quiet below its threshold
+  ✓ a dispute with nobody named records nothing
+  ✓ ordinary behaviour leaves no case at all
+  ✓ a cancellation warning is not on its own a risk signal
+  ✓ but the policy's 'needs an administrator's review' verdict is
+  ✓ and the evidence carries the count the policy actually saw
+  ✓ more cancellations the same day add one signal, not one per lesson
+  ✓ the overview counts what still needs a decision
+  ✓ and counts confirmed cases separately
+  ✓ no signal is recorded while detection is switched off
+
+────────────────────────────────────────────────────────
+913 passed, 2 failed
+
+  ✗ the bucket is reachable with the configured credentials — Object storage refused the request: the credentials are wrong or lack permission on this bucket.
+  ✗ and each records a full refund
+error: script "test:integrations" exited with code 1

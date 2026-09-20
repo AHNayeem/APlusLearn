@@ -100,6 +100,9 @@ async function main() {
   await referralTests();
   await packageTests();
   await groupSessionTests();
+  await promotionTests();
+  await analyticsTests();
+  await riskTests();
 
   // The services open their own memoised connection via `lib/db/connect`, so
   // closing the one this file opened is not enough to let Node exit.
@@ -5672,6 +5675,1192 @@ async function groupSessionTests() {
     await GroupSession.deleteMany({ _id: { $in: ids } });
     await StudentProfile.deleteMany({ _id: { $in: madeStudents } });
     await AuditLog.deleteMany({ entityType: "GroupSession" });
+  }
+}
+
+
+// --- 21. Promoted tutor profiles (§41 Phase 2) -----------------------------
+
+/**
+ * Promotion is the one Phase 2 feature that reaches directly into what
+ * families are shown, so the assertions here are weighted towards the two
+ * ways it could do harm: making somebody visible who should not be, and
+ * corrupting the result set everybody else is paginating through.
+ */
+async function promotionTests() {
+  section("Promoted profiles — eligibility, ranking, pagination and expiry");
+
+  // --- the pure ranking rules, no database needed ---------------------------
+  const {
+    promotionAffectsSort, promotedPageSlice, promotionLimits, livePromotionQuery,
+  } = await import("@/lib/search/promotion");
+
+  check("promotion applies to the default 'best match' ordering",
+    promotionAffectsSort("RELEVANCE") === true && promotionAffectsSort(undefined) === true);
+  check("a visitor's own sort order is never overridden by a promotion",
+    ["PRICE_ASC", "PRICE_DESC", "RATING", "DISTANCE", "EXPERIENCE", "AVAILABILITY"]
+      .every((sort) => promotionAffectsSort(sort) === false));
+
+  const page1 = promotedPageSlice({ promotedCount: 3, page: 1, pageSize: 12 });
+  check("page one leads with the promoted block and fills the rest normally",
+    page1.promotedSkip === 0 && page1.promotedLimit === 3 &&
+      page1.normalSkip === 0 && page1.normalLimit === 9);
+
+  const page2 = promotedPageSlice({ promotedCount: 3, page: 2, pageSize: 12 });
+  check("page two carries no promoted results and resumes where page one stopped",
+    page2.promotedLimit === 0 && page2.normalSkip === 9 && page2.normalLimit === 12);
+
+  const page3 = promotedPageSlice({ promotedCount: 3, page: 3, pageSize: 12 });
+  check("deeper pages keep the offset consistent, so nothing is skipped or repeated",
+    page3.normalSkip === 21 && page3.normalLimit === 12);
+
+  const tiny = promotedPageSlice({ promotedCount: 5, page: 1, pageSize: 3 });
+  check("more promoted tutors than fit on a page spill onto the next one in order",
+    tiny.promotedSkip === 0 && tiny.promotedLimit === 3 && tiny.normalLimit === 0);
+  const tinyNext = promotedPageSlice({ promotedCount: 5, page: 2, pageSize: 3 });
+  check("and the spill picks up at the right promoted offset",
+    tinyNext.promotedSkip === 3 && tinyNext.promotedLimit === 2 &&
+      tinyNext.normalSkip === 0 && tinyNext.normalLimit === 1);
+
+  const none = promotedPageSlice({ promotedCount: 0, page: 2, pageSize: 10 });
+  check("with nothing promoted the arithmetic is the ordinary skip/limit",
+    none.promotedLimit === 0 && none.normalSkip === 10 && none.normalLimit === 10);
+
+  check("promotion limits fall back to 'off' rather than to a guess",
+    promotionLimits({}).maxPromotedPerSearch === 0 && promotionLimits({}).maxActive === 0);
+  check("a disabled platform reports promotions as off",
+    promotionLimits({ promotions: { enabled: false } }).enabled === false);
+
+  const at = new Date("2026-06-01T12:00:00.000Z");
+  const liveQuery = livePromotionQuery(at);
+  check("liveness is a time window, not just a stored status",
+    liveQuery.status === "ACTIVE" &&
+      liveQuery.startsAt.$lte.getTime() === at.getTime() &&
+      liveQuery.endsAt.$gt.getTime() === at.getTime());
+
+  // --- against the database ---------------------------------------------------
+  const uri = process.env.MONGODB_URI;
+  if (!uri) return skip("promotion lifecycle", "MONGODB_URI is not set");
+
+  if (mongoose.connection.readyState !== 1) {
+    try {
+      await mongoose.connect(uri, { serverSelectionTimeoutMS: 2500 });
+    } catch {
+      return skip("promotion lifecycle", "MongoDB is not reachable");
+    }
+  }
+
+  const { TutorPromotion, TutorProfile, User, AuditLog, Notification } = await import("@/models");
+  const promo = await import("@/services/promotion.service");
+  const search = await import("@/services/search.service");
+  const { PROMOTION_STATUS, TUTOR_STATUS, USER_STATUS, ROLES, AUDIT_ACTIONS } =
+    await import("@/constants");
+  const { getSettings, updateSettings, invalidateSettingsCache } =
+    await import("@/services/settings.service");
+
+  const searchable = await TutorProfile.find({ isSearchable: true })
+    .sort({ "stats.ratingAverage": 1, _id: 1 })
+    .limit(4)
+    .populate("userId", "_id status deletedAt")
+    .lean();
+
+  if (searchable.length < 2) {
+    return skip("promotion lifecycle", "fewer than two searchable tutors — run `bun run seed`");
+  }
+
+  // Deliberately the *worst*-rated searchable tutor: if they reach the top of
+  // "best match", it was the promotion that put them there and not their
+  // reviews.
+  const underdog = searchable[0];
+  const other = searchable[1];
+
+  const admin = { id: String(new mongoose.Types.ObjectId()), role: ROLES.ADMIN };
+  const madeIds = [];
+  const settingsBefore = await getSettings({ fresh: true });
+  let suspendedUserId = null;
+
+  try {
+    await TutorPromotion.deleteMany({ tutorProfileId: { $in: searchable.map((t) => t._id) } });
+
+    await updateSettings(
+      { promotions: { enabled: true, maxPromotedPerSearch: 3, maxActive: 20,
+        defaultDurationDays: 30, maxDurationDays: 365 } },
+      admin.id,
+    );
+
+    // --- eligibility ----------------------------------------------------------
+    const unapproved = promo.assessPromotionEligibility(
+      { status: TUTOR_STATUS.PENDING_REVIEW, isSearchable: false },
+      { status: USER_STATUS.ACTIVE },
+    );
+    check("an unapproved profile cannot be promoted", unapproved.eligible === false);
+
+    const hidden = promo.assessPromotionEligibility(
+      { status: TUTOR_STATUS.APPROVED, isSearchable: false },
+      { status: USER_STATUS.ACTIVE },
+    );
+    check("an approved but hidden profile cannot be promoted", hidden.eligible === false);
+
+    const suspended = promo.assessPromotionEligibility(
+      { status: TUTOR_STATUS.APPROVED, isSearchable: true },
+      { status: USER_STATUS.SUSPENDED },
+    );
+    check("a suspended account cannot be promoted", suspended.eligible === false);
+
+    const closed = promo.assessPromotionEligibility(
+      { status: TUTOR_STATUS.APPROVED, isSearchable: true },
+      { status: USER_STATUS.ACTIVE, deletedAt: new Date() },
+    );
+    check("a closed account cannot be promoted", closed.eligible === false);
+
+    const fine = promo.assessPromotionEligibility(
+      { status: TUTOR_STATUS.APPROVED, isSearchable: true },
+      { status: USER_STATUS.ACTIVE, deletedAt: null },
+    );
+    check("an approved, searchable, active tutor can be", fine.eligible === true);
+
+    // The same rule, enforced through the service against real records.
+    const hiddenProfile = await TutorProfile.findOne({ isSearchable: false })
+      .select("_id")
+      .lean();
+    if (hiddenProfile) {
+      const refused = await throws(
+        () => promo.createPromotion({ tutorProfileId: String(hiddenProfile._id) }, admin),
+        (e) => e.code === "TUTOR_NOT_PROMOTABLE",
+      );
+      check("the service refuses to promote a profile that is not searchable",
+        refused.threw && refused.matched);
+    } else {
+      skip("promoting a hidden profile", "every seeded profile is searchable");
+    }
+
+    // --- creating ---------------------------------------------------------------
+    const created = await promo.createPromotion(
+      { tutorProfileId: String(underdog._id), note: "Integration suite." },
+      admin,
+    );
+    madeIds.push(created.id);
+
+    check("a promotion with no start date begins immediately",
+      created.status === PROMOTION_STATUS.ACTIVE);
+    check("and ends on the platform's default window, not forever",
+      new Date(created.endsAt) > new Date() &&
+        Math.round((new Date(created.endsAt) - new Date(created.startsAt)) / 86400000) === 30);
+    check("creating one is audited",
+      (await AuditLog.countDocuments({
+        action: AUDIT_ACTIONS.PROMOTION_CREATED, entityId: created.id,
+      })) === 1);
+    check("and the tutor is told their profile is being featured",
+      (await Notification.countDocuments({
+        entityType: "TutorPromotion", entityId: created.id,
+      })) === 1);
+
+    const duplicate = await throws(
+      () => promo.createPromotion({ tutorProfileId: String(underdog._id) }, admin),
+      (e) => e.status === 409,
+    );
+    check("one tutor cannot hold two promotions at once",
+      duplicate.threw && duplicate.matched);
+
+    const backwards = await throws(
+      () => promo.createPromotion({
+        tutorProfileId: String(other._id),
+        startsAt: new Date(Date.now() + 5 * 86400000).toISOString(),
+        endsAt: new Date(Date.now() + 86400000).toISOString(),
+      }, admin),
+      (e) => e.status === 422,
+    );
+    check("a promotion cannot end before it starts", backwards.threw && backwards.matched);
+
+    const past = await throws(
+      () => promo.createPromotion({
+        tutorProfileId: String(other._id),
+        startsAt: new Date(Date.now() - 10 * 86400000).toISOString(),
+        endsAt: new Date(Date.now() - 86400000).toISOString(),
+      }, admin),
+      (e) => e.status === 422,
+    );
+    check("a promotion cannot be created already finished", past.threw && past.matched);
+
+    const tooLong = await throws(
+      () => promo.createPromotion({
+        tutorProfileId: String(other._id),
+        endsAt: new Date(Date.now() + 400 * 86400000).toISOString(),
+      }, admin),
+      (e) => e.code === "PROMOTION_TOO_LONG",
+    );
+    check("a promotion cannot exceed the configured maximum window",
+      tooLong.threw && tooLong.matched);
+
+    // --- discovery ----------------------------------------------------------------
+    const promotedFirst = await search.searchTutors({ page: 1, pageSize: 12, sort: "RELEVANCE" });
+    check("a live promotion lifts the tutor to the top of the default ordering",
+      promotedFirst.items[0]?.id === String(underdog._id),
+      promotedFirst.items[0]?.id);
+    check("and the result is labelled as promoted",
+      promotedFirst.items[0]?.isPromoted === true);
+    check("everybody else in the results is not labelled",
+      promotedFirst.items.slice(1).every((t) => t.isPromoted !== true));
+    check("no tutor appears twice on the page",
+      new Set(promotedFirst.items.map((t) => t.id)).size === promotedFirst.items.length);
+
+    const unpromotedTotal = promotedFirst.total;
+    check("the total is unchanged by promotion — it reorders, it does not add",
+      unpromotedTotal === (await TutorProfile.countDocuments({ isSearchable: true })));
+
+    const byPrice = await search.searchTutors({ page: 1, pageSize: 12, sort: "PRICE_ASC" });
+    const prices = byPrice.items.map((t) => t.hourlyRateCents);
+    check("an explicit price sort is honoured exactly, promotion or not",
+      prices.every((p, i) => i === 0 || prices[i - 1] <= p), JSON.stringify(prices));
+    check("and nothing is labelled promoted when the visitor chose the order",
+      byPrice.items.every((t) => t.isPromoted !== true));
+
+    // Paging over the whole result set must see each tutor exactly once.
+    const seen = [];
+    const pageSize = 2;
+    const pages = Math.ceil(unpromotedTotal / pageSize);
+    for (let p = 1; p <= pages; p += 1) {
+      const res = await search.searchTutors({ page: p, pageSize, sort: "RELEVANCE" });
+      seen.push(...res.items.map((t) => t.id));
+    }
+    check("paging through a promoted result set shows every tutor exactly once",
+      seen.length === unpromotedTotal && new Set(seen).size === unpromotedTotal,
+      `${seen.length} rows, ${new Set(seen).size} distinct, ${unpromotedTotal} expected`);
+    check("and the promoted tutor is the very first of them",
+      seen[0] === String(underdog._id));
+
+    // A filter the promoted tutor fails must still exclude them.
+    const impossible = await search.searchTutors({
+      page: 1, pageSize: 12, sort: "RELEVANCE", minRating: 5,
+      // Nothing seeded rates a perfect 5 across the board; if something does,
+      // the assertion below still holds because it checks the filter, not the
+      // emptiness.
+    });
+    check("a promoted tutor who fails a filter is still filtered out",
+      impossible.items.every((t) => (t.stats?.ratingAverage ?? 0) >= 5));
+
+    // --- pausing ----------------------------------------------------------------
+    await promo.pausePromotion(created.id, admin);
+    invalidateSettingsCache();
+    const whilePaused = await search.searchTutors({ page: 1, pageSize: 12, sort: "RELEVANCE" });
+    check("a paused promotion stops affecting search immediately",
+      whilePaused.items.every((t) => t.isPromoted !== true));
+    check("pausing is audited",
+      (await AuditLog.countDocuments({
+        action: AUDIT_ACTIONS.PROMOTION_PAUSED, entityId: created.id,
+      })) === 1);
+    check("pausing twice is not an error",
+      (await promo.pausePromotion(created.id, admin)).status === PROMOTION_STATUS.PAUSED);
+
+    const reactivated = await promo.activatePromotion(created.id, admin);
+    check("a paused promotion can be switched back on",
+      reactivated.status === PROMOTION_STATUS.ACTIVE);
+    check("activating twice is not an error",
+      (await promo.activatePromotion(created.id, admin)).status === PROMOTION_STATUS.ACTIVE);
+
+    // --- eligibility is re-checked at activation, not only at creation ----------
+    await promo.pausePromotion(created.id, admin);
+    suspendedUserId = underdog.userId._id ?? underdog.userId;
+    await User.updateOne({ _id: suspendedUserId }, { $set: { status: USER_STATUS.SUSPENDED } });
+    const staleActivate = await throws(
+      () => promo.activatePromotion(created.id, admin),
+      (e) => e.code === "TUTOR_NOT_PROMOTABLE",
+    );
+    check("a tutor suspended since the promotion was granted cannot be reactivated",
+      staleActivate.threw && staleActivate.matched);
+    await User.updateOne({ _id: suspendedUserId }, { $set: { status: USER_STATUS.ACTIVE } });
+    suspendedUserId = null;
+    await promo.activatePromotion(created.id, admin);
+
+    // --- extending ---------------------------------------------------------------
+    const current = await TutorPromotion.findById(created.id).lean();
+    const shorter = await throws(
+      () => promo.extendPromotion(created.id, {
+        endsAt: new Date(new Date(current.endsAt).getTime() - 86400000).toISOString(),
+      }, admin),
+      (e) => e.status === 422,
+    );
+    check("'extend' cannot be used to shorten a promotion", shorter.threw && shorter.matched);
+
+    const extendedTo = new Date(new Date(current.endsAt).getTime() + 7 * 86400000);
+    const extended = await promo.extendPromotion(
+      created.id, { endsAt: extendedTo.toISOString() }, admin,
+    );
+    check("extending moves the end of the window",
+      new Date(extended.endsAt).getTime() === extendedTo.getTime());
+    check("extending is audited",
+      (await AuditLog.countDocuments({
+        action: AUDIT_ACTIONS.PROMOTION_EXTENDED, entityId: created.id,
+      })) === 1);
+
+    // --- a window that has closed stops mattering even without the job ----------
+    await TutorPromotion.updateOne(
+      { _id: created.id },
+      { $set: { endsAt: new Date(Date.now() - 1000) } },
+    );
+    const afterWindow = await search.searchTutors({ page: 1, pageSize: 12, sort: "RELEVANCE" });
+    check("a promotion whose window has closed stops affecting search before any job runs",
+      afterWindow.items.every((t) => t.isPromoted !== true));
+    const stillStored = await TutorPromotion.findById(created.id).lean();
+    check("even though the stored status still says it is active",
+      stillStored.status === PROMOTION_STATUS.ACTIVE);
+
+    // --- the sweep ----------------------------------------------------------------
+    const swept = await promo.expirePromotions({ now: new Date() });
+    check("the expiry sweep closes the finished promotion", swept.expired >= 1);
+    const settled = await TutorPromotion.findById(created.id).lean();
+    check("and the record reads as finished afterwards",
+      settled.status === PROMOTION_STATUS.EXPIRED && !!settled.endedAt);
+    check("expiry is audited",
+      (await AuditLog.countDocuments({
+        action: AUDIT_ACTIONS.PROMOTION_EXPIRED, entityId: created.id,
+      })) === 1);
+
+    const sweptAgain = await promo.expirePromotions({ now: new Date() });
+    check("running the sweep again expires nothing twice", sweptAgain.expired === 0);
+    check("and writes no second audit entry",
+      (await AuditLog.countDocuments({
+        action: AUDIT_ACTIONS.PROMOTION_EXPIRED, entityId: created.id,
+      })) === 1);
+
+    // --- terminal is terminal -------------------------------------------------------
+    for (const [label, fn] of [
+      ["activated", () => promo.activatePromotion(created.id, admin)],
+      ["paused", () => promo.pausePromotion(created.id, admin)],
+      ["cancelled", () => promo.cancelPromotion(created.id, {}, admin)],
+      ["extended", () => promo.extendPromotion(created.id, {
+        endsAt: new Date(Date.now() + 86400000).toISOString(),
+      }, admin)],
+    ]) {
+      const attempt = await throws(fn, (e) => e.code === "PROMOTION_FINISHED");
+      check(`a finished promotion cannot be ${label}`, attempt.threw && attempt.matched);
+    }
+
+    // --- scheduling ahead -------------------------------------------------------------
+    const startsAt = new Date(Date.now() + 2 * 86400000);
+    const scheduled = await promo.createPromotion({
+      tutorProfileId: String(underdog._id),
+      startsAt: startsAt.toISOString(),
+      endsAt: new Date(startsAt.getTime() + 5 * 86400000).toISOString(),
+    }, admin);
+    madeIds.push(scheduled.id);
+    check("a promotion starting later is scheduled, not active",
+      scheduled.status === PROMOTION_STATUS.SCHEDULED);
+
+    const notYet = await search.searchTutors({ page: 1, pageSize: 12, sort: "RELEVANCE" });
+    check("a scheduled promotion does not affect search before its window opens",
+      notYet.items.every((t) => t.isPromoted !== true));
+
+    const opened = await promo.expirePromotions({
+      now: new Date(startsAt.getTime() + 1000),
+    });
+    check("the sweep opens a scheduled promotion whose start has arrived",
+      opened.activated === 1);
+    check("and opening it is audited",
+      (await AuditLog.countDocuments({
+        action: AUDIT_ACTIONS.PROMOTION_ACTIVATED, entityId: scheduled.id,
+      })) === 1);
+    const openedAgain = await promo.expirePromotions({
+      now: new Date(startsAt.getTime() + 2000),
+    });
+    check("and opening it again does nothing", openedAgain.activated === 0);
+
+    // --- the tutor's own view -----------------------------------------------------------
+    const mine = await promo.currentPromotionForTutor(underdog._id);
+    check("a tutor can see their own promotion's status and window",
+      mine?.status === PROMOTION_STATUS.ACTIVE && !!mine.startsAt && !!mine.endsAt);
+    check("but never the internal note or who granted it",
+      mine.note === undefined && mine.createdBy === undefined);
+
+    // --- the ceiling ---------------------------------------------------------------------
+    await updateSettings({ promotions: { maxActive: 1 } }, admin.id);
+    const capped = await throws(
+      () => promo.createPromotion({ tutorProfileId: String(other._id) }, admin),
+      (e) => e.code === "PROMOTION_LIMIT_REACHED",
+    );
+    check("the marketplace-wide ceiling refuses one promotion too many",
+      capped.threw && capped.matched);
+
+    await updateSettings({ promotions: { maxActive: 20, maxPromotedPerSearch: 0 } }, admin.id);
+    const ceilingZero = await search.searchTutors({ page: 1, pageSize: 12, sort: "RELEVANCE" });
+    check("a zero per-search ceiling records promotions but lifts nobody",
+      ceilingZero.items.every((t) => t.isPromoted !== true));
+
+    await updateSettings({ promotions: { enabled: false, maxPromotedPerSearch: 3 } }, admin.id);
+    const switchedOff = await search.searchTutors({ page: 1, pageSize: 12, sort: "RELEVANCE" });
+    check("switching promotions off stops them affecting search",
+      switchedOff.items.every((t) => t.isPromoted !== true));
+    const refusedWhileOff = await throws(
+      () => promo.createPromotion({ tutorProfileId: String(other._id) }, admin),
+      (e) => e.code === "PROMOTIONS_DISABLED",
+    );
+    check("and no new promotion can be created while it is off",
+      refusedWhileOff.threw && refusedWhileOff.matched);
+  } finally {
+    if (suspendedUserId) {
+      await User.updateOne({ _id: suspendedUserId }, { $set: { status: USER_STATUS.ACTIVE } });
+    }
+    await updateSettings({ promotions: { ...settingsBefore.promotions } }, admin.id);
+    const ids = madeIds.map((id) => new mongoose.Types.ObjectId(id));
+    await Notification.deleteMany({ entityType: "TutorPromotion" });
+    await AuditLog.deleteMany({ entityType: "TutorPromotion" });
+    await TutorPromotion.deleteMany({ _id: { $in: ids } });
+    await TutorPromotion.deleteMany({ tutorProfileId: { $in: searchable.map((t) => t._id) } });
+  }
+}
+
+
+// --- 22. Advanced analytics (§25, §41 Phase 2) -----------------------------
+
+/**
+ * Analytics are the one part of the platform where a wrong answer looks
+ * exactly like a right one, so these tests are built around fixtures whose
+ * correct totals are known by construction rather than read back from the
+ * same aggregation being tested.
+ */
+async function analyticsTests() {
+  section("Analytics — periods, aggregation correctness and scoping");
+
+  // --- the pure period arithmetic ------------------------------------------
+  const {
+    resolveRange, granularityFor, dateWindow, percentChange, rate,
+    MAX_RANGE_DAYS, DEFAULT_REPORTING_TIME_ZONE, bucketExpression,
+  } = await import("@/lib/analytics/range");
+
+  const now = new Date("2026-06-15T12:00:00.000Z");
+
+  const rolling = resolveRange({ days: 30, now });
+  check("a rolling window ends now and starts the requested number of days back",
+    rolling.to.getTime() === now.getTime() &&
+      Math.round((rolling.to - rolling.from) / 86400000) === 30);
+  check("the previous window is the same length and immediately before it",
+    rolling.previous.to.getTime() === rolling.from.getTime() &&
+      rolling.previous.to - rolling.previous.from === rolling.to - rolling.from);
+  check("the two windows do not overlap on a single instant",
+    rolling.previous.to.getTime() === rolling.from.getTime());
+
+  const explicit = resolveRange({
+    from: "2026-01-01T00:00:00.000Z", to: "2026-02-01T00:00:00.000Z", now,
+  });
+  check("explicit dates win over a rolling window",
+    explicit.from.toISOString() === "2026-01-01T00:00:00.000Z" &&
+      explicit.to.toISOString() === "2026-02-01T00:00:00.000Z");
+  check("and an explicit range reports its own length", explicit.days === 31);
+
+  const backwards = resolveRange({
+    from: "2026-03-01T00:00:00.000Z", to: "2026-02-01T00:00:00.000Z", now,
+  });
+  check("a backwards range is corrected rather than reporting nothing",
+    backwards.from < backwards.to);
+
+  const huge = resolveRange({ days: 100000, now });
+  check("an absurd window is capped rather than scanning everything",
+    huge.days <= MAX_RANGE_DAYS);
+
+  const empty = resolveRange({ days: 0, now });
+  check("a zero-day window falls back to the default rather than to nothing",
+    empty.days === 30);
+
+  const badZone = resolveRange({ days: 7, timeZone: "Mars/Olympus_Mons", now });
+  check("an unusable time zone degrades to the marketplace's own",
+    badZone.timeZone === DEFAULT_REPORTING_TIME_ZONE);
+  const goodZone = resolveRange({ days: 7, timeZone: "America/Vancouver", now });
+  check("a real time zone is honoured", goodZone.timeZone === "America/Vancouver");
+
+  check("short periods bucket by day", granularityFor(7 * 86400000) === "day");
+  check("medium periods bucket by week", granularityFor(90 * 86400000) === "week");
+  check("long periods bucket by month", granularityFor(300 * 86400000) === "month");
+  check("a series is bucketed in the reporting zone, not in UTC",
+    bucketExpression("startAt", goodZone).$dateToString.timezone === "America/Vancouver");
+
+  const halfOpen = dateWindow("paidAt", { from: new Date(1), to: new Date(2) });
+  check("date windows are half-open, so adjacent periods partition the timeline",
+    halfOpen.paidAt.$gte.getTime() === 1 && halfOpen.paidAt.$lt.getTime() === 2);
+
+  check("percentage change is null when there is no baseline to compare with",
+    percentChange(5, 0) === null && percentChange(0, 0) === 0);
+  check("percentage change is a whole percentage against the baseline",
+    percentChange(150, 100) === 50 && percentChange(50, 100) === -50);
+  check("a rate over an empty denominator is zero, not NaN",
+    rate(0, 0) === 0 && rate(3, 4) === 75);
+
+  // --- against the database ---------------------------------------------------
+  const uri = process.env.MONGODB_URI;
+  if (!uri) return skip("analytics aggregation", "MONGODB_URI is not set");
+
+  if (mongoose.connection.readyState !== 1) {
+    try {
+      await mongoose.connect(uri, { serverSelectionTimeoutMS: 2500 });
+    } catch {
+      return skip("analytics aggregation", "MongoDB is not reachable");
+    }
+  }
+
+  const { Booking, Payment, TutorProfile, StudentProfile, Review } = await import("@/models");
+  const analytics = await import("@/services/analytics.service");
+  const { BOOKING_STATUS, PAYMENT_STATUS, LESSON_MODES } = await import("@/constants");
+
+  const tutor = await TutorProfile.findOne({ isSearchable: true })
+    .populate("userId", "_id")
+    .lean();
+  const student = await StudentProfile.findOne({ archivedAt: null }).lean();
+  if (!tutor || !student) {
+    return skip("analytics aggregation", "no seeded tutor or student — run `bun run seed`");
+  }
+
+  const tutorUserId = tutor.userId._id ?? tutor.userId;
+  const courseId = tutor.courses?.[0]?.courseId ?? new mongoose.Types.ObjectId();
+
+  // A window far in the past, so only this fixture can land in it and every
+  // expected total is known by construction.
+  const anchor = new Date("2021-03-10T15:00:00.000Z");
+  const from = new Date("2021-03-01T00:00:00.000Z");
+  const to = new Date("2021-04-01T00:00:00.000Z");
+  const range = { from: from.toISOString(), to: to.toISOString() };
+
+  const made = { bookings: [], payments: [], reviews: [] };
+
+  const price = (subtotal, commissionPercent = 20) => ({
+    hourlyRateCents: subtotal,
+    durationMinutes: 60,
+    subtotalCents: subtotal,
+    commissionPercent,
+    commissionCents: Math.round(subtotal * (commissionPercent / 100)),
+    tutorEarningsCents: subtotal - Math.round(subtotal * (commissionPercent / 100)),
+    totalCents: subtotal,
+    currency: "CAD",
+  });
+
+  async function makeBooking({ status, subtotal, startAt, extra = {} }) {
+    const booking = await Booking.create({
+      reference: `QA-AN-${randomUUID().slice(0, 8)}`,
+      purchaserId: student.ownerId,
+      studentProfileId: student._id,
+      tutorProfileId: tutor._id,
+      tutorUserId,
+      courseId,
+      courseName: "Analytics Fixture Course",
+      courseCode: "QAAN1",
+      subjectName: "Analytics Fixture Subject",
+      mode: LESSON_MODES.ONLINE,
+      startAt,
+      endAt: new Date(startAt.getTime() + 3600000),
+      durationMinutes: 60,
+      status,
+      price: price(subtotal),
+      completedAt: status === BOOKING_STATUS.COMPLETED ? startAt : undefined,
+      ...extra,
+    });
+    made.bookings.push(booking._id);
+    return booking;
+  }
+
+  async function makePayment({ booking, status, refundedCents = 0, creditAppliedCents = 0, paidAt }) {
+    const payment = await Payment.create({
+      bookingId: booking._id,
+      purchaserId: student.ownerId,
+      tutorUserId,
+      subtotalCents: booking.price.subtotalCents,
+      commissionPercent: booking.price.commissionPercent,
+      commissionCents: booking.price.commissionCents,
+      tutorEarningsCents: booking.price.tutorEarningsCents,
+      totalCents: booking.price.totalCents,
+      creditAppliedCents,
+      refundedCents,
+      status,
+      paidAt,
+    });
+    made.payments.push(payment._id);
+    return payment;
+  }
+
+  try {
+    // Two settled lessons, one abandoned checkout, one cancelled lesson, one
+    // partially refunded lesson, and one payment paid *outside* the window.
+    const completedA = await makeBooking({
+      status: BOOKING_STATUS.COMPLETED, subtotal: 10000, startAt: anchor,
+    });
+    await makePayment({ booking: completedA, status: PAYMENT_STATUS.PAID, paidAt: anchor });
+
+    const completedB = await makeBooking({
+      status: BOOKING_STATUS.COMPLETED, subtotal: 5000,
+      startAt: new Date(anchor.getTime() + 86400000),
+    });
+    await makePayment({
+      booking: completedB, status: PAYMENT_STATUS.PAID,
+      paidAt: new Date(anchor.getTime() + 86400000),
+    });
+
+    // Never paid for. Must not count as a lesson, a cancellation or revenue.
+    await makeBooking({
+      status: BOOKING_STATUS.PENDING_PAYMENT, subtotal: 99900,
+      startAt: new Date(anchor.getTime() + 2 * 86400000),
+    });
+    await makeBooking({
+      status: BOOKING_STATUS.EXPIRED, subtotal: 99900,
+      startAt: new Date(anchor.getTime() + 2 * 86400000),
+    });
+
+    // Cancelled by the learner, half refunded.
+    const cancelled = await makeBooking({
+      status: BOOKING_STATUS.CANCELLED_BY_STUDENT, subtotal: 8000,
+      startAt: new Date(anchor.getTime() + 3 * 86400000),
+    });
+    await makePayment({
+      booking: cancelled, status: PAYMENT_STATUS.PARTIALLY_REFUNDED,
+      refundedCents: 4000, paidAt: new Date(anchor.getTime() + 3 * 86400000),
+    });
+
+    // A no-show, which is neither a completion nor a cancellation.
+    await makeBooking({
+      status: BOOKING_STATUS.NO_SHOW_STUDENT, subtotal: 6000,
+      startAt: new Date(anchor.getTime() + 4 * 86400000),
+    });
+
+    // Paid well outside the window — must not appear in it at all.
+    const outside = await makeBooking({
+      status: BOOKING_STATUS.COMPLETED, subtotal: 77700,
+      startAt: new Date("2021-06-10T15:00:00.000Z"),
+    });
+    await makePayment({
+      booking: outside, status: PAYMENT_STATUS.PAID,
+      paidAt: new Date("2021-06-10T15:00:00.000Z"),
+    });
+
+    const overview = await analytics.marketplaceOverview(range);
+    const c = overview.commerce;
+
+    // Gross = 10000 + 5000 + 8000 = 23000. The abandoned checkout (99900) and
+    // the out-of-window lesson (77700) are absent by construction.
+    check("gross sales come from settled payments only",
+      c.grossSalesCents === 23000, String(c.grossSalesCents));
+    check("an abandoned checkout is never counted as revenue",
+      c.grossSalesCents < 99900);
+    check("a payment settled outside the window is not in it",
+      c.grossSalesCents < 77700);
+    check("refunds are reported", c.refundedCents === 4000, String(c.refundedCents));
+    check("net collected subtracts refunds",
+      c.netCollectedCents === 23000 - 4000, String(c.netCollectedCents));
+
+    // Commission at 20% = 2000 + 1000 + 1600 = 4600. The 4000 refund on an
+    // 8000 payment is half of it, so half that payment's 1600 commission — 800
+    // — goes back. 4600 − 800 = 3800.
+    check("platform revenue subtracts each payment's own refunded commission",
+      c.platformRevenueCents === 3800, String(c.platformRevenueCents));
+
+    // Lessons: 2 completed + 1 cancelled + 1 no-show = 4. Unpaid ones excluded.
+    check("unpaid and expired bookings are excluded from every lesson rate",
+      c.bookings === 4, String(c.bookings));
+    check("the completion rate counts completions over real lessons",
+      c.completionRate === 50, String(c.completionRate));
+    check("the cancellation rate does not count an abandoned checkout",
+      c.cancellationRate === 25, String(c.cancellationRate));
+    check("no-shows are counted apart from cancellations",
+      c.noShowRate === 25 && overview.reliability.studentNoShows === 1);
+    check("teaching hours count only lessons actually delivered",
+      c.teachingHours === 2, String(c.teachingHours));
+    check("average lesson value divides gross by settled payments",
+      c.averageBookingValueCents === Math.round(23000 / 3),
+      String(c.averageBookingValueCents));
+    check("the reported period is the one that was asked for",
+      overview.period.from === from.toISOString() && overview.period.to === to.toISOString());
+
+    // Credit is platform-funded marketing, not lesson revenue.
+    const credited = await makeBooking({
+      status: BOOKING_STATUS.COMPLETED, subtotal: 10000,
+      startAt: new Date(anchor.getTime() + 5 * 86400000),
+    });
+    await makePayment({
+      booking: credited, status: PAYMENT_STATUS.PAID, creditAppliedCents: 2500,
+      paidAt: new Date(anchor.getTime() + 5 * 86400000),
+    });
+
+    const withCredit = await analytics.marketplaceOverview(range);
+    check("referral credit is reported as a cost, not as a discount on the lesson",
+      withCredit.commerce.referralCreditCents === 2500 &&
+        withCredit.commerce.grossSalesCents === 33000,
+      `${withCredit.commerce.referralCreditCents} / ${withCredit.commerce.grossSalesCents}`);
+    check("and it is taken off platform revenue, never off the tutor's earnings",
+      withCredit.commerce.platformRevenueCents === 3800 + 2000 - 2500 &&
+        withCredit.commerce.tutorEarningsCents === 8000 + 4000 + 6400 + 8000,
+      `${withCredit.commerce.platformRevenueCents} / ${withCredit.commerce.tutorEarningsCents}`);
+
+    // --- breakdowns -------------------------------------------------------------
+    const breakdowns = await analytics.marketplaceBreakdowns(range);
+    const fixtureSubject = breakdowns.popularSubjects.find(
+      (s) => s.name === "Analytics Fixture Subject",
+    );
+    check("subject breakdown counts the fixture's real lessons",
+      fixtureSubject?.bookings === 5, String(fixtureSubject?.bookings));
+    check("a 31-day period is bucketed by day", breakdowns.granularity === "day");
+    check("the series only covers days that had lessons",
+      breakdowns.dailyBookings.length === 5, String(breakdowns.dailyBookings.length));
+    check("every bucket is a date string in the reporting zone",
+      breakdowns.dailyBookings.every((d) => /^\d{4}-\d{2}-\d{2}$/.test(d.date)));
+    check("the series totals match the overview, so nothing is double counted",
+      breakdowns.dailyBookings.reduce((sum, d) => sum + d.bookings, 0) ===
+        withCredit.commerce.bookings);
+
+    const longRange = await analytics.marketplaceBreakdowns({
+      from: "2021-01-01T00:00:00.000Z", to: "2021-12-01T00:00:00.000Z",
+    });
+    check("a long period buckets by month rather than emitting 300 bars",
+      longRange.granularity === "month");
+    check("and its buckets are year-months",
+      longRange.dailyBookings.every((d) => /^\d{4}-\d{2}$/.test(d.date)));
+
+    // --- an empty period --------------------------------------------------------
+    const quiet = await analytics.marketplaceOverview({
+      from: "2019-01-01T00:00:00.000Z", to: "2019-02-01T00:00:00.000Z",
+    });
+    check("an empty period reports zeros rather than failing",
+      quiet.commerce.grossSalesCents === 0 && quiet.commerce.bookings === 0 &&
+        quiet.commerce.completionRate === 0 && quiet.commerce.platformRevenueCents === 0);
+    check("and its rates are zero rather than NaN",
+      Number.isFinite(quiet.commerce.cancellationRate) &&
+        Number.isFinite(quiet.commerce.noShowRate));
+
+    // --- exact boundaries -------------------------------------------------------
+    const boundary = await analytics.marketplaceOverview({
+      from: anchor.toISOString(),
+      to: new Date(anchor.getTime() + 86400000).toISOString(),
+    });
+    check("the period start is inclusive — a lesson exactly on it is counted",
+      boundary.commerce.bookings === 1, String(boundary.commerce.bookings));
+    check("and the period end is exclusive — the next day's lesson is not",
+      boundary.commerce.grossSalesCents === 10000,
+      String(boundary.commerce.grossSalesCents));
+
+    // --- tutor-scoped analytics ---------------------------------------------------
+    const mine = await analytics.tutorAnalytics(String(tutorUserId), range);
+    check("a tutor's own analytics see their own lessons",
+      mine.lessons.total === 5, String(mine.lessons.total));
+    check("and their own earnings, never the platform's commission",
+      mine.earnings.netCents === 8000 + 4000 + 6400 + 8000,
+      String(mine.earnings.netCents));
+    check("a tutor is never shown platform revenue",
+      mine.earnings.platformRevenueCents === undefined &&
+        mine.earnings.commissionCents === undefined);
+    check("repeat business is computed from distinct students",
+      mine.students.taught >= 1 && mine.students.returning <= mine.students.taught);
+
+    const someoneElse = new mongoose.Types.ObjectId();
+    const theirs = await analytics.tutorAnalytics(String(someoneElse), range);
+    check("another tutor's analytics contain none of this tutor's lessons",
+      theirs.lessons.total === 0 && theirs.earnings.netCents === 0);
+
+    // --- leaderboard ----------------------------------------------------------------
+    const leaderboard = await analytics.tutorLeaderboard({ ...range, limit: 20 });
+    const row = leaderboard.tutors.find((t) => t.tutorUserId === String(tutorUserId));
+    check("the leaderboard counts the same lessons the tutor's own view does",
+      row?.lessons === mine.lessons.total, `${row?.lessons} vs ${mine.lessons.total}`);
+    check("and reports a completion rate consistent with them",
+      row?.completionRate === mine.lessons.completionRate);
+
+    // --- Phase 2 feature analytics ----------------------------------------------------
+    const phaseTwo = await analytics.phaseTwoAnalytics({ days: 366 });
+    check("request analytics report a match rate between 0 and 100",
+      phaseTwo.requests.matchRate >= 0 && phaseTwo.requests.matchRate <= 100);
+    check("package utilisation never exceeds what was sold",
+      phaseTwo.packages.sessionsUsed <= phaseTwo.packages.sessionsSold &&
+        phaseTwo.packages.utilisationRate <= 100);
+    check("group fill rate never exceeds the seats offered",
+      phaseTwo.groups.seatsTaken <= phaseTwo.groups.seatsOffered &&
+        phaseTwo.groups.fillRate <= 100);
+    check("referral conversion never exceeds the sign-ups it is measured against",
+      phaseTwo.referrals.qualified <= phaseTwo.referrals.signups &&
+        phaseTwo.referrals.conversionRate <= 100);
+    check("referral credit is reported separately from revenue",
+      typeof phaseTwo.referrals.creditGrantedCents === "number");
+    check("matching reports the states a match can actually be in",
+      phaseTwo.matching.booked <= phaseTwo.matching.suggested &&
+        phaseTwo.matching.bookingRate <= 100);
+    check("promotion analytics are reported alongside the rest",
+      typeof phaseTwo.promotions.running === "number");
+  } finally {
+    await Payment.deleteMany({ _id: { $in: made.payments } });
+    await Booking.deleteMany({ _id: { $in: made.bookings } });
+    await Review.deleteMany({ _id: { $in: made.reviews } });
+  }
+}
+
+
+// --- 23. Fraud and risk (§41 Phase 2) --------------------------------------
+
+/**
+ * The two things that matter most here are the two that are easiest to get
+ * wrong: a signal that fires twice for one event (which inflates a score and
+ * gets an innocent account reviewed), and a case that can be reopened or
+ * quietly rewritten (which destroys the evidence the feature exists to keep).
+ */
+async function riskTests() {
+  section("Risk — detection, idempotency, review and evidence");
+
+  const uri = process.env.MONGODB_URI;
+  if (!uri) return skip("risk", "MONGODB_URI is not set");
+
+  if (mongoose.connection.readyState !== 1) {
+    try {
+      await mongoose.connect(uri, { serverSelectionTimeoutMS: 2500 });
+    } catch {
+      return skip("risk", "MongoDB is not reachable");
+    }
+  }
+
+  const { RiskCase, User, AuditLog, Notification } = await import("@/models");
+  const risk = await import("@/services/risk.service");
+  const {
+    RISK_SIGNALS, RISK_CASE_STATUS, RISK_LEVELS, RISK_ACTIONS, AUDIT_ACTIONS, ROLES, USER_STATUS,
+  } = await import("@/constants");
+  const { getSettings, updateSettings } = await import("@/services/settings.service");
+
+  // --- the pure scoring rules ------------------------------------------------
+  const now = new Date();
+  const recent = (type, daysAgo = 0) => ({
+    type,
+    detectedAt: new Date(now.getTime() - daysAgo * 86400000),
+  });
+
+  check("the score is how many *kinds* of signal fired, not how many events",
+    risk.scoreSignals(
+      [
+        recent(RISK_SIGNALS.PAYMENT_FAILURES),
+        recent(RISK_SIGNALS.PAYMENT_FAILURES, 1),
+        recent(RISK_SIGNALS.PAYMENT_FAILURES, 2),
+      ],
+      { now, windowDays: 30 },
+    ) === 1);
+
+  check("different kinds of signal each add to the score",
+    risk.scoreSignals(
+      [
+        recent(RISK_SIGNALS.PAYMENT_FAILURES),
+        recent(RISK_SIGNALS.REPEATED_DISPUTES),
+        recent(RISK_SIGNALS.REFERRAL_ABUSE),
+      ],
+      { now, windowDays: 30 },
+    ) === 3);
+
+  check("a signal older than the window stops counting toward the score",
+    risk.scoreSignals(
+      [recent(RISK_SIGNALS.PAYMENT_FAILURES, 90), recent(RISK_SIGNALS.REPEATED_DISPUTES, 1)],
+      { now, windowDays: 30 },
+    ) === 1);
+
+  check("no signals is a score of zero, not an error",
+    risk.scoreSignals([], { now, windowDays: 30 }) === 0 &&
+      risk.scoreSignals(undefined, { now, windowDays: 30 }) === 0);
+
+  const thresholds = { risk: { reviewScore: 2, highScore: 4 } };
+  check("levels follow the operator's thresholds",
+    risk.levelForScore(1, thresholds) === RISK_LEVELS.LOW &&
+      risk.levelForScore(2, thresholds) === RISK_LEVELS.MEDIUM &&
+      risk.levelForScore(3, thresholds) === RISK_LEVELS.MEDIUM &&
+      risk.levelForScore(4, thresholds) === RISK_LEVELS.HIGH);
+  check("the boundaries are inclusive at the threshold itself",
+    risk.levelForScore(4, thresholds) === RISK_LEVELS.HIGH &&
+      risk.levelForScore(3.99, thresholds) === RISK_LEVELS.MEDIUM);
+
+  // --- against the database -----------------------------------------------------
+  const admin = { id: String(new mongoose.Types.ObjectId()), role: ROLES.ADMIN };
+  const settingsBefore = await getSettings({ fresh: true });
+  const madeUsers = [];
+
+  async function makeSubject(suffix) {
+    const user = await User.create({
+      firstName: "Risk",
+      lastName: `Fixture ${suffix}`,
+      email: `risk.fixture.${suffix}.${randomUUID().slice(0, 8)}@example.com`,
+      passwordHash: "x".repeat(60),
+      role: ROLES.PARENT,
+      status: USER_STATUS.ACTIVE,
+    });
+    madeUsers.push(user._id);
+    return user;
+  }
+
+  try {
+    await updateSettings(
+      { risk: { enabled: true, signalWindowDays: 30, reviewScore: 2, highScore: 3,
+        noShowThreshold: 3, paymentFailureThreshold: 3, disputeThreshold: 2 } },
+      admin.id,
+    );
+
+    const subject = await makeSubject("a");
+
+    // --- a first signal opens a case -----------------------------------------
+    const first = await risk.recordRiskSignal({
+      subjectUserId: String(subject._id),
+      type: RISK_SIGNALS.PAYMENT_FAILURES,
+      dedupeKey: `qa-risk-${subject._id}-payments`,
+      summary: "Three declined cards.",
+      evidence: { failures: 3 },
+    });
+    check("a signal opens a case for the account", first.recorded && first.opened);
+    check("the case starts needing review",
+      first.case.status === RISK_CASE_STATUS.OPEN);
+    check("it carries a public reference", /^RSK-/.test(first.case.reference));
+    check("one signal is below the review threshold, so the level stays low",
+      first.case.score === 1 && first.case.level === RISK_LEVELS.LOW);
+    check("opening a case is audited",
+      (await AuditLog.countDocuments({
+        action: AUDIT_ACTIONS.RISK_CASE_OPENED, entityId: first.case.id,
+      })) === 1);
+
+    // --- idempotency ------------------------------------------------------------
+    const replay = await risk.recordRiskSignal({
+      subjectUserId: String(subject._id),
+      type: RISK_SIGNALS.PAYMENT_FAILURES,
+      dedupeKey: `qa-risk-${subject._id}-payments`,
+      summary: "The same three declined cards, redelivered.",
+    });
+    check("the same event recorded again changes nothing",
+      replay.recorded === false && replay.reason === "ALREADY_RECORDED");
+
+    const afterReplay = await RiskCase.findById(first.case.id).lean();
+    check("and the case still holds exactly one signal",
+      afterReplay.signals.length === 1, String(afterReplay.signals.length));
+    check("and no second audit entry was written",
+      (await AuditLog.countDocuments({
+        action: AUDIT_ACTIONS.RISK_CASE_OPENED, entityId: first.case.id,
+      })) === 1);
+
+    // Ten concurrent replays of the same event must still record once.
+    await Promise.all(
+      Array.from({ length: 10 }, () =>
+        risk.recordRiskSignal({
+          subjectUserId: String(subject._id),
+          type: RISK_SIGNALS.PAYMENT_FAILURES,
+          dedupeKey: `qa-risk-${subject._id}-payments`,
+        }).catch(() => null),
+      ),
+    );
+    const afterStorm = await RiskCase.findById(first.case.id).lean();
+    check("ten concurrent replays of one event still record one signal",
+      afterStorm.signals.length === 1, String(afterStorm.signals.length));
+
+    // --- a second kind of signal escalates the same case --------------------------
+    const second = await risk.recordRiskSignal({
+      subjectUserId: String(subject._id),
+      type: RISK_SIGNALS.REPEATED_DISPUTES,
+      dedupeKey: `qa-risk-${subject._id}-disputes`,
+      summary: "Two disputes raised against this account.",
+    });
+    check("a different kind of signal joins the existing case rather than opening a second",
+      second.recorded && second.opened === false && second.case.id === first.case.id);
+    check("the score and level are recomputed, never supplied",
+      second.case.score === 2 && second.case.level === RISK_LEVELS.MEDIUM);
+
+    const openCases = await RiskCase.countDocuments({
+      subjectUserId: subject._id,
+      status: { $in: [RISK_CASE_STATUS.OPEN, RISK_CASE_STATUS.UNDER_REVIEW] },
+    });
+    check("one account never holds two open cases at once", openCases === 1);
+
+    const third = await risk.recordRiskSignal({
+      subjectUserId: String(subject._id),
+      type: RISK_SIGNALS.REFERRAL_ABUSE,
+      dedupeKey: `qa-risk-${subject._id}-referral`,
+    });
+    check("a third kind of signal reaches the high-risk threshold",
+      third.case.score === 3 && third.case.level === RISK_LEVELS.HIGH);
+
+    // --- the case is explainable --------------------------------------------------
+    const detail = await risk.getRiskCase(first.case.id);
+    check("every signal on the case says what it was and when",
+      detail.signals.length === 3 &&
+        detail.signals.every((s) => !!s.type && !!s.detectedAt));
+    check("and the evidence behind one is readable",
+      detail.signals.find((s) => s.type === RISK_SIGNALS.PAYMENT_FAILURES)?.evidence
+        ?.failures === 3);
+    check("the case names the account it is about",
+      String(detail.subjectUserId?.id ?? detail.subjectUserId) === String(subject._id));
+
+    // --- the account is not restricted by any of this -------------------------------
+    const stillActive = await User.findById(subject._id).select("status").lean();
+    check("reaching high risk never restricts the account on its own",
+      stillActive.status === USER_STATUS.ACTIVE);
+
+    // --- review -----------------------------------------------------------------------
+    const taken = await risk.reviewRiskCase(first.case.id, admin);
+    check("an administrator can take a case for review",
+      taken.status === RISK_CASE_STATUS.UNDER_REVIEW && !!taken.reviewedAt);
+    check("taking it twice is not an error",
+      (await risk.reviewRiskCase(first.case.id, admin)).status ===
+        RISK_CASE_STATUS.UNDER_REVIEW);
+    check("taking a case is audited",
+      (await AuditLog.countDocuments({
+        action: AUDIT_ACTIONS.RISK_CASE_REVIEWED, entityId: first.case.id,
+      })) === 1);
+
+    const unexplained = await throws(
+      () => risk.resolveRiskCase(
+        first.case.id, { resolution: RISK_CASE_STATUS.CONFIRMED, note: "bad" }, admin,
+      ),
+      (e) => e.code === "RISK_NOTE_REQUIRED",
+    );
+    check("a case cannot be confirmed without recording why",
+      unexplained.threw && unexplained.matched);
+
+    const nonsense = await throws(
+      () => risk.resolveRiskCase(first.case.id, { resolution: "BANNED" }, admin),
+      (e) => e.code === "RISK_RESOLUTION_INVALID",
+    );
+    check("a case cannot be resolved into a status that does not exist",
+      nonsense.threw && nonsense.matched);
+
+    const confirmed = await risk.resolveRiskCase(
+      first.case.id,
+      {
+        resolution: RISK_CASE_STATUS.CONFIRMED,
+        note: "Three accounts sharing one confirmed mobile number.",
+        action: RISK_ACTIONS.WARNING_ISSUED,
+      },
+      admin,
+    );
+    check("an administrator can confirm a case",
+      confirmed.status === RISK_CASE_STATUS.CONFIRMED && !!confirmed.resolvedAt);
+    check("what was done about it is recorded on the case",
+      confirmed.actions.at(-1).action === RISK_ACTIONS.WARNING_ISSUED);
+    check("and the signals are kept, not cleared away",
+      confirmed.signals.length === 3);
+    check("resolving is audited, with the signals that drove it",
+      (await AuditLog.countDocuments({
+        action: AUDIT_ACTIONS.RISK_CASE_RESOLVED, entityId: first.case.id,
+      })) === 1);
+    check("a warning reaches the account holder",
+      (await Notification.countDocuments({
+        entityType: "RiskCase", entityId: first.case.id,
+      })) === 1);
+    check("confirming a case still does not restrict the account by itself",
+      (await User.findById(subject._id).select("status").lean()).status === USER_STATUS.ACTIVE);
+
+    // --- a resolved case is closed for good ---------------------------------------------
+    for (const [label, fn] of [
+      ["reviewed again", () => risk.reviewRiskCase(first.case.id, admin)],
+      ["resolved again", () => risk.resolveRiskCase(
+        first.case.id, { resolution: RISK_CASE_STATUS.CLEARED }, admin,
+      )],
+    ]) {
+      const attempt = await throws(fn, (e) => e.code === "RISK_CASE_RESOLVED");
+      check(`a resolved case cannot be ${label}`, attempt.threw && attempt.matched);
+    }
+
+    const replayAfterResolve = await risk.recordRiskSignal({
+      subjectUserId: String(subject._id),
+      type: RISK_SIGNALS.PAYMENT_FAILURES,
+      dedupeKey: `qa-risk-${subject._id}-payments`,
+    });
+    check("an old event replayed after resolution cannot open a fresh case",
+      replayAfterResolve.recorded === false);
+
+    const newTrouble = await risk.recordRiskSignal({
+      subjectUserId: String(subject._id),
+      type: RISK_SIGNALS.NO_SHOW_PATTERN,
+      dedupeKey: `qa-risk-${subject._id}-noshow`,
+    });
+    check("but genuinely new trouble opens a fresh case",
+      newTrouble.recorded && newTrouble.opened && newTrouble.case.id !== first.case.id);
+    check("and the resolved case is still there as evidence",
+      (await RiskCase.countDocuments({ subjectUserId: subject._id })) === 2);
+
+    // --- clearing --------------------------------------------------------------------------
+    const cleared = await risk.resolveRiskCase(
+      newTrouble.case.id, { resolution: RISK_CASE_STATUS.CLEARED }, admin,
+    );
+    check("a case can be cleared without a note — being found fine needs no excuse",
+      cleared.status === RISK_CASE_STATUS.CLEARED);
+    check("and clearing records that no action was taken",
+      cleared.actions.at(-1).action === RISK_ACTIONS.NONE);
+
+    // --- incomplete and unknown subjects ------------------------------------------------------
+    const incomplete = await throws(
+      () => risk.recordRiskSignal({ subjectUserId: String(subject._id) }),
+      (e) => e.code === "RISK_SIGNAL_INCOMPLETE",
+    );
+    check("a signal without a type or key is refused", incomplete.threw && incomplete.matched);
+
+    const ghost = await risk.recordRiskSignal({
+      subjectUserId: String(new mongoose.Types.ObjectId()),
+      type: RISK_SIGNALS.PAYMENT_FAILURES,
+      dedupeKey: `qa-risk-ghost-${randomUUID()}`,
+    });
+    check("a signal about an account that does not exist opens nothing",
+      ghost.recorded === false && ghost.reason === "NO_SUBJECT");
+
+    // --- detectors hold to their thresholds ---------------------------------------------------
+    const quiet = await makeSubject("b");
+    const belowNoShow = await risk.checkNoShowPattern({
+      userId: String(quiet._id), role: "STUDENT", bookingId: new mongoose.Types.ObjectId(),
+    });
+    check("the no-show detector stays quiet below its threshold",
+      belowNoShow.recorded === false && belowNoShow.reason === "BELOW_THRESHOLD");
+
+    const belowPayments = await risk.checkPaymentFailures({
+      userId: String(quiet._id), paymentId: new mongoose.Types.ObjectId(),
+    });
+    check("the payment-failure detector stays quiet below its threshold",
+      belowPayments.recorded === false && belowPayments.reason === "BELOW_THRESHOLD");
+
+    const belowDisputes = await risk.checkDisputePattern({
+      againstUserId: String(quiet._id), disputeId: new mongoose.Types.ObjectId(),
+    });
+    check("the dispute detector stays quiet below its threshold",
+      belowDisputes.recorded === false && belowDisputes.reason === "BELOW_THRESHOLD");
+
+    const noSubjectDispute = await risk.checkDisputePattern({
+      againstUserId: null, disputeId: new mongoose.Types.ObjectId(),
+    });
+    check("a dispute with nobody named records nothing",
+      noSubjectDispute.recorded === false);
+
+    check("ordinary behaviour leaves no case at all",
+      (await RiskCase.countDocuments({ subjectUserId: quiet._id })) === 0);
+
+    // Cancellation abuse defers to the booking policy's own verdict.
+    const warnOnly = await risk.reportCancellationAbuse({
+      userId: String(quiet._id), assessment: { action: "WARN", recentCancellations: 3 },
+    });
+    check("a cancellation warning is not on its own a risk signal",
+      warnOnly.recorded === false);
+
+    const needsReview = await risk.reportCancellationAbuse({
+      userId: String(quiet._id), assessment: { action: "REVIEW", recentCancellations: 7 },
+    });
+    check("but the policy's 'needs an administrator's review' verdict is",
+      needsReview.recorded === true);
+    check("and the evidence carries the count the policy actually saw",
+      needsReview.case.signals.at(-1).evidence.cancellations === 7);
+
+    const sameDay = await risk.reportCancellationAbuse({
+      userId: String(quiet._id), assessment: { action: "REVIEW", recentCancellations: 8 },
+    });
+    check("more cancellations the same day add one signal, not one per lesson",
+      sameDay.recorded === false);
+
+    // --- the overview ---------------------------------------------------------------------------
+    const overview = await risk.riskOverview();
+    check("the overview counts what still needs a decision",
+      overview.needsAttention === overview.open + overview.underReview);
+    check("and counts confirmed cases separately", overview.confirmed >= 1);
+
+    // --- switching detection off ------------------------------------------------------------------
+    await updateSettings({ risk: { enabled: false } }, admin.id);
+    const whileOff = await risk.recordRiskSignal({
+      subjectUserId: String(quiet._id),
+      type: RISK_SIGNALS.REFERRAL_ABUSE,
+      dedupeKey: `qa-risk-off-${randomUUID()}`,
+    });
+    check("no signal is recorded while detection is switched off",
+      whileOff.recorded === false && whileOff.reason === "DISABLED");
+  } finally {
+    await updateSettings({ risk: { ...settingsBefore.risk } }, admin.id);
+    const cases = await RiskCase.find({ subjectUserId: { $in: madeUsers } }).select("_id").lean();
+    const caseIds = cases.map((c) => c._id);
+    await Notification.deleteMany({ entityType: "RiskCase", entityId: { $in: caseIds } });
+    await AuditLog.deleteMany({ entityType: "RiskCase", entityId: { $in: caseIds } });
+    await RiskCase.deleteMany({ _id: { $in: caseIds } });
+    await User.deleteMany({ _id: { $in: madeUsers } });
   }
 }
 

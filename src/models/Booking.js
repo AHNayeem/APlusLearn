@@ -211,6 +211,9 @@ BookingSchema.index({ status: 1, startAt: 1 });
 // The expiry sweep asks for PENDING_PAYMENT bookings oldest-first.
 BookingSchema.index({ status: 1, createdAt: 1 });
 BookingSchema.index({ tutorUserId: 1, status: 1, completedAt: -1 });
+// Tutor analytics window by lesson date and exclude statuses rather than
+// select them, so the status field cannot lead the index (§41 Phase 2).
+BookingSchema.index({ tutorUserId: 1, startAt: 1 });
 
 export const Booking = mongoose.models.Booking || mongoose.model("Booking", BookingSchema);
 export default Booking;

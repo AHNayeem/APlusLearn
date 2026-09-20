@@ -451,7 +451,16 @@ function VerifiedMark({ types = [] }) {
  * The ribbon is earned, never sold — it is derived from published reviews, in
  * keeping with the promise that ranking is "not by who paid for placement".
  */
+/**
+ * The badge across the card's cover.
+ *
+ * "Promoted" wins over "Top rated" when both apply, because one of them is a
+ * disclosure and the other is a compliment. A paid placement a visitor cannot
+ * see is an advertising problem, so the label is not optional and is not
+ * allowed to be crowded out (§41 Phase 2).
+ */
 function highlightRibbon(tutor) {
+  if (tutor.isPromoted) return "Promoted";
   return tutor.stats?.ratingAverage >= 4.8 && tutor.stats?.ratingCount >= 3
     ? "Top rated"
     : null;

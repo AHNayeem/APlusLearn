@@ -354,6 +354,70 @@ const GroupSettingsSchema = new mongoose.Schema(
   group,
 );
 
+/**
+ * Promoted tutor profiles (§41 Phase 2).
+ *
+ * `maxPromotedPerSearch` is bounded well below a page of results on purpose:
+ * a ceiling an operator could raise to "all of them" would turn discovery
+ * into a paid listing, which is not a configuration choice the marketplace
+ * offers.
+ */
+const PromotionSettingsSchema = new mongoose.Schema(
+  {
+    enabled: { type: Boolean, default: defaults.promotions.enabled },
+    maxPromotedPerSearch: {
+      type: Number,
+      default: defaults.promotions.maxPromotedPerSearch,
+      min: 0,
+      max: 10,
+    },
+    maxActive: { type: Number, default: defaults.promotions.maxActive, min: 0, max: 500 },
+    defaultDurationDays: {
+      type: Number,
+      default: defaults.promotions.defaultDurationDays,
+      min: 1,
+      max: 365,
+    },
+    maxDurationDays: {
+      type: Number,
+      default: defaults.promotions.maxDurationDays,
+      min: 1,
+      max: 365,
+    },
+  },
+  group,
+);
+
+/**
+ * Fraud and risk (§41 Phase 2).
+ *
+ * `reviewScore` has a floor of 1: a threshold of zero would open a case for
+ * every account that ever had a signal, which is not a risk tool, it is a
+ * queue nobody can read.
+ */
+const RiskSettingsSchema = new mongoose.Schema(
+  {
+    enabled: { type: Boolean, default: defaults.risk.enabled },
+    signalWindowDays: {
+      type: Number,
+      default: defaults.risk.signalWindowDays,
+      min: 1,
+      max: 365,
+    },
+    reviewScore: { type: Number, default: defaults.risk.reviewScore, min: 1, max: 20 },
+    highScore: { type: Number, default: defaults.risk.highScore, min: 1, max: 20 },
+    noShowThreshold: { type: Number, default: defaults.risk.noShowThreshold, min: 1, max: 50 },
+    paymentFailureThreshold: {
+      type: Number,
+      default: defaults.risk.paymentFailureThreshold,
+      min: 1,
+      max: 50,
+    },
+    disputeThreshold: { type: Number, default: defaults.risk.disputeThreshold, min: 1, max: 50 },
+  },
+  group,
+);
+
 const NotificationSettingsSchema = new mongoose.Schema(
   {
     ...Object.fromEntries(
@@ -449,6 +513,8 @@ const SettingsSchema = new mongoose.Schema(
     referrals: { type: ReferralSettingsSchema, default: () => ({}) },
     packages: { type: PackageSettingsSchema, default: () => ({}) },
     groups: { type: GroupSettingsSchema, default: () => ({}) },
+    promotions: { type: PromotionSettingsSchema, default: () => ({}) },
+    risk: { type: RiskSettingsSchema, default: () => ({}) },
 
     updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
   },

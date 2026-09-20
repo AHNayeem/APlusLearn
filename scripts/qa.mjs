@@ -3316,6 +3316,506 @@ async function main() {
   const pendingPublic = await anon(`/api/tutors/${pendingProfileId}`);
   check("and the unapproved profile stays off the public site", pendingPublic.status === 404);
 
+  // --- Promoted profiles ---------------------------------------------------
+  section("Promoted profiles — authorization, ranking and lifecycle");
+
+  const anonPromotions = await anon("/api/admin/promotions");
+  check("anonymous cannot read the promotion register", anonPromotions.status === 401);
+
+  const parentPromotions = await parent("/api/admin/promotions");
+  check("a parent cannot read the promotion register", parentPromotions.status === 403);
+
+  const tutorPromotions = await tutor("/api/admin/promotions");
+  check("a tutor cannot read the promotion register", tutorPromotions.status === 403);
+
+  const tutorSelfPromote = await tutor("/api/admin/promotions", {
+    method: "POST",
+    body: { tutorProfileId: tutorId },
+  });
+  check("a tutor cannot promote themselves", tutorSelfPromote.status === 403);
+
+  const parentPromote = await parent("/api/admin/promotions", {
+    method: "POST",
+    body: { tutorProfileId: tutorId },
+  });
+  check("a parent cannot promote anybody", parentPromote.status === 403);
+
+  const anonTutorPromotion = await anon("/api/tutor/promotion");
+  check("anonymous cannot read a tutor's promotion status", anonTutorPromotion.status === 401);
+
+  const parentTutorPromotion = await parent("/api/tutor/promotion");
+  check("a parent cannot read the tutor promotion endpoint", parentTutorPromotion.status === 403);
+
+  // Pick a searchable tutor who is *not* already top of "best match", so a
+  // change in position is attributable to the promotion and nothing else.
+  const rankingBefore = await anon("/api/search/tutors?province=ON&sort=RELEVANCE&pageSize=12");
+  check("the marketplace has tutors to rank",
+    rankingBefore.ok && rankingBefore.payload.data.tutors.length > 1);
+
+  const beforeIds = rankingBefore.payload.data.tutors.map((t) => t.id);
+  const beforeTotal = rankingBefore.payload.meta?.total ?? beforeIds.length;
+  const promoteTarget = beforeIds.at(-1);
+  check("nothing is labelled as promoted to begin with",
+    rankingBefore.payload.data.tutors.every((t) => t.isPromoted !== true));
+
+  const badTutorId = await admin("/api/admin/promotions", {
+    method: "POST",
+    body: { tutorProfileId: "not-an-object-id" },
+  });
+  check("a malformed tutor id is rejected before anything is written",
+    badTutorId.status === 422);
+
+  const missingTutor = await admin("/api/admin/promotions", {
+    method: "POST",
+    body: { tutorProfileId: "000000000000000000000000" },
+  });
+  check("promoting a tutor who does not exist is a 404", missingTutor.status === 404);
+
+  const createdPromotion = await admin("/api/admin/promotions", {
+    method: "POST",
+    body: { tutorProfileId: promoteTarget, note: "QA run." },
+  });
+  check("an administrator can promote an eligible tutor",
+    createdPromotion.status === 201,
+    JSON.stringify(createdPromotion.payload?.error));
+
+  const promotionId = createdPromotion.payload?.data?.promotion?.id;
+  check("the promotion starts running straight away",
+    createdPromotion.payload?.data?.promotion?.status === "ACTIVE");
+  check("a status cannot be dictated by the client — the server derived it",
+    createdPromotion.payload?.data?.promotion?.endsAt > new Date().toISOString());
+
+  const duplicatePromotion = await admin("/api/admin/promotions", {
+    method: "POST",
+    body: { tutorProfileId: promoteTarget },
+  });
+  check("the same tutor cannot be promoted twice at once",
+    duplicatePromotion.status === 409);
+
+  if (promotionId) {
+    const rankingAfter = await anon("/api/search/tutors?province=ON&sort=RELEVANCE&pageSize=12");
+    check("the promoted tutor is lifted to the top of the default ordering",
+      rankingAfter.payload.data.tutors[0]?.id === promoteTarget,
+      rankingAfter.payload.data.tutors[0]?.id);
+    check("and the result is disclosed as promoted",
+      rankingAfter.payload.data.tutors[0]?.isPromoted === true);
+    check("promotion reorders the results without adding to them",
+      (rankingAfter.payload.meta?.total ?? 0) === beforeTotal);
+    check("no tutor is duplicated by the promotion",
+      new Set(rankingAfter.payload.data.tutors.map((t) => t.id)).size ===
+        rankingAfter.payload.data.tutors.length);
+    check("the same tutors are present, only in a different order",
+      new Set(rankingAfter.payload.data.tutors.map((t) => t.id)).size ===
+        new Set(beforeIds).size);
+
+    const byPriceAfter = await anon("/api/search/tutors?province=ON&sort=PRICE_ASC&pageSize=12");
+    const rates = byPriceAfter.payload.data.tutors.map((t) => t.hourlyRateCents);
+    check("a visitor's explicit price sort is not overridden by a promotion",
+      rates.every((r, i) => i === 0 || rates[i - 1] <= r), JSON.stringify(rates));
+    check("and nothing is labelled promoted under an explicit sort",
+      byPriceAfter.payload.data.tutors.every((t) => t.isPromoted !== true));
+
+    // Paging the whole set must still show each tutor exactly once.
+    const paged = [];
+    const pageCount = Math.ceil(beforeTotal / 2);
+    for (let p = 1; p <= pageCount; p += 1) {
+      const res = await anon(`/api/search/tutors?province=ON&sort=RELEVANCE&pageSize=2&page=${p}`);
+      paged.push(...res.payload.data.tutors.map((t) => t.id));
+    }
+    check("paging a promoted result set never repeats or drops a tutor",
+      paged.length === beforeTotal && new Set(paged).size === beforeTotal,
+      `${paged.length} rows, ${new Set(paged).size} distinct, ${beforeTotal} expected`);
+
+    // A filter the promoted tutor fails must still exclude them.
+    const filtered = await anon(
+      `/api/search/tutors?province=ON&sort=RELEVANCE&mode=IN_PERSON&pageSize=12`,
+    );
+    check("filters still decide membership when a promotion is running",
+      filtered.ok &&
+        filtered.payload.data.tutors.every((t) => t.lessonModes?.includes("IN_PERSON")));
+
+    const tutorSeesOwn = await tutor("/api/tutor/promotion");
+    check("a tutor can read their own promotion status", tutorSeesOwn.ok);
+    check("and the payload never carries the internal note",
+      tutorSeesOwn.payload?.data?.promotion?.note === undefined);
+
+    const tutorWrite = await tutor(`/api/admin/promotions/${promotionId}`, {
+      method: "PATCH",
+      body: { action: "EXTEND", endsAt: new Date(Date.now() + 300 * 86400000).toISOString() },
+    });
+    check("a tutor cannot extend their own promotion", tutorWrite.status === 403);
+
+    const parentWrite = await parent(`/api/admin/promotions/${promotionId}`, {
+      method: "PATCH",
+      body: { action: "CANCEL" },
+    });
+    check("a parent cannot end somebody's promotion", parentWrite.status === 403);
+
+    const anonRead = await anon(`/api/admin/promotions/${promotionId}`);
+    check("the promotion record is not public", anonRead.status === 401);
+
+    const badAction = await admin(`/api/admin/promotions/${promotionId}`, {
+      method: "PATCH",
+      body: { action: "MAKE_PERMANENT" },
+    });
+    check("an unknown lifecycle action is rejected", badAction.status === 422);
+
+    const extendWithoutDate = await admin(`/api/admin/promotions/${promotionId}`, {
+      method: "PATCH",
+      body: { action: "EXTEND" },
+    });
+    check("extending without a date is rejected", extendWithoutDate.status === 422);
+
+    const paused = await admin(`/api/admin/promotions/${promotionId}`, {
+      method: "PATCH",
+      body: { action: "PAUSE" },
+    });
+    check("an administrator can pause a promotion",
+      paused.ok && paused.payload.data.promotion.status === "PAUSED");
+
+    const whilePaused = await anon("/api/search/tutors?province=ON&sort=RELEVANCE&pageSize=12");
+    check("a paused promotion stops affecting search at once",
+      whilePaused.payload.data.tutors.every((t) => t.isPromoted !== true));
+
+    const resumed = await admin(`/api/admin/promotions/${promotionId}`, {
+      method: "PATCH",
+      body: { action: "ACTIVATE" },
+    });
+    check("and it can be switched back on",
+      resumed.ok && resumed.payload.data.promotion.status === "ACTIVE");
+
+    const ended = await admin(`/api/admin/promotions/${promotionId}`, {
+      method: "PATCH",
+      body: { action: "CANCEL", reason: "QA cleanup." },
+    });
+    check("an administrator can end a promotion",
+      ended.ok && ended.payload.data.promotion.status === "CANCELLED");
+
+    const afterEnd = await anon("/api/search/tutors?province=ON&sort=RELEVANCE&pageSize=12");
+    check("the tutor returns to their normal position once it ends",
+      afterEnd.payload.data.tutors.every((t) => t.isPromoted !== true));
+    check("and the ordering matches what it was before the promotion",
+      afterEnd.payload.data.tutors[0]?.id === beforeIds[0],
+      `${afterEnd.payload.data.tutors[0]?.id} vs ${beforeIds[0]}`);
+
+    const reopen = await admin(`/api/admin/promotions/${promotionId}`, {
+      method: "PATCH",
+      body: { action: "ACTIVATE" },
+    });
+    check("a cancelled promotion cannot be reopened", reopen.status === 422);
+
+    const stillListed = await admin(`/api/admin/promotions/${promotionId}`);
+    check("but its record is kept rather than deleted",
+      stillListed.ok && stillListed.payload.data.promotion.status === "CANCELLED");
+  }
+
+  const expirySweep = await admin("/api/cron/promotion-expiry", { method: "POST" });
+  check("the promotion expiry job runs through the scheduler",
+    expirySweep.ok && expirySweep.payload.data.job === "promotion-expiry");
+  const expirySweepAgain = await admin("/api/cron/promotion-expiry", { method: "POST" });
+  check("and running it again is a no-op",
+    expirySweepAgain.ok && expirySweepAgain.payload.data.result?.expired === 0);
+
+  // --- Analytics -----------------------------------------------------------
+  section("Analytics — scoping, periods and authorization");
+
+  const anonAnalytics = await anon("/api/admin/analytics");
+  check("anonymous cannot read platform analytics", anonAnalytics.status === 401);
+
+  const parentAnalytics = await parent("/api/admin/analytics");
+  check("a parent cannot read platform analytics", parentAnalytics.status === 403);
+
+  const tutorAnalyticsAsAdmin = await tutor("/api/admin/analytics");
+  check("a tutor cannot read platform analytics", tutorAnalyticsAsAdmin.status === 403);
+
+  const anonTutorAnalytics = await anon("/api/tutor/analytics");
+  check("anonymous cannot read tutor analytics", anonTutorAnalytics.status === 401);
+
+  const parentTutorAnalytics = await parent("/api/tutor/analytics");
+  check("a parent cannot read the tutor analytics endpoint",
+    parentTutorAnalytics.status === 403);
+
+  const adminAnalytics = await admin("/api/admin/analytics?days=90");
+  check("an administrator can read platform analytics", adminAnalytics.ok);
+
+  const payload = adminAnalytics.payload?.data;
+  check("the response carries the overview, breakdowns, Phase 2 and leaderboard",
+    !!payload?.overview && !!payload?.breakdowns && !!payload?.phaseTwo && !!payload?.leaderboard);
+  check("the period is reported back with the response",
+    payload?.overview?.period?.from < payload?.overview?.period?.to);
+  check("and the reporting time zone is stated rather than assumed",
+    typeof payload?.overview?.period?.timeZone === "string");
+
+  const money = payload?.overview?.commerce ?? {};
+  check("every money figure is a whole number of cents",
+    [money.grossSalesCents, money.platformRevenueCents, money.tutorEarningsCents,
+      money.refundedCents, money.netCollectedCents]
+      .every((v) => Number.isInteger(v)));
+  check("net collected never exceeds what was collected",
+    money.netCollectedCents <= money.collectedCents);
+  check("rates are percentages, not ratios",
+    [money.completionRate, money.cancellationRate, money.noShowRate]
+      .every((v) => Number.isInteger(v) && v >= 0 && v <= 100));
+
+  const phase2 = payload?.phaseTwo ?? {};
+  check("Phase 2 analytics cover requests, packages, groups, referrals and promotions",
+    !!phase2.requests && !!phase2.packages && !!phase2.groups && !!phase2.referrals &&
+      !!phase2.promotions);
+  check("package utilisation cannot exceed what was sold",
+    phase2.packages.sessionsUsed <= phase2.packages.sessionsSold);
+
+  const explicitRange = await admin(
+    "/api/admin/analytics?from=2021-01-01T00:00:00.000Z&to=2021-02-01T00:00:00.000Z",
+  );
+  check("an explicit date range is accepted", explicitRange.ok);
+  check("and is reported back exactly as asked for",
+    explicitRange.payload?.data?.overview?.period?.from === "2021-01-01T00:00:00.000Z" &&
+      explicitRange.payload?.data?.overview?.period?.to === "2021-02-01T00:00:00.000Z");
+
+  const zoned = await admin("/api/admin/analytics?days=30&timeZone=America/Vancouver");
+  check("a reporting time zone can be chosen",
+    zoned.ok && zoned.payload?.data?.overview?.period?.timeZone === "America/Vancouver");
+
+  const badRange = await admin("/api/admin/analytics?from=not-a-date");
+  check("a malformed date is rejected rather than silently ignored",
+    badRange.status === 422);
+
+  const absurdWindow = await admin("/api/admin/analytics?days=99999");
+  check("an absurd window is refused by validation rather than scanning everything",
+    absurdWindow.status === 422);
+
+  const tutorOwnAnalytics = await tutor("/api/tutor/analytics?days=90");
+  check("a tutor can read their own analytics", tutorOwnAnalytics.ok,
+    JSON.stringify(tutorOwnAnalytics.payload?.error));
+
+  const ownStats = tutorOwnAnalytics.payload?.data?.analytics ?? {};
+  check("a tutor's analytics report their own lessons and earnings",
+    Number.isInteger(ownStats.lessons?.total) && Number.isInteger(ownStats.earnings?.netCents));
+  check("and never the platform's commission or anybody else's revenue",
+    ownStats.earnings?.commissionCents === undefined &&
+      ownStats.earnings?.platformRevenueCents === undefined &&
+      ownStats.leaderboard === undefined);
+
+  // The endpoint takes no owner parameter at all, so an injected one must
+  // change nothing rather than redirect the query.
+  const injectedOwner = await tutor(
+    "/api/tutor/analytics?days=90&tutorUserId=000000000000000000000000&userId=000000000000000000000000",
+  );
+  check("an injected tutor id is ignored, not honoured",
+    injectedOwner.ok &&
+      injectedOwner.payload?.data?.analytics?.lessons?.total === ownStats.lessons?.total,
+    `${injectedOwner.payload?.data?.analytics?.lessons?.total} vs ${ownStats.lessons?.total}`);
+
+  // --- Fraud and risk ------------------------------------------------------
+  section("Risk — authorization, detection E2E and evidence");
+
+  const anonRisk = await anon("/api/admin/risk");
+  check("anonymous cannot read the risk queue", anonRisk.status === 401);
+
+  const parentRisk = await parent("/api/admin/risk");
+  check("a parent cannot read the risk queue", parentRisk.status === 403);
+
+  const tutorRisk = await tutor("/api/admin/risk");
+  check("a tutor cannot read the risk queue", tutorRisk.status === 403);
+
+  const adminRiskQueue = await admin("/api/admin/risk");
+  check("an administrator can read the risk queue", adminRiskQueue.ok);
+  check("the queue reports how much needs attention",
+    Number.isInteger(adminRiskQueue.payload?.data?.overview?.needsAttention));
+
+  // There is no endpoint through which a client can create a case or state a
+  // level — the absence is the control, so prove the absence.
+  const forgeCase = await admin("/api/admin/risk", {
+    method: "POST",
+    body: { subjectUserId: "000000000000000000000000", level: "HIGH", score: 99 },
+  });
+  check("a risk case cannot be created over the API at all",
+    forgeCase.status === 404 || forgeCase.status === 405,
+    `status ${forgeCase.status}`);
+
+  // --- a real business event, end to end -----------------------------------
+  const riskSettingsBefore = (await admin("/api/admin/settings")).payload?.data?.settings?.risk;
+
+  const tightenRisk = await admin("/api/admin/settings", {
+    method: "PATCH",
+    body: { risk: { enabled: true, disputeThreshold: 1, reviewScore: 1, highScore: 3 } },
+  });
+  check("risk thresholds are operator-configurable", tightenRisk.ok,
+    JSON.stringify(tightenRisk.payload?.error));
+
+  const completedForDispute = (
+    await parent("/api/bookings?scope=PAST&status=COMPLETED&pageSize=50")
+  ).payload?.data?.bookings?.find((b) => b.status === "COMPLETED");
+
+  if (!completedForDispute) {
+    check("a completed lesson is available to drive the risk E2E", false,
+      "no COMPLETED past booking left — run `bun run seed`");
+  } else {
+    const subjectTutorId = completedForDispute.tutorUserId?.id ?? completedForDispute.tutorUserId;
+
+    const raised = await parent("/api/disputes", {
+      method: "POST",
+      body: {
+        bookingId: completedForDispute.id,
+        reason: "LESSON_QUALITY",
+        description: "QA run — exercising the risk detection path end to end.",
+      },
+    });
+    check("a learner can raise a dispute about a finished lesson", raised.status === 201,
+      JSON.stringify(raised.payload?.error));
+
+    const disputeId = raised.payload?.data?.dispute?.id;
+
+    const queue = await admin("/api/admin/risk?status=OPEN");
+    const opened = (queue.payload?.data?.cases ?? []).find(
+      (c) => String(c.subjectUserId?.id ?? c.subjectUserId) === String(subjectTutorId),
+    );
+    check("the dispute opened a risk case against the account it named", !!opened,
+      `${queue.payload?.data?.cases?.length ?? 0} open cases`);
+
+    if (opened) {
+      check("the case explains which signal fired",
+        opened.signals?.some((s) => s.type === "REPEATED_DISPUTES"));
+      check("and carries the evidence behind it",
+        Number.isInteger(opened.signals?.find((s) => s.type === "REPEATED_DISPUTES")?.evidence
+          ?.disputes));
+      check("the score and level were derived, not supplied",
+        Number.isInteger(opened.score) && ["LOW", "MEDIUM", "HIGH"].includes(opened.level));
+      check("the case is keyed to the account, with a readable reference",
+        /^RSK-/.test(opened.reference ?? ""));
+
+      // Detection must not itself restrict anybody.
+      const subjectAccount = await admin(`/api/admin/users/${subjectTutorId}`);
+      check("opening a risk case never suspends the account by itself",
+        subjectAccount.payload?.data?.user?.status === "ACTIVE",
+        subjectAccount.payload?.data?.user?.status);
+
+      // A second dispute must join the same case, not open a second one.
+      const secondCompleted = (
+        await parent("/api/bookings?scope=PAST&status=COMPLETED&pageSize=50")
+      ).payload?.data?.bookings?.find(
+        (b) =>
+          b.status === "COMPLETED" &&
+          b.id !== completedForDispute.id &&
+          String(b.tutorUserId?.id ?? b.tutorUserId) === String(subjectTutorId),
+      );
+
+      let secondDisputeId = null;
+      if (secondCompleted) {
+        const secondRaised = await parent("/api/disputes", {
+          method: "POST",
+          body: {
+            bookingId: secondCompleted.id,
+            reason: "LESSON_QUALITY",
+            description: "QA run — a second dispute, to prove cases accumulate rather than fork.",
+          },
+        });
+        secondDisputeId = secondRaised.payload?.data?.dispute?.id;
+
+        const afterSecond = await admin("/api/admin/risk?status=OPEN");
+        const forSubject = (afterSecond.payload?.data?.cases ?? []).filter(
+          (c) => String(c.subjectUserId?.id ?? c.subjectUserId) === String(subjectTutorId),
+        );
+        check("a second dispute joins the open case instead of opening a second one",
+          forSubject.length === 1, `${forSubject.length} cases`);
+      }
+
+      // Authorization on the case itself.
+      const tutorReadsCase = await tutor(`/api/admin/risk/${opened.id}`);
+      check("the account under review cannot read its own risk case",
+        tutorReadsCase.status === 403);
+
+      const parentResolves = await parent(`/api/admin/risk/${opened.id}`, {
+        method: "PATCH",
+        body: { action: "RESOLVE", resolution: "CLEARED" },
+      });
+      check("a learner cannot resolve a risk case", parentResolves.status === 403);
+
+      const tutorClearsSelf = await tutor(`/api/admin/risk/${opened.id}`, {
+        method: "PATCH",
+        body: { action: "RESOLVE", resolution: "CLEARED" },
+      });
+      check("the account under review cannot clear itself", tutorClearsSelf.status === 403);
+
+      const forgedStatus = await admin(`/api/admin/risk/${opened.id}`, {
+        method: "PATCH",
+        body: { status: "CLEARED", level: "LOW", score: 0, fraudConfirmed: false },
+      });
+      check("a case's status, level and score cannot be written directly",
+        forgedStatus.status === 422);
+
+      const unexplainedConfirm = await admin(`/api/admin/risk/${opened.id}`, {
+        method: "PATCH",
+        body: { action: "RESOLVE", resolution: "CONFIRMED", note: "bad" },
+      });
+      check("a case cannot be confirmed without recording why",
+        unexplainedConfirm.status === 422);
+
+      const taken = await admin(`/api/admin/risk/${opened.id}`, {
+        method: "PATCH",
+        body: { action: "REVIEW" },
+      });
+      check("an administrator can take the case for review",
+        taken.ok && taken.payload.data.case.status === "UNDER_REVIEW");
+
+      const clearedCase = await admin(`/api/admin/risk/${opened.id}`, {
+        method: "PATCH",
+        body: {
+          action: "RESOLVE",
+          resolution: "CLEARED",
+          outcome: "NONE",
+          note: "QA run — cleared as part of the automated suite.",
+        },
+      });
+      check("and resolve it", clearedCase.ok && clearedCase.payload.data.case.status === "CLEARED");
+      check("the decision records who made it",
+        !!clearedCase.payload.data.case.resolvedBy && !!clearedCase.payload.data.case.resolvedAt);
+      check("and what was done about it",
+        clearedCase.payload.data.case.actions?.at(-1)?.action === "NONE");
+      check("the signals are kept as evidence, not cleared away",
+        (clearedCase.payload.data.case.signals?.length ?? 0) > 0);
+
+      const reopen = await admin(`/api/admin/risk/${opened.id}`, {
+        method: "PATCH",
+        body: { action: "REVIEW" },
+      });
+      check("a resolved case cannot be reopened", reopen.status === 422);
+
+      const stillReadable = await admin(`/api/admin/risk/${opened.id}`);
+      check("but it stays readable as a record of what was decided",
+        stillReadable.ok && stillReadable.payload.data.case.status === "CLEARED");
+
+      // Put the fixtures back: rejecting the disputes restores the lessons to
+      // COMPLETED and keeps them out of any later risk count.
+      for (const id of [disputeId, secondDisputeId].filter(Boolean)) {
+        await admin(`/api/admin/disputes/${id}`, {
+          method: "POST",
+          body: { resolution: "REJECTED", note: "QA run — fixture cleanup, not a real decision." },
+        });
+      }
+
+      const restored = await admin(`/api/bookings/${completedForDispute.id}`);
+      check("the lesson fixture is restored for the next run",
+        restored.payload?.data?.booking?.status === "COMPLETED",
+        restored.payload?.data?.booking?.status);
+    }
+  }
+
+  if (riskSettingsBefore) {
+    const restoredRisk = await admin("/api/admin/settings", {
+      method: "PATCH",
+      body: { risk: riskSettingsBefore },
+    });
+    check("risk settings are restored after the run", restoredRisk.ok);
+  }
+
+  const riskDisabled = await admin("/api/admin/settings", {
+    method: "PATCH",
+    body: { risk: { highScore: 1, reviewScore: 5 } },
+  });
+  check("a high-risk threshold below the review threshold is refused",
+    riskDisabled.status === 422);
+
   // --- Validation ----------------------------------------------------------
   section("Validation");
 

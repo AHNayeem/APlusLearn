@@ -65,7 +65,10 @@ ad-hoc JSON responses, and never let a raw driver error reach the client.
 
 - **Single implementation of each business rule.** Pricing only in [src/lib/booking/pricing.js](src/lib/booking/pricing.js); every cancellation path (student, tutor, admin, dispute) resolves through [src/lib/booking/policy.js](src/lib/booking/policy.js), which also owns whether an unpaid booking may give its slot back (`shouldReleaseHold`, `failureReleasesHold`). Don't add a second calculation.
 - **`PENDING_PAYMENT` holds a slot; `EXPIRED` does not.** An unpaid booking blocks the tutor's calendar for `Settings.checkoutHoldMinutes` (default [`CHECKOUT_HOLD`](src/constants/config.js)), after which the `booking-expiry` job releases it. Anything that adds a booking status must decide deliberately whether it belongs in `BLOCKING_BOOKING_STATUSES`.
-- **Scheduled work is one registry.** Jobs are registered in [src/services/scheduler.service.js](src/services/scheduler.service.js) and invoked through `/api/cron/<job>`; each claims its work atomically so overlapping runs are safe. Add to the registry and to `vercel.json`, not to a second scheduler.
+- **Scheduled work is one registry.** Jobs are registered in [src/services/scheduler.service.js](src/services/scheduler.service.js) and invoked through `/api/cron/<job>`; each claims its work atomically so overlapping runs are safe. Add to the registry and to `vercel.json`, not to a second scheduler. No read path may *depend* on a job having run — `promotion-expiry` is the clearest case: discovery derives whether a promotion is live from the clock on every request, and the job only settles the stored record.
+- **Promotion reorders discovery; it never widens it.** [src/lib/search/promotion.js](src/lib/search/promotion.js) is the whole rule. A promoted read applies the identical filter the visitor's search built, so an ineligible tutor can never be promoted into results. Promotion applies to the default `RELEVANCE` ordering only — an explicit sort is the visitor's instruction — and every promoted result is labelled. Neither of those two is a setting.
+- **Analytics are aggregated in MongoDB, from payments.** Money comes from `Payment` on `paidAt`, never from summing booking prices (which counts abandoned checkouts as revenue). Refunds are subtracted pro rata per payment, and referral credit is a platform cost, not a discount. Periods are half-open and time-zone aware via [src/lib/analytics/range.js](src/lib/analytics/range.js). Never reduce a figure from a paged array.
+- **Risk detects; it never punishes.** [src/services/risk.service.js](src/services/risk.service.js) is the only place fraud logic lives. Every signal carries a `dedupeKey` derived from the event, so replays record once, and every call site uses `safelyRecordRiskSignal` so detection can never break the action being taken. No score restricts an account — an administrator does, from user management.
 - **The client supplies intent, never state.** Amounts, commission and statuses are derived server-side from stored data. `bun run qa` asserts an injected `price` or `status` is ignored.
 - **Ownership is checked against the loaded DB record**, never a request field (`requireOwnership`, `requireParticipant`, `ownsOrAdmin`).
 - **`isSearchable` is derived**, not client-set — it gates every public tutor query, so an unapproved profile cannot surface in search.
@@ -106,6 +109,11 @@ Two integrations are shaped slightly differently and it matters:
 
 Dev test cards: `4242 4242 4242 4242` succeeds, anything ending `0002` is declined.
 
+Run the dev server with `PAYMENT_PROVIDER=development` when working on Phase 2
+features — the repository's Stripe test credentials are not valid, and a real
+Stripe call failing mid-suite takes `bun run qa` down with it rather than
+failing one assertion.
+
 ### UI
 
 Tailwind v4 with design tokens in [src/app/globals.css](src/app/globals.css); primitives in
@@ -119,3 +127,6 @@ e.g. no ref writes during render (see the note in [src/hooks/useAsync.js](src/ho
 (`§6`, `§42`, …) are cited throughout the code comments.
 [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) is the coverage matrix mapping each requirement to
 its implementation and status — update it when behaviour changes.
+[APLUS_LEARN_PHASE2_IMPLEMENTATION_AUDIT.md](APLUS_LEARN_PHASE2_IMPLEMENTATION_AUDIT.md) audits all
+twelve §41 Phase 2 features, and is where the specification gaps and their
+configurable defaults are listed.

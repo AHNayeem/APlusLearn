@@ -120,6 +120,9 @@ PaymentSchema.pre("validate", async function requireExactlyOneSubject() {
 
 PaymentSchema.index({ purchaserId: 1, createdAt: -1 });
 PaymentSchema.index({ status: 1, paidAt: -1 });
+// A tutor's own revenue analytics, which filter by tutor before the window
+// (§41 Phase 2). Without this the tutor panel scans every settled payment.
+PaymentSchema.index({ tutorUserId: 1, status: 1, paidAt: -1 });
 
 export const Payment = mongoose.models.Payment || mongoose.model("Payment", PaymentSchema);
 

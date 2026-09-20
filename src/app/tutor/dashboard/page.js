@@ -12,6 +12,7 @@ import { tutorEarnings } from "@/services/payment.service";
 import { listConversations } from "@/services/message.service";
 import { listReviews } from "@/services/review.service";
 import { listOpenRequestsForTutor } from "@/services/request.service";
+import { currentPromotionForTutor } from "@/services/promotion.service";
 import {
   Alert, Avatar, Badge, Button, Card, CardBody, CardHeader, EmptyState, Rating, StatCard,
 } from "@/components/ui";
@@ -40,6 +41,24 @@ export default async function TutorDashboardPage() {
       <DashboardPage>
         <PageHeader title={`Welcome, ${user.firstName}`} />
         <ApplicationStatusBanner application={application} profile={profile} />
+
+      {/* A tutor should know why their enquiries jumped, and when it stops.
+          Read-only: promotions are an administrator's decision (§41 Phase 2). */}
+      {promotion && (
+        <Alert
+          tone={promotion.isLive ? "success" : "info"}
+          title={
+            promotion.isLive
+              ? "Your profile is being promoted"
+              : `Your profile is scheduled to be promoted from ${formatDateTime(promotion.startsAt)}`
+          }
+          className="mb-6"
+        >
+          {promotion.isLive
+            ? `APlus Learn is showing your profile higher in search results until ${formatDateTime(promotion.endsAt)}. Promoted results are labelled for families.`
+            : `The placement runs until ${formatDateTime(promotion.endsAt)}.`}
+        </Alert>
+      )}
         <EmptyState
           icon={<Star className="size-7" />}
           title="Your tutor profile isn't set up yet"
@@ -50,14 +69,16 @@ export default async function TutorDashboardPage() {
     );
   }
 
-  const [summary, upcoming, earnings, conversations, reviews, requests] = await Promise.all([
-    bookingSummary(user),
-    listBookings(user, { scope: "UPCOMING", page: 1, pageSize: 4 }),
-    tutorEarnings(user.id, { days: 30 }),
-    listConversations(user, { pageSize: 4 }),
-    listReviews(user, { pageSize: 3 }),
-    listOpenRequestsForTutor(user, { pageSize: 3 }),
-  ]);
+  const [summary, upcoming, earnings, conversations, reviews, requests, promotion] =
+    await Promise.all([
+      bookingSummary(user),
+      listBookings(user, { scope: "UPCOMING", page: 1, pageSize: 4 }),
+      tutorEarnings(user.id, { days: 30 }),
+      listConversations(user, { pageSize: 4 }),
+      listReviews(user, { pageSize: 3 }),
+      listOpenRequestsForTutor(user, { pageSize: 3 }),
+      currentPromotionForTutor(profile.id),
+    ]);
 
   return (
     <DashboardPage>

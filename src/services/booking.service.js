@@ -63,6 +63,7 @@ import {
 } from "./payment.service";
 import { notify } from "./notification.service";
 import { recordAudit } from "./audit.service";
+import { reportCancellationAbuse, checkNoShowPattern } from "./risk.service";
 import { refreshNextAvailable } from "./availability.service";
 import {
   externalBusyPeriods,
@@ -1348,6 +1349,11 @@ async function assessAbuse(actor, role, settings) {
 
   const assessment = assessCancellationAbuse(count, settings);
 
+  // The policy already decided whether this is abuse; the risk service only
+  // makes its strongest verdict reachable by an administrator, which is what
+  // "needs an administrator's review" was always supposed to mean (§41).
+  await reportCancellationAbuse({ userId: actor.id, assessment });
+
   if (assessment.action !== "NONE") {
     await notify({
       userId: actor.id,
@@ -1562,6 +1568,14 @@ export async function reportNoShow(id, { party, note }, actor) {
     entityType: "Booking",
     entityId: booking._id,
     metadata: { party, role, refundCents: refund.refundCents, note },
+  });
+
+  // One missed lesson is life; a pattern of them is worth a look. The count
+  // is taken from the bookings themselves, not from this report (§41).
+  await checkNoShowPattern({
+    userId: party === "TUTOR" ? booking.tutorUserId : booking.purchaserId,
+    role: party,
+    bookingId: booking._id,
   });
 
   return toPlain(booking);

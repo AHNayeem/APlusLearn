@@ -239,6 +239,11 @@ Verified on a clean database: `npm run seed` → `npx eslint src scripts` (clean
 |---|---|---|
 | All 12 required metrics | `services/analytics.service.js`, `/admin/analytics` | Implemented |
 | Decision-oriented, not decorative | Action queues first; supply gaps by city; period-over-period trends | Implemented |
+| Money derived from settled payments | Aggregated from `Payment` on `paidAt`, never by summing booking prices — an abandoned checkout is not revenue. Refunds are subtracted pro rata per payment; referral credit is a platform cost, not a discount | Implemented |
+| Reporting periods | `lib/analytics/range.js` — half-open windows, explicit `from`/`to` or a rolling `days`, time-zone aware bucketing that adapts day → week → month | Implemented |
+| Phase 2 feature analytics | `phaseTwoAnalytics()` — request match rate, matching conversion, package utilisation, group fill rate, referral conversion, promotions | Implemented |
+| Tutor's own analytics | `tutorAnalytics()` on `/tutor/earnings`; resolved from the session, with no owner parameter to tamper with | Implemented |
+| Student analytics | Named as Phase 3 in §41 — deliberately not built | Deferred |
 
 ## 26. Cancellation / refund / no-show
 
@@ -249,7 +254,7 @@ Verified on a clean database: `npm run seed` → `npx eslint src scripts` (clean
 | Full / partial refund | `resolveCancellation()`; QA asserts the refund matches the policy for the actual notice given | Implemented |
 | No-show handling | `reportNoShow()`, `resolveNoShow()` — authorized against the stored participants, and only ever against the opposite party. A lesson whose outcome is already settled is refused (`NOT_REPORTABLE`), so the same refund cannot be issued twice, and every report is audited | Implemented |
 | Dispute & admin review | `/admin/disputes/[id]` with refund adjudication | Implemented |
-| Abuse tracking, warnings, suspension | `assessCancellationAbuse()` + admin suspend | Implemented |
+| Abuse tracking, warnings, suspension | `assessCancellationAbuse()` decides; its "needs review" verdict now raises a risk signal so an administrator actually sees it (`risk.service.js`, `/admin/risk`). Suspension stays a deliberate admin act — no score restricts an account | Implemented |
 | Rules centralised | All paths resolve through `src/lib/booking/policy.js` | Implemented |
 
 ## 26b. Platform settings & application configuration
@@ -438,15 +443,32 @@ and webhook endpoints.
 | Every MVP interaction actually works | 70/70 QA checks exercise real APIs; no "coming soon" on MVP paths | Implemented |
 | Realistic Ontario seed data | 12 tutors with genuine biographies, 38 real course codes, 54 bookings, 18 written reviews | Implemented |
 
-## 41. Phase 2 / Phase 3 readiness
+## 41. Phase 2 / Phase 3
 
-| Item | Architectural hook | Status |
+All twelve Phase 2 features are built. The full audit — evidence, tests, the
+specification gaps and the configurable default chosen for each — is
+[APLUS_LEARN_PHASE2_IMPLEMENTATION_AUDIT.md](../APLUS_LEARN_PHASE2_IMPLEMENTATION_AUDIT.md).
+
+| Phase 2 item | Implementation | Status |
 |---|---|---|
-| Calendar sync | `Availability.externalCalendars`, `CalendarProvider` | Phase 2 |
-| SMS / push | `NOTIFICATION_CHANNELS`, `deliveredChannels` | Phase 2 |
-| Message attachments | `Message.attachments` schema | Phase 2 |
-| Advanced matching | `MATCH_WEIGHTS` extension point | Phase 2 |
+| Advanced tutor requests | `TutorRequest`, `request.service.js` | Implemented |
+| Advanced matching | `lib/matching/` + operator-tunable `matchWeights` | Implemented |
+| Google Calendar | `CalendarProvider`, `calendar.service.js`, `calendar-sync` job | Implemented |
+| Outlook / Microsoft Calendar | Same interface, Microsoft Graph adapter | Implemented |
+| SMS | `sms.service.js`, Twilio adapter, off until a carrier is configured | Implemented |
+| Referrals | `Referral`, `CreditEntry`, `credit.service.js` | Implemented |
+| Tutor packages | `TutorPackage`, `PackagePurchase`, `package-expiry` job | Implemented |
+| Group tutoring | `GroupSession`, `GroupEnrolment`, `group-settlement` job | Implemented |
+| Progress reports | `ProgressReport`, `progress.service.js` | Implemented |
+| Promoted profiles | `TutorPromotion`, `lib/search/promotion.js`, `promotion-expiry` job | Implemented |
+| Advanced analytics | `analytics.service.js`, `lib/analytics/range.js` | Implemented |
+| Fraud / risk tools | `RiskCase`, `risk.service.js`, `/admin/risk` | Implemented |
+
+| Still deferred | Architectural hook | Status |
+|---|---|---|
+| Message attachments | `Message.attachments` schema | Phase 2 backlog |
 | Additional provinces | Province/Grade/Course collections + admin curriculum manager | Ready now |
+| Student analytics | `analytics.service.js` is role-scoped and extensible | Phase 3 |
 | Native apps | API-first design; every screen is backed by a JSON endpoint | Phase 3 |
 
 ## 42. Core business rules
@@ -576,13 +598,15 @@ no queue or worker process.
 
 ### Not implemented
 
-1. **Calendar sync.** `CalendarProvider` is declared and `Availability`
-   already stores `externalCalendars`, but nothing implements it (Phase 2).
-3. **SMS and push notifications.** The channels exist on the model and in
-   `NOTIFICATION_CHANNELS`; only in-app and email are delivered (Phase 2).
-4. **Google Meet and Microsoft Teams.** They reach the same `MeetingProvider`
-   interface, but each needs a per-host OAuth grant rather than the account
-   credential Zoom uses.
+1. **Push notifications.** The channel exists on the model and in
+   `NOTIFICATION_CHANNELS`. In-app, email and SMS are delivered; push is not.
+2. **Message attachments.** `Message.attachments` is on the schema and unused.
+3. **Student-facing analytics.** Named as Phase 3 in §41.
+
+Calendar sync (Google and Microsoft), SMS, and the Google Meet and Microsoft
+Teams meeting adapters are all implemented. Each needs real provider
+credentials before it does anything in production — see the audit's
+"What still needs real credentials".
 
 ### Scope
 

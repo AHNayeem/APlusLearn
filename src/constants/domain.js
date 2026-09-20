@@ -406,6 +406,8 @@ export const NOTIFICATION_TYPES = {
   PAYOUT_UPDATED: "PAYOUT_UPDATED",
   REVIEW_RECEIVED: "REVIEW_RECEIVED",
   DISPUTE_UPDATED: "DISPUTE_UPDATED",
+  PROFILE_PROMOTED: "PROFILE_PROMOTED",
+  ACCOUNT_UNDER_REVIEW: "ACCOUNT_UNDER_REVIEW",
 };
 
 export const NOTIFICATION_CHANNELS = {
@@ -750,6 +752,170 @@ export const SEAT_HOLDING_ENROLMENT_STATUSES = [
   GROUP_ENROLMENT_STATUS.CONFIRMED,
 ];
 
+/**
+ * Promoted tutor profiles (§41 Phase 2).
+ *
+ * A promotion is an administrator's decision to give an already-eligible
+ * tutor a better position in discovery for a bounded window. It is never a
+ * visibility grant: every promoted result is still drawn through the same
+ * `isSearchable` gate and the same filters as an unpromoted one, so a
+ * promotion can change *where* a tutor appears and never *whether* they do
+ * (§42).
+ *
+ * SCHEDULED is a promotion that has been created but whose window has not
+ * opened. PAUSED is an administrator stopping one early without destroying
+ * the record. EXPIRED and CANCELLED are terminal, and a terminal promotion is
+ * never reopened — an operator creates a new one, so the history of what ran
+ * when stays readable.
+ */
+export const PROMOTION_STATUS = {
+  SCHEDULED: "SCHEDULED",
+  ACTIVE: "ACTIVE",
+  PAUSED: "PAUSED",
+  EXPIRED: "EXPIRED",
+  CANCELLED: "CANCELLED",
+};
+
+export const PROMOTION_STATUS_LABELS = {
+  SCHEDULED: "Scheduled",
+  ACTIVE: "Running",
+  PAUSED: "Paused",
+  EXPIRED: "Finished",
+  CANCELLED: "Cancelled",
+};
+
+/**
+ * Statuses a promotion can still move out of. One tutor may hold at most one
+ * promotion in this set at a time, which is what stops two overlapping
+ * windows from arguing about who is promoted.
+ */
+export const OPEN_PROMOTION_STATUSES = [
+  PROMOTION_STATUS.SCHEDULED,
+  PROMOTION_STATUS.ACTIVE,
+  PROMOTION_STATUS.PAUSED,
+];
+
+/** Nothing moves out of these. */
+export const TERMINAL_PROMOTION_STATUSES = [
+  PROMOTION_STATUS.EXPIRED,
+  PROMOTION_STATUS.CANCELLED,
+];
+
+/**
+ * Fraud and risk (§41 Phase 2).
+ *
+ * The platform already detected several kinds of trouble before this existed
+ * — repeated cancellations, referral abuse, disputes — and then did nothing
+ * durable with any of it. A risk case is the missing piece: one record per
+ * account, holding every signal that fired, so an administrator can see what
+ * happened, why it was flagged, and what was decided.
+ *
+ * **Nothing here punishes anybody automatically.** The requirements name
+ * "fraud/risk tools" and define no penalty, no threshold and no restriction,
+ * so the platform detects and surfaces, and a person decides. The only
+ * restriction the system can apply is the suspension an administrator was
+ * always able to apply by hand — reached from a case, recorded on it, and
+ * never triggered by a score.
+ */
+export const RISK_SIGNALS = {
+  REPEATED_CANCELLATIONS: "REPEATED_CANCELLATIONS",
+  NO_SHOW_PATTERN: "NO_SHOW_PATTERN",
+  PAYMENT_FAILURES: "PAYMENT_FAILURES",
+  REPEATED_DISPUTES: "REPEATED_DISPUTES",
+  REFERRAL_ABUSE: "REFERRAL_ABUSE",
+};
+
+export const RISK_SIGNAL_LABELS = {
+  REPEATED_CANCELLATIONS: "Repeated cancellations",
+  NO_SHOW_PATTERN: "Pattern of not attending",
+  PAYMENT_FAILURES: "Repeated payment failures",
+  REPEATED_DISPUTES: "Several disputes raised against this account",
+  REFERRAL_ABUSE: "Referral scheme abuse",
+};
+
+export const RISK_SIGNAL_DESCRIPTIONS = {
+  REPEATED_CANCELLATIONS:
+    "Cancelled more lessons inside the platform's rolling window than its cancellation-abuse threshold allows, twice over.",
+  NO_SHOW_PATTERN: "Did not attend lessons that were paid for and confirmed.",
+  PAYMENT_FAILURES:
+    "Several payment attempts were declined, which can indicate a stolen or tested card.",
+  REPEATED_DISPUTES: "Other people have opened disputes naming this account.",
+  REFERRAL_ABUSE:
+    "A referral this account was part of was flagged — shared numbers, or sign-ups faster than a person plausibly refers friends.",
+};
+
+/**
+ * Case lifecycle.
+ *
+ * OPEN is "something fired and nobody has looked". UNDER_REVIEW is an
+ * administrator taking it. CONFIRMED and CLEARED are both resolutions and
+ * both terminal — the difference is what was concluded, which matters because
+ * a cleared case is the evidence that an account was investigated and found
+ * fine.
+ */
+export const RISK_CASE_STATUS = {
+  OPEN: "OPEN",
+  UNDER_REVIEW: "UNDER_REVIEW",
+  CONFIRMED: "CONFIRMED",
+  CLEARED: "CLEARED",
+};
+
+export const RISK_CASE_STATUS_LABELS = {
+  OPEN: "Needs review",
+  UNDER_REVIEW: "Being reviewed",
+  CONFIRMED: "Confirmed",
+  CLEARED: "Cleared",
+};
+
+/** Cases still needing a decision. One per account at a time. */
+export const OPEN_RISK_CASE_STATUSES = [
+  RISK_CASE_STATUS.OPEN,
+  RISK_CASE_STATUS.UNDER_REVIEW,
+];
+
+export const RESOLVED_RISK_CASE_STATUSES = [
+  RISK_CASE_STATUS.CONFIRMED,
+  RISK_CASE_STATUS.CLEARED,
+];
+
+/**
+ * How loud a case is.
+ *
+ * Derived from how many distinct signals fired inside the window, against
+ * operator-set thresholds — never set by a client, and never by itself a
+ * reason for the platform to act.
+ */
+export const RISK_LEVELS = {
+  LOW: "LOW",
+  MEDIUM: "MEDIUM",
+  HIGH: "HIGH",
+};
+
+export const RISK_LEVEL_LABELS = {
+  LOW: "Low",
+  MEDIUM: "Medium",
+  HIGH: "High",
+};
+
+/**
+ * What an administrator did about a case.
+ *
+ * `ACCOUNT_SUSPENDED` records that the existing suspension was applied; it is
+ * not a second restriction mechanism, and the suspension itself still goes
+ * through the ordinary user-management path with its own audit entry.
+ */
+export const RISK_ACTIONS = {
+  NONE: "NONE",
+  WARNING_ISSUED: "WARNING_ISSUED",
+  ACCOUNT_SUSPENDED: "ACCOUNT_SUSPENDED",
+};
+
+export const RISK_ACTION_LABELS = {
+  NONE: "No action taken",
+  WARNING_ISSUED: "Warning sent to the account",
+  ACCOUNT_SUSPENDED: "Account suspended",
+};
+
 export const ATTENDANCE = {
   PRESENT: "PRESENT",
   ABSENT: "ABSENT",
@@ -826,6 +992,16 @@ export const QUALIFICATION_LABELS = {
 };
 
 export const AUDIT_ACTIONS = {
+  RISK_SIGNAL_RECORDED: "RISK_SIGNAL_RECORDED",
+  RISK_CASE_OPENED: "RISK_CASE_OPENED",
+  RISK_CASE_REVIEWED: "RISK_CASE_REVIEWED",
+  RISK_CASE_RESOLVED: "RISK_CASE_RESOLVED",
+  PROMOTION_CREATED: "PROMOTION_CREATED",
+  PROMOTION_ACTIVATED: "PROMOTION_ACTIVATED",
+  PROMOTION_PAUSED: "PROMOTION_PAUSED",
+  PROMOTION_EXTENDED: "PROMOTION_EXTENDED",
+  PROMOTION_CANCELLED: "PROMOTION_CANCELLED",
+  PROMOTION_EXPIRED: "PROMOTION_EXPIRED",
   GROUP_SESSION_PUBLISHED: "GROUP_SESSION_PUBLISHED",
   GROUP_SESSION_CANCELLED: "GROUP_SESSION_CANCELLED",
   GROUP_SESSION_COMPLETED: "GROUP_SESSION_COMPLETED",

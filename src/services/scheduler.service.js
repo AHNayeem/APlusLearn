@@ -8,6 +8,7 @@ import { expireStaleRequests } from "./request.service";
 import { syncStaleCalendars } from "./calendar.service";
 import { expirePackages } from "./package.service";
 import { settleUnderfilledSessions } from "./group.service";
+import { expirePromotions } from "./promotion.service";
 import { recordAudit } from "./audit.service";
 
 /**
@@ -41,6 +42,7 @@ export const JOBS = {
   CALENDAR_SYNC: "calendar-sync",
   PACKAGE_EXPIRY: "package-expiry",
   GROUP_SETTLEMENT: "group-settlement",
+  PROMOTION_EXPIRY: "promotion-expiry",
 };
 
 /**
@@ -97,6 +99,13 @@ const REGISTRY = {
       "Decides the fate of group sessions that have reached their confirmation deadline: confirms the ones that filled, and cancels and fully refunds the ones that did not. Each session is claimed on its PUBLISHED status before anything is refunded, so a repeat run refunds nothing twice.",
     suggestedCron: "*/30 * * * *",
     run: (options) => settleUnderfilledSessions(options),
+  },
+  [JOBS.PROMOTION_EXPIRY]: {
+    name: "Promoted profile windows",
+    description:
+      "Opens promoted placements whose start date has arrived and closes the ones whose end date has passed. Discovery does not depend on this job — every search derives whether a promotion is live from the clock — so this keeps the stored record and the admin console honest rather than keeping the marketplace correct. Each promotion is claimed on the status it is expected to be in, so a repeat run changes nothing.",
+    suggestedCron: "*/30 * * * *",
+    run: (options) => expirePromotions(options),
   },
   [JOBS.CALENDAR_SYNC]: {
     name: "External calendar sync",

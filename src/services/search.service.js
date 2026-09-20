@@ -9,8 +9,10 @@ import {
   buildTutorSort,
   availabilityWindowFilter,
 } from "@/lib/search/tutor-query";
+import { promotionAffectsSort, promotedPageSlice, promotionLimits } from "@/lib/search/promotion";
 import { toPublicTutor, attachAvailableWeekdays } from "./tutor.service";
 import { getSettings } from "./settings.service";
+import { livePromotedProfileIds } from "./promotion.service";
 
 /**
  * Tutor search (§14).
@@ -48,15 +50,16 @@ export async function searchTutors(params, { viewerId } = {}) {
 
   const sort = buildTutorSort(params.sort);
 
-  const [docs, total] = await Promise.all([
-    TutorProfile.find(query)
-      .sort(sort)
-      .skip((params.page - 1) * pageSize)
-      .limit(pageSize)
-      .populate("userId", "firstName lastName avatarUrl")
-      .lean(),
-    TutorProfile.countDocuments(query),
-  ]);
+  const { docs, total, promotedIds } = await readPage({
+    query,
+    sort,
+    page: params.page,
+    pageSize,
+    settings,
+    // An explicit ordering is an instruction from the visitor, and promotion
+    // stands down in front of it. See lib/search/promotion.js.
+    allowPromotion: promotionAffectsSort(params.sort),
+  });
 
   // Saved state, so the heart on each card renders correctly on first paint.
   let favouriteIds = new Set();
@@ -75,6 +78,9 @@ export async function searchTutors(params, { viewerId } = {}) {
       distanceKm: coordinates ? distanceKm(coordinates, profile.location?.coordinates ?? []) : null,
     }),
     isFavourite: favouriteIds.has(String(profile._id)),
+    // Disclosed, always. A paid placement a visitor cannot see is an
+    // advertising problem, not a ranking one.
+    isPromoted: promotedIds.has(String(profile._id)),
     // Show the rate for the searched course, not just the base rate.
     displayRateCents: resolved.course
       ? (profile.courses?.find((c) => String(c.courseId) === resolved.course.id)?.hourlyRateCents ??
@@ -101,6 +107,86 @@ export async function searchTutors(params, { viewerId } = {}) {
       coordinates,
       radiusKm: params.distanceKm ?? settings.defaultSearchRadiusKm,
     },
+  };
+}
+
+/**
+ * Read one page of tutors, with the promotion adjustment applied last (§41).
+ *
+ * The ordering this produces is: the boosted tutors, in their normal ranked
+ * order, then everyone else, in their normal ranked order. Both halves are
+ * drawn with the *same* filter — the one the visitor's search built, starting
+ * at `isSearchable: true` — so a promotion can only ever move a tutor who was
+ * already going to be in these results. It cannot add one, and it cannot
+ * change how many there are.
+ *
+ * Why two reads rather than one sorted on a computed field: a computed sort
+ * key cannot use an index, so every search would sort the whole matched set
+ * in memory. The boosted read is bounded by the operator's ceiling (a handful
+ * of ids), and the remainder read is the query this function replaced,
+ * unchanged and still index-backed.
+ */
+async function readPage({ query, sort, page, pageSize, settings, allowPromotion }) {
+  const total = await TutorProfile.countDocuments(query);
+  const { maxPromotedPerSearch } = promotionLimits(settings);
+
+  const read = (extra, skip, limit) =>
+    limit <= 0
+      ? Promise.resolve([])
+      : TutorProfile.find({ ...query, ...extra })
+          .sort(sort)
+          .skip(skip)
+          .limit(limit)
+          .populate("userId", "firstName lastName avatarUrl")
+          .lean();
+
+  const candidateIds = allowPromotion
+    ? await livePromotedProfileIds({ settings })
+    : [];
+
+  if (!candidateIds.length) {
+    return {
+      docs: await read({}, (page - 1) * pageSize, pageSize),
+      total,
+      promotedIds: new Set(),
+    };
+  }
+
+  // Which promoted tutors survive this search's own filters, best-ranked
+  // first, capped at the fairness ceiling. A promoted tutor who does not
+  // match the filters simply is not here — promotion is not a bypass.
+  const boosted = await TutorProfile.find({ ...query, _id: { $in: candidateIds } })
+    .sort(sort)
+    .limit(maxPromotedPerSearch)
+    .select("_id")
+    .lean();
+
+  const boostedIds = boosted.map((d) => d._id);
+  if (!boostedIds.length) {
+    return {
+      docs: await read({}, (page - 1) * pageSize, pageSize),
+      total,
+      promotedIds: new Set(),
+    };
+  }
+
+  const slice = promotedPageSlice({
+    promotedCount: boostedIds.length,
+    page,
+    pageSize,
+  });
+
+  const [promotedDocs, normalDocs] = await Promise.all([
+    read({ _id: { $in: boostedIds } }, slice.promotedSkip, slice.promotedLimit),
+    // Excluding the boosted ids is what stops a promoted tutor being shown
+    // twice — once lifted, once again in their natural position.
+    read({ _id: { $nin: boostedIds } }, slice.normalSkip, slice.normalLimit),
+  ]);
+
+  return {
+    docs: [...promotedDocs, ...normalDocs],
+    total,
+    promotedIds: new Set(boostedIds.map(String)),
   };
 }
 
@@ -200,20 +286,35 @@ export async function searchFacets(params) {
   };
 }
 
-/** Homepage and course-page rails. */
+/**
+ * Homepage and course-page rails.
+ *
+ * These are a "best match" shortlist with no visitor-chosen ordering, so a
+ * promotion applies here for the same reason it applies to the default search
+ * sort — and is disclosed here the same way (§41 Phase 2).
+ */
 export async function featuredTutors({ limit = 6, courseId, subjectSlug, province } = {}) {
   const query = { isSearchable: true, acceptingNewStudents: true };
   if (courseId) query.courseIds = courseId;
   if (subjectSlug) query.subjectSlugs = subjectSlug;
   if (province) query.provinceCodes = String(province).toUpperCase();
 
-  const docs = await TutorProfile.find(query)
-    .sort({ "stats.ratingAverage": -1, "stats.ratingCount": -1, "stats.completedLessons": -1 })
-    .limit(limit)
-    .populate("userId", "firstName lastName avatarUrl")
-    .lean();
+  const settings = await getSettings();
+  const { docs, promotedIds } = await readPage({
+    query,
+    sort: buildTutorSort("RELEVANCE"),
+    page: 1,
+    pageSize: limit,
+    settings,
+    allowPromotion: true,
+  });
 
-  return attachAvailableWeekdays(docs.map((profile) => toPublicTutor(profile, profile.userId)));
+  return attachAvailableWeekdays(
+    docs.map((profile) => ({
+      ...toPublicTutor(profile, profile.userId),
+      isPromoted: promotedIds.has(String(profile._id)),
+    })),
+  );
 }
 
 /** Marketplace supply counts used across public pages. */

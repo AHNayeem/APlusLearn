@@ -17,6 +17,7 @@ import { toPlain } from "@/lib/utils/serialize";
 import { publicName, formatMoney } from "@/lib/utils/format";
 import { addDays } from "@/lib/utils/time";
 import { getSettings } from "./settings.service";
+import { reportReferralRisk } from "./risk.service";
 import { grantCredit, clawBackCredit } from "./credit.service";
 import { notify } from "./notification.service";
 import { recordAudit } from "./audit.service";
@@ -180,6 +181,17 @@ export async function attributeReferral({ code, refereeUserId, email, ip }) {
       riskFlags: flags,
       signupIpHash: ip ? hashIp(ip) : undefined,
     });
+
+    // The flags were computed above; this only brings them somewhere an
+    // administrator will see them next to whatever else the account has been
+    // doing (§41 Phase 2). It never blocks the sign-up.
+    if (flags.length) {
+      await reportReferralRisk({
+        referrerUserId: referrer._id,
+        referralId: referral._id,
+        flags,
+      });
+    }
 
     await notify({
       userId: referrer._id,

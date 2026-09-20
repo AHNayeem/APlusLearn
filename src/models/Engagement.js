@@ -110,6 +110,8 @@ const ReviewSchema = new mongoose.Schema(
 );
 
 ReviewSchema.index({ tutorProfileId: 1, status: 1, createdAt: -1 });
+// Per-tutor review counts and averages over a reporting window (§41 Phase 2).
+ReviewSchema.index({ tutorUserId: 1, createdAt: -1 });
 ReviewSchema.index({ status: 1, reportedAt: -1 });
 ReviewSchema.index({ reportStatus: 1, reportedAt: -1 });
 

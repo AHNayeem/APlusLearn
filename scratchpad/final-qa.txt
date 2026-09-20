@@ -1,0 +1,611 @@
+$ node scripts/qa.mjs
+
+APlus Learn QA → http://localhost:3000
+────────────────────────────────────────────────────────
+
+▸ Public marketplace (no account)
+  ✓ search tutors without signing in
+  ✓ search results never expose a surname
+  ✓ search results never expose coordinates
+  ✓ course lookup by code
+  ✓ autocomplete by course name
+  ✓ availability is public
+
+▸ Authorization
+  ✓ anonymous cannot list bookings
+  ✓ anonymous cannot reach admin API
+  ✓ parent, tutor and admin all signed in
+  ✓ parent forbidden from admin API
+  ✓ tutor forbidden from admin settings
+  ✓ parent forbidden from tutor API
+  ✓ bad credentials rejected
+  ✓ unknown account gives nothing away
+
+▸ Parent journey
+  ✓ parent sees their own children
+  ✓ missing child returns 404
+  ✓ price quote computed server-side
+  ✓ commission + earnings equals subtotal exactly
+  ✓ tutor has bookable slots
+  ✓ booking created
+  ✓ booking starts unconfirmed until paid
+  ✓ double-booking the same slot is rejected
+  ✓ declined card is reported, not swallowed
+  ✓ payment captured
+  ✓ booking confirmed after payment
+  ✓ online lesson gets a meeting link
+  ✓ receipt available after payment
+  ✓ parent can message a tutor
+  ✓ conversation appears in the inbox
+  ✓ tutor has an inbox
+  ✓ tutor can reply in their own thread
+  ✓ admin can audit any conversation
+  ✓ tutor cannot post into a conversation they aren't in
+  ✓ tutor can be saved
+  ✓ saved tutor appears in favourites
+  ✓ tutor request posted
+  ✓ matching service ran on submit
+  ✓ match list retrievable
+
+▸ Tutor requests — edit, invite, respond, moderate
+  ✓ tutor can read their own profile id
+  ✓ request posted with injected fields
+  ✓ an injected status is ignored — the server decides
+  ✓ an injected reference is ignored
+  ✓ injected counters are ignored
+  ✓ owner can edit an open request
+  ✓ editing re-runs matching
+  ✓ a tutor cannot edit a family's request
+  ✓ a tutor cannot cancel a family's request
+  ✓ an inverted budget is refused on edit
+  ✓ invite-only request posted
+  ✓ an uninvited tutor cannot read an invite-only request
+  ✓ an uninvited tutor cannot respond to an invite-only request
+  ✓ a tutor cannot invite themselves to a request
+  ✓ owner can invite a tutor
+  ✓ the invitation counted exactly one tutor
+  ✓ an invited tutor can now read the request
+  ✓ the tutor view carries their own match state
+  ✓ the tutor view says they may respond
+  ✓ an invited tutor can respond
+  ✓ a tutor cannot respond twice
+  ✓ a tutor can withdraw their response
+  ✓ a family cannot read the moderation queue
+  ✓ a tutor cannot read the moderation queue
+  ✓ admin can read the moderation queue
+  ✓ a family cannot moderate a request
+  ✓ admin can remove a request
+  ✓ a removed request is REMOVED
+  ✓ a removed request is invisible to tutors
+  ✓ admin can restore a removed request
+  ✓ a restored request is open again
+  ✓ moderation without a recorded reason is refused
+  ✓ a closed request reads as CLOSED
+  ✓ a closed request cannot be edited
+
+▸ Group sessions — capacity, privacy and authorization
+  ✓ group sessions are browsable without an account
+  ✓ a public listing never carries a private address
+  ✓ a family cannot create a group session
+  ✓ a minimum larger than the maximum is refused
+  ✓ a tutor can create a group session
+  ✓ it starts as a draft whatever the request said
+  ✓ seats start empty whatever the request said
+  ✓ commission is the platform's, not the request's
+  ✓ a draft session cannot be joined
+  ✓ a family cannot publish a tutor's session
+  ✓ a tutor can publish their session
+  ✓ publishing opens it for sign-ups
+  ✓ a tutor cannot join their own session
+  ✓ nobody can enrol a learner that is not theirs
+  ✓ a family can take a seat
+  ✓ the seat is held before payment
+  ✓ and an ordinary booking was created for it
+  ✓ the same learner cannot take two seats
+  ✓ a group session is publicly viewable
+  ✓ an anonymous visitor sees no roster
+  ✓ and no meeting link
+  ✓ a family sees their own place
+  ✓ but not who else is in the class
+  ✓ and cannot manage it
+  ✓ the tutor sees the roster
+  ✓ and can manage the session
+  ✓ the roster gives a display name
+  ✓ and carries no other personal detail about the learner
+  ✓ attendance cannot be recorded before the session has finished
+  ✓ a family cannot record attendance
+  ✓ the seat price cannot change once somebody has joined
+  ✓ a family cannot read the admin group list
+  ✓ an administrator can list group sessions
+  ✓ a tutor can cancel their session
+  ✓ and every seat is given back
+
+▸ Packages — pricing rules, ownership and balance
+  ✓ a package dearer per hour than booking singly is refused
+  ✓ a tutor can create a package
+  ✓ a package starts as a draft whatever the request said
+  ✓ the per-session price is derived, not supplied
+  ✓ and so is the advertised saving
+  ✓ a family cannot create a tutor package
+  ✓ a family cannot edit a tutor's package
+  ✓ a draft package cannot be bought
+  ✓ an on-sale package appears on the public profile
+  ✓ a package cannot be bought for a learner that is not yours
+  ✓ a family can buy a package
+  ✓ the purchase waits for payment
+  ✓ and carries the terms as they were at purchase
+  ✓ the family sees their package
+  ✓ the tutor can see a package bought from them
+  ✓ an unpaid package cannot pay for a lesson
+  ✓ and no booking was created for it
+  ✓ an unpaid package is not offered at checkout
+  ✓ nobody can discover somebody else's balances
+  ✓ a family cannot read the admin package list
+  ✓ an administrator can read package purchases
+  ✓ and the totals that reconcile them
+
+▸ Referrals — codes, credit and abuse prevention
+  ✓ a family can read their own referral summary
+  ✓ anonymous cannot read a referral summary
+  ✓ a tutor has a referral code too
+  ✓ two accounts never share a code
+  ✓ a referral code can be checked before signing up
+  ✓ the lookup shows a first name and initial, never a surname
+  ✓ the lookup never reveals the referrer's email
+  ✓ an unknown code answers plainly, without saying why
+  ✓ and gives nothing else away
+  ✓ a new account can register with a referral code
+  ✓ the referrer sees the new sign-up
+  ✓ but no reward is paid before any lessons are taken
+  ✓ the invitee gets their own code
+  ✓ and is shown who invited them
+  ✓ a mistyped code never stops somebody creating an account
+  ✓ a family can read their credit statement
+  ✓ anonymous cannot read a credit statement
+  ✓ a family cannot grant themselves credit
+  ✓ nor can a tutor
+  ✓ an administrator must record why they moved a balance
+  ✓ a family cannot read the referral queue
+  ✓ a tutor cannot read the referral queue
+  ✓ an administrator can read the referral queue
+  ✓ a family cannot reverse a referral
+  ✓ reversing without a recorded reason is refused
+
+▸ Progress reports — authorship, privacy and acknowledgement
+  ✓ a tutor can list the students they may report on
+  ✓ a family cannot read a tutor's student picker
+  ✓ a tutor can start a progress report
+  ✓ a client cannot declare a report already shared, or invent lessons
+  ✓ a family cannot read an unfinished draft
+  ✓ a family cannot reach the tutor's edit endpoint at all
+  ✓ anonymous cannot read a progress report
+  ✓ a draft saves freely
+  ✓ a report with a thin summary cannot be shared
+  ✓ a tutor can share the report
+  ✓ the shared report leaves draft
+  ✓ the family can now read it
+  ✓ the family may acknowledge but not edit
+  ✓ the tutor's private note never reaches the family
+  ✓ the report appears in the family's history
+  ✓ the family can mark it read
+  ✓ acknowledging does not change what the tutor wrote
+  ✓ a tutor cannot acknowledge on the family's behalf
+  ✓ revising a shared report succeeds
+  ✓ and keeps what the family was originally shown
+  ✓ a family cannot read the admin progress list
+  ✓ a tutor cannot read the admin progress list
+  ✓ an administrator can list shared reports
+  ✓ no private note reaches the admin list
+
+▸ Calendar sync — consent, ownership and token safety
+  ✓ anonymous cannot start a calendar connection
+  ✓ a family cannot connect a tutor calendar
+  ✓ an unknown calendar provider is refused
+  ✓ a tutor can start a calendar connection
+  ✓ the consent URL carries a signed state
+  ✓ no client secret is ever put in a URL the browser follows
+  ✓ the callback redirects back to the tutor's calendar
+  ✓ and reports the outcome in the query string
+  ✓ a callback with a forged state does not create a connection
+  ✓ the tutor can list their connections
+  ✓ a connection reports which provider and account it is
+  ✓ no token of any kind reaches the browser
+  ✓ the response says plainly whether the provider is the real service
+  ✓ a family cannot list a tutor's calendar connections
+  ✓ a family cannot change a tutor's calendar connection
+  ✓ a tutor can turn each sync direction off
+  ✓ connection status, account and tokens are not client-settable
+  ✓ a tutor can list the calendars on the connected account
+  ✓ a calendar the account does not have is refused
+  ✓ a tutor can refresh busy periods on demand
+  ✓ a family cannot disconnect a tutor's calendar
+  ✓ a tutor can disconnect their own calendar
+  ✓ the disconnected calendar is gone
+
+▸ Text messages — consent, verification and authorization
+  ✓ anonymous cannot ask for a confirmation code
+  ✓ an invalid mobile number is refused
+  ✓ text notifications cannot be switched on without a confirmed number
+  ✓ a confirmation code can be requested
+  ✓ the response says honestly whether a carrier is configured
+  ✓ the code itself is never returned to the browser
+  ✓ a wrong confirmation code is refused
+  ✓ a malformed code never reaches the service
+  ✓ the number can be removed again
+  ✓ a family cannot read the text delivery log
+  ✓ a tutor cannot read the text delivery log
+  ✓ admin can read the text delivery log
+  ✓ the delivery log masks phone numbers
+  ✓ the delivery log states whether a carrier is configured
+  ✓ an unsigned inbound SMS callback is refused
+  ✓ a forged signature on an inbound callback is refused
+
+▸ Business rules
+  ✓ cannot book in the past
+  ✓ cannot book a course the tutor doesn't teach
+  ✓ client-supplied price and status are ignored
+  ✓ cannot review a lesson that isn't complete
+  ✓ booking cancelled
+  ✓ correct policy applied (8.2h notice → LATE_CANCELLATION)
+  ✓ refund matches the policy exactly
+  ✓ cancellation recorded with the hours of notice
+  ✓ a cancelled lesson cannot be cancelled again
+
+▸ Tutor journey
+  ✓ tutor loads their profile
+  ✓ tutor loads availability
+  ✓ tutor earnings computed
+  ✓ earnings net = gross − commission
+  ✓ tutor sees their roster
+  ✓ tutors never see a learner's email or guardian contact details
+  ✓ minors appear to tutors as first name + initial
+  ✓ adult self-serve students keep their full name
+  ✓ tutor sees verification status
+
+▸ Verification documents (R33)
+  ✗ a tutor can upload a verification document — {"code":"INTERNAL_ERROR","message":"Something went wrong on our end. Please try again."}
+  ✓ the uploader's filename is sanitised before it is stored
+  ✓ the private storage key is NEVER returned to the uploader
+  ✓ a script relabelled as a PDF is REFUSED on its bytes, not its label
+  ✓ a script-capable SVG is REFUSED as a verification document
+  ✓ branding assets are served by setting name, never by storage key
+  ✓ tutor sees open requests
+
+▸ Admin journey
+  ✓ analytics computed
+  ✓ platform revenue is a subset of gross sales
+  ✓ admin lists users
+  ✓ password hashes never leave the server
+  ✓ admin lists applications
+  ✓ admin reads platform settings
+  ✓ admin payout queue
+  ✓ admin lists reviews
+  ✓ admin lists disputes
+
+▸ Platform settings
+  ✓ anonymous cannot read settings
+  ✓ anonymous cannot write settings
+  ✓ a parent cannot write settings
+  ✓ a tutor cannot write settings
+  ✓ a parent cannot upload branding
+  ✓ invalid colour rejected
+  ✓ a primary colour that cannot carry white text is rejected
+  ✓ the shipped accent passes its own rule
+  ✓ an accent no text colour reads on is rejected
+  ✓ a page background too dark for body text is rejected
+  ✓ invalid support email rejected
+  ✓ invalid social URL rejected
+  ✓ out-of-range commission rejected
+  ✓ a minimum rate above the maximum is rejected
+  ✓ over-long application name rejected
+  ✓ rejected settings writes leave the document untouched
+  ✓ a branding asset cannot be injected through the settings route
+  ✓ a non-image disguised as a PNG is refused
+  ✓ an SVG logo is refused
+  ✓ an oversized logo is refused
+  ✓ an undersized favicon is refused
+  ✓ a non-square favicon is refused
+  ✗ a valid logo uploads — {"code":"INTERNAL_ERROR","message":"Something went wrong on our end. Please try again."}
+  ✗ the stored logo records its real dimensions
+  ✗ the logo is served publicly
+  ✗ the logo is served as an image and not sniffed
+  ✗ the bytes served are the bytes that were stored
+  ✗ a logo can be replaced — {"code":"INTERNAL_ERROR","message":"Something went wrong on our end. Please try again."}
+  ✗ the replacement gets its own storage key, so the URL version changes
+  ✗ the replacement is what gets served, not the original
+  ✓ an unknown branding asset is refused
+  ✓ a logo can be removed
+  ✓ a removed logo stops being served
+  ✓ branding saves
+  ✓ the configured application name reaches the public site
+  ✓ a tutor page keeps its own title and only takes the configured suffix
+  ✓ a configured colour is emitted as design tokens
+  ✓ the theme override is hoisted by React, not written into a hand-made head
+  ✓ the application stylesheet is linked
+  ✓ indexing can be switched off
+  ✓ favourites work while enabled
+  ✓ a disabled feature is refused through the API, not just hidden
+  ✓ a disabled feature refuses writes too
+  ✓ re-enabling a feature restores it
+  ✓ messaging can be switched off platform-wide
+  ✓ reviews can be switched off platform-wide
+  ✓ a disabled lesson mode is refused when a booking is created
+  ✓ an audited change succeeds
+  ✓ settings restore cleanly
+  ✓ settings persist exactly as written
+
+▸ External integrations
+  ✓ webhook without a signature is refused
+  ✓ the refusal names the reason without leaking configuration
+  ✓ webhook with an unverifiable signature is refused
+  ✓ the Connect webhook endpoint is equally strict
+  ✓ a sign-in nonce can be minted
+  ✓ the nonce response lists providers without exposing secrets
+  ✓ an unverifiable OAuth credential never creates a session
+  ✓ OAuth cannot be used to request an ADMIN role
+  ✓ search by postal code works
+  ✓ an unresolvable location degrades instead of breaking search
+  ✓ an unserved city returns an empty result, not an error
+  ✓ a public tutor profile never carries a meeting link
+  ✓ public search results never carry a meeting link
+  ✓ the purchaser can see their own meeting link
+  ✓ the tutor on the lesson can see its meeting link
+  ✓ an administrator can see the lesson for support and audit
+  ✓ an anonymous request cannot see a meeting link
+  ✓ admin can read platform settings
+  ✓ platform settings carry no provider credentials
+
+▸ Booking authorization
+  ✓ the test's 'unrelated tutor' really is unrelated to the lesson
+  ✓ tutor has two free slots to work with
+  ✓ fixture lesson is confirmed and belongs to the parent
+  ✓ anonymous cannot reschedule a lesson
+  ✓ an unrelated learner cannot reschedule someone else's lesson
+  ✓ an unrelated parent cannot reschedule someone else's lesson
+  ✓ an unrelated tutor cannot reschedule someone else's lesson
+  ✓ a refused reschedule leaves the lesson exactly where it was
+  ✓ the purchaser can reschedule their own lesson
+  ✓ the lesson actually moved
+  ✓ the tutor on the lesson can reschedule it
+  ✓ rescheduling a lesson that does not exist is a 404
+  ✓ a malformed booking id is rejected cleanly
+  ✓ anonymous cannot report a no-show
+  ✓ an unrelated learner cannot report a no-show on someone else's lesson
+  ✓ an unrelated tutor cannot report a no-show on someone else's lesson
+  ✓ a participant cannot report the wrong party
+  ✓ no refused no-show changed the lesson's status
+  ✓ no refused no-show issued a refund
+  ✓ a participant is refused on timing, not authorization
+  ✓ an unrelated user cannot void a completed lesson
+  ✓ the completed lesson survived the unauthorized attempt
+  ✓ tutor earnings are untouched by an unauthorized no-show
+  ✓ the learner who paid can report a tutor no-show
+  ✓ the no-show applies the configured policy exactly
+  ✓ the lesson is recorded as a tutor no-show
+  ✓ a second no-show report cannot refund the same lesson twice
+  ✓ a cancelled lesson cannot be rescheduled
+
+▸ Booking concurrency
+  ✓ exactly one of five concurrent requests wins the slot
+  ✓ every loser is refused with a conflict, not an error
+  ✓ the contested slot is no longer offered to anyone else
+  ✓ a different free slot is still bookable
+
+▸ Scheduled jobs
+  ✓ anonymous cannot run a scheduled job
+  ✓ a parent cannot run a scheduled job
+  ✓ a tutor cannot run the payout job
+  ✓ a wrong scheduler token is refused
+    (CRON_SECRET not set — skipping the scheduler-token checks)
+  ✓ the job catalogue names every scheduled job
+  ✓ an unknown job name is a 404
+
+▸ Abandoned checkout releases the slot (R41)
+  ✓ the second family has a learner of their own to book for
+  ✓ the unpaid-booking hold is an administrable business rule
+  ✓ a free slot is on offer before the abandoned booking
+  ✓ the tutor publishes which meeting platforms they teach on
+  ✓ the marketplace has a tutor who offers only some meeting platforms
+  ✓ a meeting platform the tutor does not offer is REFUSED server-side
+  ✓ the booking is created and awaiting payment
+  ✓ while it is held, the slot is OFF the public calendar
+  ✓ another family cannot take a slot that is genuinely held
+  ✓ the expiry job runs and reports
+  ✓ a FRESH hold is not expired by the job
+  ✓ the job releases the lapsed hold
+  ✓ the abandoned booking is EXPIRED
+  ✓ an expired booking can no longer be cancelled or refunded
+  ✓ the released slot is BACK on the public calendar
+  ✓ ANOTHER family can now book the released slot
+  ✓ the learner's chosen meeting platform is stored on the booking, not assumed
+  ✓ re-running the expiry job is safe
+  ✓ a booking already expired is not expired again
+  ✓ a PAID booking is never claimed by the expiry job
+  ✓ an expired lesson is visible to the family, not silently hidden
+  ✓ the hold setting is restored after the test
+  ✓ a booking carrying injected state is still accepted on its merits
+  ✓ an injected booking status is IGNORED — it still awaits payment
+  ✓ an injected meeting link is IGNORED — no room exists before payment
+  ✓ an injected price is IGNORED — the total comes from the tutor's stored rate
+  ✓ an injected confirmedAt is IGNORED
+  ✓ the reminder job runs
+  ✓ running the reminder job again sends nothing new
+  ✓ no reminders were due, and none were invented
+  ✓ the verification expiry job runs and reports what it expired
+  ✓ the payout job runs and follows the existing eligibility rules
+  ✓ running the payout job again pays nobody twice
+  ✓ every job can be run in one pass
+
+▸ Conversation moderation
+  ✓ a parent can report a conversation
+  ✓ reporting opens a case
+  ✓ anonymous cannot read the moderation queue
+  ✓ a parent cannot read the moderation queue
+  ✓ a tutor cannot read the moderation queue
+  ✓ a parent cannot read a reported thread through the admin route
+  ✓ the report reaches the admin queue
+  ✓ the queue carries the reporter, the reason and both participants
+  ✓ the triage queue carries no message bodies of its own
+  ✓ an administrator can read the thread and its booking context
+  ✓ a member cannot close a moderation case
+  ✓ an administrator can take a case under review
+  ✓ an administrator can close a case
+  ✓ the decision persists
+  ✓ the moderation trail is kept
+  ✓ a closed case leaves the outstanding queue
+
+▸ Review moderation
+  ✓ an unrelated user cannot report a review
+  ✓ the reviewed tutor can still report a review
+  ✓ reporting does not hide the review
+  ✓ a tutor reporting a review cannot move their own public rating
+  ✓ the report reaches the review moderation queue
+  ✓ a tutor cannot moderate a review
+  ✓ an administrator can rule on the report
+  ✓ dismissing leaves the review published and counted
+  ✓ the public rating is unchanged throughout
+
+▸ Email verification
+  ✓ a new account can register
+  ✓ an unverified account can sign in and reach its own account
+  ✓ the account is reported as unverified
+  ✓ an unverified account cannot book a lesson
+  ✓ an unverified account cannot message a tutor
+  ✓ an unverified account cannot post a tutor request
+  ✓ an unverified account cannot leave a review
+  ✓ a new verification link can always be requested
+  ✓ an invalid, expired or already-used verification token is refused
+  ✓ a verified account is unaffected by the gate
+
+▸ Tutor search eligibility
+  ✓ an approved tutor can edit their profile
+  ✓ an approved, complete profile stays searchable after an edit
+  ✓ and is still reachable on the public profile
+  ✓ with the edit applied
+  ✓ a tutor cannot set their own searchability or status
+  ✓ the pending tutor starts out unapproved and unlisted
+  ✓ an unapproved tutor can edit their profile
+  ✓ editing never grants search visibility to an unapproved profile
+  ✓ and the unapproved profile stays off the public site
+
+▸ Promoted profiles — authorization, ranking and lifecycle
+  ✓ anonymous cannot read the promotion register
+  ✓ a parent cannot read the promotion register
+  ✓ a tutor cannot read the promotion register
+  ✓ a tutor cannot promote themselves
+  ✓ a parent cannot promote anybody
+  ✓ anonymous cannot read a tutor's promotion status
+  ✓ a parent cannot read the tutor promotion endpoint
+  ✓ the marketplace has tutors to rank
+  ✓ nothing is labelled as promoted to begin with
+  ✓ a malformed tutor id is rejected before anything is written
+  ✓ promoting a tutor who does not exist is a 404
+  ✓ an administrator can promote an eligible tutor
+  ✓ the promotion starts running straight away
+  ✓ a status cannot be dictated by the client — the server derived it
+  ✓ the same tutor cannot be promoted twice at once
+  ✓ the promoted tutor is lifted to the top of the default ordering
+  ✓ and the result is disclosed as promoted
+  ✓ promotion reorders the results without adding to them
+  ✓ no tutor is duplicated by the promotion
+  ✓ the same tutors are present, only in a different order
+  ✓ a visitor's explicit price sort is not overridden by a promotion
+  ✓ and nothing is labelled promoted under an explicit sort
+  ✓ paging a promoted result set never repeats or drops a tutor
+  ✓ filters still decide membership when a promotion is running
+  ✓ a tutor can read their own promotion status
+  ✓ and the payload never carries the internal note
+  ✓ a tutor cannot extend their own promotion
+  ✓ a parent cannot end somebody's promotion
+  ✓ the promotion record is not public
+  ✓ an unknown lifecycle action is rejected
+  ✓ extending without a date is rejected
+  ✓ an administrator can pause a promotion
+  ✓ a paused promotion stops affecting search at once
+  ✓ and it can be switched back on
+  ✓ an administrator can end a promotion
+  ✓ the tutor returns to their normal position once it ends
+  ✓ and the ordering matches what it was before the promotion
+  ✓ a cancelled promotion cannot be reopened
+  ✓ but its record is kept rather than deleted
+  ✓ the promotion expiry job runs through the scheduler
+  ✓ and running it again is a no-op
+
+▸ Analytics — scoping, periods and authorization
+  ✓ anonymous cannot read platform analytics
+  ✓ a parent cannot read platform analytics
+  ✓ a tutor cannot read platform analytics
+  ✓ anonymous cannot read tutor analytics
+  ✓ a parent cannot read the tutor analytics endpoint
+  ✓ an administrator can read platform analytics
+  ✓ the response carries the overview, breakdowns, Phase 2 and leaderboard
+  ✓ the period is reported back with the response
+  ✓ and the reporting time zone is stated rather than assumed
+  ✓ every money figure is a whole number of cents
+  ✓ net collected never exceeds what was collected
+  ✓ rates are percentages, not ratios
+  ✓ Phase 2 analytics cover requests, packages, groups, referrals and promotions
+  ✓ package utilisation cannot exceed what was sold
+  ✓ an explicit date range is accepted
+  ✓ and is reported back exactly as asked for
+  ✓ a reporting time zone can be chosen
+  ✓ a malformed date is rejected rather than silently ignored
+  ✓ an absurd window is refused by validation rather than scanning everything
+  ✓ a tutor can read their own analytics
+  ✓ a tutor's analytics report their own lessons and earnings
+  ✓ and never the platform's commission or anybody else's revenue
+  ✓ an injected tutor id is ignored, not honoured
+
+▸ Risk — authorization, detection E2E and evidence
+  ✓ anonymous cannot read the risk queue
+  ✓ a parent cannot read the risk queue
+  ✓ a tutor cannot read the risk queue
+  ✓ an administrator can read the risk queue
+  ✓ the queue reports how much needs attention
+  ✓ a risk case cannot be created over the API at all
+  ✓ risk thresholds are operator-configurable
+  ✓ a learner can raise a dispute about a finished lesson
+  ✓ the dispute opened a risk case against the account it named
+  ✓ the case explains which signal fired
+  ✓ and carries the evidence behind it
+  ✓ the score and level were derived, not supplied
+  ✓ the case is keyed to the account, with a readable reference
+  ✓ opening a risk case never suspends the account by itself
+  ✓ a second dispute joins the open case instead of opening a second one
+  ✓ the account under review cannot read its own risk case
+  ✓ a learner cannot resolve a risk case
+  ✓ the account under review cannot clear itself
+  ✓ a case's status, level and score cannot be written directly
+  ✓ a case cannot be confirmed without recording why
+  ✓ an administrator can take the case for review
+  ✓ and resolve it
+  ✓ the decision records who made it
+  ✓ and what was done about it
+  ✓ the signals are kept as evidence, not cleared away
+  ✓ a resolved case cannot be reopened
+  ✓ but it stays readable as a record of what was decided
+  ✓ the lesson fixture is restored for the next run
+  ✓ risk settings are restored after the run
+  ✓ a high-risk threshold below the review threshold is refused
+
+▸ Validation
+  ✓ invalid registration rejected with field errors
+  ✓ field errors are per-field
+  ✓ invalid review rejected
+  ✓ malformed id rejected cleanly
+
+────────────────────────────────────────────────────────
+  525 passed, 9 failed
+
+Failures:
+  · a tutor can upload a verification document — {"code":"INTERNAL_ERROR","message":"Something went wrong on our end. Please try again."}
+  · a valid logo uploads — {"code":"INTERNAL_ERROR","message":"Something went wrong on our end. Please try again."}
+  · the stored logo records its real dimensions
+  · the logo is served publicly
+  · the logo is served as an image and not sniffed
+  · the bytes served are the bytes that were stored
+  · a logo can be replaced — {"code":"INTERNAL_ERROR","message":"Something went wrong on our end. Please try again."}
+  · the replacement gets its own storage key, so the URL version changes
+  · the replacement is what gets served, not the original
+
+error: script "qa" exited with code 1

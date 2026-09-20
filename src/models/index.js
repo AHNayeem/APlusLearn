@@ -23,3 +23,5 @@ export { ProgressReport } from "./ProgressReport.js";
 export { Referral, CreditEntry } from "./Referral.js";
 export { TutorPackage, PackagePurchase } from "./Package.js";
 export { GroupSession, GroupEnrolment } from "./GroupSession.js";
+export { TutorPromotion } from "./Promotion.js";
+export { RiskCase } from "./Risk.js";

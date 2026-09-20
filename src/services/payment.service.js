@@ -22,6 +22,7 @@ import { reverseReferralsForBooking } from "./referral.service";
 import { brandedEmailTemplates } from "./external/email-provider";
 import { notify } from "./notification.service";
 import { recordAudit } from "./audit.service";
+import { checkPaymentFailures } from "./risk.service";
 
 /** Absolute URLs a hosted checkout returns the purchaser to. */
 function appUrl(path) {
@@ -284,6 +285,7 @@ export async function capturePayment(paymentId, { card }, actor) {
     payment.status = PAYMENT_STATUS.FAILED;
     payment.failureReason = result.failureReason;
     await payment.save();
+    await checkPaymentFailures({ userId: payment.purchaserId, paymentId: payment._id });
     throw new BusinessRuleError(
       result.failureReason ?? "That payment could not be completed.",
       "PAYMENT_FAILED",
@@ -472,6 +474,11 @@ export async function markPaymentFailed(paymentId, { failureReason } = {}) {
 
   await returnAppliedCredit(payment, "The payment was not completed.");
 
+  // A run of declined payments can be a card being tested rather than a card
+  // that expired, so the count is surfaced for review (§41 Phase 2). Keyed on
+  // the payment, so a redelivered failure event records nothing extra.
+  await checkPaymentFailures({ userId: payment.purchaserId, paymentId: payment._id });
+
   return { changed: true, payment: toPlain(payment) };
 }
 
@@ -616,12 +623,13 @@ export async function getReceipt(paymentId, actor) {
 export async function tutorEarnings(tutorUserId, { days = 90 } = {}) {
   const since = new Date(Date.now() - days * 86400000);
 
-  const [totals, recent, account] = await Promise.all([
+  const matchId = typeof tutorUserId === "string" ? new Types.ObjectId(tutorUserId) : tutorUserId;
+
+  const [totals, period, recent, account] = await Promise.all([
     Booking.aggregate([
       {
         $match: {
-          tutorUserId:
-            typeof tutorUserId === "string" ? new Types.ObjectId(tutorUserId) : tutorUserId,
+          tutorUserId: matchId,
           status: BOOKING_STATUS.COMPLETED,
         },
       },
@@ -632,6 +640,30 @@ export async function tutorEarnings(tutorUserId, { days = 90 } = {}) {
           commissionCents: { $sum: "$price.commissionCents" },
           netCents: { $sum: "$price.tutorEarningsCents" },
           lessons: { $sum: 1 },
+        },
+      },
+    ]),
+    // Aggregated rather than reduced from `recent` below: that list is capped
+    // at 50 rows, so a busy tutor's period total used to stop counting once
+    // they passed fifty lessons in the window.
+    Booking.aggregate([
+      {
+        $match: {
+          tutorUserId: matchId,
+          status: BOOKING_STATUS.COMPLETED,
+          completedAt: { $gte: since },
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          netCents: { $sum: "$price.tutorEarningsCents" },
+          lessons: { $sum: 1 },
+          pendingCents: {
+            $sum: {
+              $cond: [{ $ifNull: ["$payoutId", false] }, 0, "$price.tutorEarningsCents"],
+            },
+          },
         },
       },
     ]),
@@ -650,8 +682,7 @@ export async function tutorEarnings(tutorUserId, { days = 90 } = {}) {
     lessons: 0,
   };
 
-  const periodNet = recent.reduce((sum, b) => sum + b.price.tutorEarningsCents, 0);
-  const unpaid = recent.filter((b) => !b.payoutId);
+  const periodTotals = period[0] ?? { netCents: 0, lessons: 0, pendingCents: 0 };
 
   return {
     lifetime: {
@@ -662,10 +693,11 @@ export async function tutorEarnings(tutorUserId, { days = 90 } = {}) {
     },
     period: {
       days,
-      netCents: periodNet,
-      lessons: recent.length,
+      netCents: periodTotals.netCents,
+      lessons: periodTotals.lessons,
     },
-    pendingPayoutCents: unpaid.reduce((sum, b) => sum + b.price.tutorEarningsCents, 0),
+    pendingPayoutCents: periodTotals.pendingCents,
+    /** The most recent lessons, for the table. Never the basis of a total. */
     recentLessons: toPlain(recent),
     payoutAccount: account ? toPlain(account) : null,
   };
