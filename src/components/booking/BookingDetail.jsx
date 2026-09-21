@@ -14,7 +14,7 @@ import {
 } from "@/constants";
 import { statusTone } from "./BookingRow";
 import { BookingActions } from "./BookingActions";
-import { JoinLessonButton } from "./JoinLessonButton";
+import { MeetingPanel } from "./MeetingPanel";
 
 /**
  * Full lesson view (§19, §27).
@@ -148,24 +148,27 @@ export function BookingDetail({ booking, viewerRole, justConfirmed }) {
               />
             </dl>
 
-            {/* Joining details — only once there is a confirmed lesson (§27) */}
-            {isConfirmed && isOnline && booking.meeting?.joinUrl && (
-              <div className="rounded-xl border border-brand-200 bg-brand-50/60 p-4">
-                <p className="text-sm font-bold text-brand-900">Joining the lesson</p>
-                <p className="mt-1 text-xs text-brand-700/80">
-                  The link opens at the scheduled time. No download needed for most platforms.
-                </p>
-                <div className="mt-3 flex flex-wrap items-center gap-2">
-                  <JoinLessonButton
-                    startAt={booking.startAt}
-                    joinUrl={booking.meeting.joinUrl}
-                    label={`Join ${MEETING_PROVIDER_LABELS[booking.meeting.provider]}`}
-                  />
-                  {booking.meeting.passcode && (
-                    <Badge tone="neutral">Passcode {booking.meeting.passcode}</Badge>
-                  )}
-                </div>
-              </div>
+            {/*
+              Joining details (§27).
+
+              Rendered for every online lesson that has been paid for, not only
+              for one that already has a link. A confirmed lesson with no room
+              yet is a real state — the provider was down, or this deployment
+              has no credentials for the platform the learner chose — and
+              showing nothing at all left the family guessing. The panel says
+              which of the states it is in, and offers the host the controls to
+              change it.
+            */}
+            {isOnline && (isConfirmed || booking.meeting) && (
+              <MeetingPanel
+                meeting={booking.meeting}
+                startAt={booking.startAt}
+                endAt={booking.endAt}
+                timeZone={booking.timeZone}
+                live={isConfirmed}
+                canManage={Boolean(booking.permissions?.canManageMeeting)}
+                endpoint={`/api/bookings/${booking.id}/meeting`}
+              />
             )}
 
             {isConfirmed && !isOnline && booking.location && (

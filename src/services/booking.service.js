@@ -52,7 +52,12 @@ import {
 } from "@/lib/booking/policy";
 import { isSlotBookable } from "@/lib/booking/slots";
 import { getSettings } from "./settings.service";
-import { getMeetingProvider } from "./external/meeting-provider";
+import {
+  provisionMeeting,
+  moveMeeting,
+  retireMeeting,
+  meetingOnBookingForViewer,
+} from "./meeting.service";
 import { brandedEmailTemplates } from "./external/email-provider";
 import {
   createPaymentForBooking,
@@ -397,7 +402,7 @@ export async function createBooking(input, actor) {
  */
 async function confirmPackageBooking(booking) {
   if (booking.mode === LESSON_MODES.ONLINE) {
-    booking.meeting = await createMeetingFor(booking, booking.meetingProvider);
+    booking.meeting = await provisionMeeting(booking, booking.meetingProvider);
     await booking.save();
   }
 
@@ -516,7 +521,7 @@ export async function confirmBookings(paymentId, { meetingProvider } = {}) {
     if (booking.mode === LESSON_MODES.ONLINE) {
       // The stored choice wins; the argument is only a fallback for callers
       // that confirm a booking made before the field existed.
-      booking.meeting = await createMeetingFor(booking, booking.meetingProvider ?? meetingProvider);
+      booking.meeting = await provisionMeeting(booking, booking.meetingProvider ?? meetingProvider);
     }
 
     await booking.save();
@@ -1016,56 +1021,6 @@ async function slotStillFree(booking) {
   return !clash;
 }
 
-/**
- * Create the meeting room for an online lesson (§27).
- *
- * A meeting provider being down must not strand a lesson the student has
- * already paid for: the booking still confirms, and the link is filled in on
- * the next reschedule or by an administrator. The join URL is private to the
- * two participants — `getBooking()` is what enforces that.
- */
-async function createMeetingFor(booking, requestedProvider) {
-  // The platform the learner chose. It reached here from the Booking record,
-  // which was written server-side at booking time — never from a request
-  // body at confirmation time (§42).
-  const provider = requestedProvider ?? booking.meetingProvider ?? MEETING_PROVIDERS.ZOOM;
-  try {
-    // One adapter per platform: Zoom, Google Meet or Microsoft Teams,
-    // falling back to the development provider where this deployment has no
-    // credentials for the one that was chosen.
-    return await getMeetingProvider(provider).createMeeting({
-      provider,
-      topic: `${booking.courseName} lesson`,
-      agenda: booking.courseCode ? `${booking.courseName} (${booking.courseCode})` : undefined,
-      startAt: booking.startAt,
-      durationMinutes: booking.durationMinutes,
-      timeZone: booking.timeZone,
-    });
-  } catch (error) {
-    console.error(`[booking] meeting creation failed for ${booking.reference}:`, error.message);
-    return undefined;
-  }
-}
-
-/**
- * Tear a room down so a cancelled lesson's link stops working.
- *
- * Torn down through the adapter for the platform the room was *actually*
- * created on — `meeting.provider`, not the booking's requested one, which can
- * differ when the chosen platform was unconfigured and the room came from the
- * development provider.
- */
-async function releaseMeetingFor(booking) {
-  if (!booking.meeting?.meetingId) return;
-  try {
-    await getMeetingProvider(booking.meeting.provider).deleteMeeting({
-      meetingId: booking.meeting.meetingId,
-    });
-  } catch (error) {
-    console.error(`[booking] meeting teardown failed for ${booking.reference}:`, error.message);
-  }
-}
-
 async function notifyBookingConfirmed(bookings) {
   const first = bookings[0];
   const [purchaser, tutorUser, student] = await Promise.all([
@@ -1185,7 +1140,20 @@ export async function listBookings(actor, params = {}) {
     Booking.countDocuments(query),
   ]);
 
-  return { items: toPlain(items), total, page: params.page, pageSize };
+  /**
+   * The room is released here by the same rule `getBooking` uses (§27).
+   *
+   * A list is not a lesser read — the dashboard builds its Join button out of
+   * exactly this payload — so a link the tutor has withdrawn, and a finished
+   * lesson's credentials, have to be withheld here too or withdrawing one is
+   * no control at all.
+   */
+  return {
+    items: toPlain(items).map((booking) => withReleasedMeeting(booking, actor)),
+    total,
+    page: params.page,
+    pageSize,
+  };
 }
 
 function scopeQueryForActor(actor, params) {
@@ -1234,9 +1202,30 @@ export async function getBooking(id, actor) {
     }
   }
 
+  /**
+   * How much of the room this caller gets (§27).
+   *
+   * Entitlement to the *lesson* was settled above; this is the narrower
+   * question of whether the join credentials are still anybody's to have. A
+   * withdrawn link is kept from the learner but shown to the host who has to
+   * replace it, and a lesson that is over or cancelled hands out no live
+   * credentials to anyone.
+   */
+  const isManager = actor.role === ROLES.ADMIN || String(booking.tutorUserId) === String(actor.id);
+  plain.meeting = meetingOnBookingForViewer(plain, actor);
+
   const settings = await getSettings();
   plain.permissions = {
     canCancel: canCancel(booking, actorRoleFor(booking, actor)),
+    /**
+     * Only an online lesson that is still going to happen, and only its host
+     * or an administrator. The same rule the service enforces, surfaced so the
+     * UI does not have to guess — the button it hides is not the control.
+     */
+    canManageMeeting:
+      isManager &&
+      booking.mode === LESSON_MODES.ONLINE &&
+      booking.status === BOOKING_STATUS.CONFIRMED,
     canComplete: canComplete(booking) && String(booking.tutorUserId) === String(actor.id),
     canReview:
       booking.status === BOOKING_STATUS.COMPLETED &&
@@ -1331,9 +1320,20 @@ export async function cancelBooking(id, { reason, cancelSeries }, actor) {
       policyApplied: outcome.policyApplied,
     };
 
-    // The room outlives the lesson unless it is torn down, and a stale link
-    // is a room two strangers could still walk into (§27).
-    if (target.mode === LESSON_MODES.ONLINE) await releaseMeetingFor(target);
+    /**
+     * The room outlives the lesson unless it is torn down, and a stale link is
+     * a room two strangers could still walk into (§27).
+     *
+     * Tearing it down at the provider is only half of it: the sub-document
+     * stayed on the booking, so `GET /api/bookings/:id` went on returning a
+     * dead `joinUrl` and a live passcode for a lesson that was never going to
+     * happen. The provider room goes, and the credentials go with it — while
+     * the record that this *was* an online lesson, and on which platform,
+     * stays, because that is what a cancelled lesson has to represent.
+     */
+    if (target.mode === LESSON_MODES.ONLINE && target.meeting) {
+      target.meeting = await retireMeeting(target);
+    }
 
     await target.save();
     policyRefundTotal += outcome.refundCents;
@@ -1763,24 +1763,21 @@ export async function rescheduleBooking(id, { startAt, durationMinutes, reason }
     );
   }
 
-  // Move the existing room rather than issuing a new link, so a join link
-  // already in someone's calendar keeps working (§27).
+  /**
+   * Move the existing room rather than issuing a new link, so a join link
+   * already in someone's calendar keeps working (§27).
+   *
+   * `moveMeeting` leaves a hand-entered room alone: a tutor's personal room
+   * has no start time to move, and it is not this platform's to reschedule.
+   * The lesson's own new time is what changed, and that is what the learner
+   * sees beside the link.
+   */
   if (booking.mode === LESSON_MODES.ONLINE) {
-    if (booking.meeting?.meetingId) {
-      try {
-        await getMeetingProvider(booking.meeting.provider).updateMeeting({
-          meetingId: booking.meeting.meetingId,
-          topic: `${booking.courseName} lesson`,
-          startAt: booking.startAt,
-          durationMinutes: duration,
-          timeZone: booking.timeZone,
-        });
-      } catch (error) {
-        console.error(`[booking] meeting move failed for ${booking.reference}:`, error.message);
-      }
+    if (booking.meeting?.joinUrl) {
+      await moveMeeting(booking);
     } else {
       // A lesson confirmed while the provider was down gets its room now.
-      booking.meeting = await createMeetingFor(booking);
+      booking.meeting = await provisionMeeting(booking);
     }
     await booking.save();
   }
@@ -1961,10 +1958,25 @@ export async function bookingSummary(actor) {
       .lean(),
   ]);
 
+  /**
+   * The next lesson carries a room too, and it is its own read path (§27).
+   *
+   * Both dashboards build a Join button straight out of this, so it is a third
+   * way of asking "what may this person have of the room" and has to answer
+   * like the other two. It queries CONFIRMED lessons only, so the question it
+   * actually turns on is whether the link has been withdrawn — and a withdrawn
+   * link that still rendered a working Join button here would undo the
+   * withdrawal, however carefully the lesson page honoured it.
+   */
   return {
     upcoming,
     completed,
     awaitingReview,
-    nextLesson: nextLesson ? toPlain(nextLesson) : null,
+    nextLesson: nextLesson ? withReleasedMeeting(toPlain(nextLesson), actor) : null,
   };
+}
+
+/** A booking with its room reduced to what this caller may have of it. */
+function withReleasedMeeting(booking, actor) {
+  return { ...booking, meeting: meetingOnBookingForViewer(booking, actor) };
 }

@@ -289,7 +289,7 @@ taking a page down.
 | Logo used consistently | `Logo.jsx` takes `branding`; public header, dashboard rail, auth pages, footer (dark variant) | Implemented |
 | Favicon, Apple touch icon, social image | `branding.favicon / appleTouchIcon / ogImage`, referenced by `generateMetadata` | Implemented |
 | Upload validation | Format from the file's own magic bytes, not its declared type; size, min/max dimensions, square where required; SVG refused outright (`lib/images/inspect.js`) | Implemented |
-| Uploads reuse the storage abstraction | `getStorageProvider()` gains a `branding` scope; nothing is written into `public/` | Implemented |
+| Uploads reuse the storage abstraction | `getStorageProvider()` gains a `branding` scope; nothing is written into `public/`. The same call serves both storage modes — no route, service or component names a provider or reads a `STORAGE_*` variable | Implemented |
 | Branding assets served publicly | `/api/branding/[asset]` — addressed by setting name, never a storage key; `nosniff`, immutable when versioned | Implemented |
 | Brand colours configurable | `theme.*`; expanded into the existing `@theme` token names by `lib/theme/palette.js` (OKLab ramp) and emitted once in the root layout | Implemented |
 | Colour choices cannot break accessibility | Primary and footer must clear AA against white; accent and semantic colours must be legible against white *or* ink; page/card grounds must carry the dark body text. Enforced server-side, mirrored in the picker | Implemented |
@@ -348,7 +348,7 @@ than dropped.
 | Secrets never returned | `GET` reduces each to `{ set, updatedAt }`; last four characters only for the Stripe secret key, which Stripe's own dashboard also shows. QA plants unique values and asserts they appear in no response, no rendered HTML and no audit record | Implemented |
 | Update without disclosure | An omitted secret keeps what is stored, `null` clears it. A port can be changed without holding the password, and an accidental save cannot blank a credential | Implemented |
 | Configuration precedence | defaults → environment → stored admin configuration, merged per field (`lib/config/integrations.js`). A deployment that has never opened the panel behaves exactly as before | Implemented |
-| Precedence does not bend | `fakeAllowedInProduction: false` still refuses a development provider for payments, email and storage under `APP_ENV=production`, whatever the database says | Implemented |
+| Precedence does not bend | `fakeAllowedInProduction: false` still refuses a development provider for payments and email under `APP_ENV=production`, whatever the database says. Storage degrades to its local fallback instead — but a stored credential that will not decrypt is still an error state there, never a silent fallback | Implemented |
 | Undecryptable credential | Reported as `NEEDS_ATTENTION` with the `AUTH_SECRET` explanation. It never silently falls back to the environment — a configuration quietly reverting to different credentials would look like it worked | Implemented |
 | Reversible | `DELETE` removes the stored record and its credentials, handing the module back to the environment. Without it, opening the screen once would be irreversible | Implemented |
 | Adopting an existing deployment | `POST` imports the environment's values server-side, encrypted on the way in; nothing passes through the browser | Implemented |
@@ -383,9 +383,24 @@ than dropped.
 | Platform chosen per booking | `Booking.meetingProvider`, validated against the tutor's `onlineMeetingProviders` and stored at creation; read back when the room is created — never taken from a confirmation request | Implemented |
 | No participant identity sent to a meeting provider | No adapter sends a learner's or tutor's name or email; Meet events have no attendees, Teams meetings no participants | Implemented |
 | Meeting info on the booking | `Booking.meeting`; released only to the purchaser, tutor and admins — never on a public profile or in search | Implemented |
+| Meeting info on a group session | `GroupSession.meeting`, the same `MeetingSchema` a booking uses, copied onto every seat by `syncSeatMeetings()`; released to the tutor, admins and confirmed enrolees only | Implemented |
+| A room is never carried by a session's public shape | `publicSession()` strips `meeting`. It spreads the whole document and is what `listOpenSessions()` maps over, so before that the join URL and passcode of every open session were on the public `/groups` listing | Implemented |
+| Configuring a room by hand | `POST /api/bookings/:id/meeting` and `POST /api/tutor/groups/:id/meeting` — `retry`, `manual`, `disable`, `enable`, `clear`, all through `configureMeeting()` | Implemented |
+| Who may configure one | `BOOKING_MEETING_MANAGE`, held by tutors and admins and by no learner role; *which* lesson is checked in the service against the loaded record, so a tutor reaches only their own | Implemented |
+| Only a lesson still to happen | A booking must be `CONFIRMED`; a session must be in `ACTIVE_SESSION_STATUSES`. An unpaid, finished or cancelled lesson is refused | Implemented |
+| A hand-entered room is never acted on at the provider | `MEETING_SOURCES.MANUAL` gates every adapter call — a reschedule does not move it and clearing it does not delete it, because it lives in somebody else's account | Implemented |
+| A withdrawn link is kept from the people attending | `meetingForViewer()` strips `joinUrl`, `meetingId` and `passcode` for everyone but the host, who has to replace it | Implemented |
+| Every read path releases the same amount of the room | `meetingOnBookingForViewer()` is the one rule, asked by `getBooking()`, `listBookings()` and `bookingSummary()`. The two list paths previously returned the stored sub-document untouched, so a withdrawn link and every finished lesson's credentials went out on `GET /api/bookings` and rendered a working Join button on both dashboards, while the lesson page correctly refused them | Implemented |
+| Join credentials do not outlive the lesson | Cancelling clears them from the record as well as tearing the room down — `retireMeeting()`, used by both the one-to-one and the group cancellation paths; `meetingForViewer()` withholds them on any lesson that is not live. Previously `GET /api/bookings/:id` returned a dead `joinUrl` and a live passcode on a cancelled lesson, and a cancelled *group session* kept both on the session and on every seat while its provider room stayed live | Implemented |
+| Two managers at once cannot duplicate a room | `configureMeeting()` writes under a guard on the version it read, and a `retry` that loses the race hands the room it just created back to the provider. Four simultaneous retries previously produced two live rooms, one of them referenced by nothing and torn down by nothing | Implemented |
+| A room is given up only once the change is stored | The provider teardown for a replaced or cleared room runs after the write, not before, so a failed write cannot destroy the only working link | Implemented |
+| Meeting credentials are never logged | `configureMeeting()` audits `hasJoinUrl` / `hasPasscode` and never the values; the `meetingUpdated` email states plainly that the link and passcode are only ever shown on the lesson page | Implemented |
+| Joining details reach the people attending | `NOTIFICATION_TYPES.MEETING_UPDATED` on create, change and withdrawal — to the purchaser, or to every confirmed seat in a group | Implemented |
 | Host credentials never stored | Zoom's `start_url`, Teams' `audioConferencing` conference id and `joinInformation`, and Meet's organiser are all dropped by their adapters; the integration tests assert each | Implemented |
-| Cancellation and reschedule | A reschedule moves the existing room so the join link keeps working; a cancellation tears it down | Implemented |
-| Provider outage does not strand a paid lesson | Meeting creation failure is logged; the booking still confirms and the room is filled in later | Implemented |
+| Cancellation and reschedule | A reschedule moves the existing room so the join link keeps working; a cancellation tears it down, for a group session as well as a one-to-one lesson | Implemented |
+| A credential carries nothing invisible | The meeting ID and passcode refuse `\p{Cf}`, the non-ASCII space separators and lone surrogates as well as whitespace and controls — a zero-width space or a bidirectional override in a passcode is one that reads right and is wrong when it is typed back | Implemented |
+| Provider outage does not strand a paid lesson | Meeting creation failure is logged and the booking still confirms; the tutor or an administrator then supplies a room from the meeting panel on the lesson — `retry` to ask the provider again, or `manual` to enter one they already own. Until this existed the promise of "filled in later" had no code behind it | Implemented |
+| A lesson with no room says so | The meeting panel renders a `Room pending` state rather than nothing, on both the booking and the group session | Implemented |
 | 5 in-person location types | `IN_PERSON_LOCATIONS` | Implemented |
 | Addresses protected | `addressLine` is `select:false`, released only to parties on a confirmed booking | Implemented |
 
@@ -485,11 +500,11 @@ and webhook endpoints.
 | Email abstraction | `ConsoleEmailProvider` | `ResendEmailProvider` + 13 branded responsive templates | Awaiting credentials |
 | Auth providers | `DevOAuthProvider` | `OpenIdOAuthProvider` — Google and Apple ID tokens | Awaiting credentials |
 | Geocoding | `LocalTableGeocodingProvider` | `GoogleGeocodingProvider`, country-filtered, coarsened, with table fallback | Awaiting credentials |
-| Video meetings | `MockMeetingProvider` | `ZoomMeetingProvider`, `GoogleMeetProvider`, `MicrosoftTeamsMeetingProvider` — create / move / tear down; several may be live at once | Awaiting credentials |
-| File storage | `LocalStorageProvider` | `ObjectStorageProvider` — **MinIO**; SigV4 over `fetch`, also S3, R2, B2, Spaces | Awaiting credentials |
+| Video meetings | `MockMeetingProvider` | `ZoomMeetingProvider`, `GoogleMeetProvider`, `MicrosoftTeamsMeetingProvider` — create / move / tear down; several may be live at once. A deployment with no credentials for the platform a learner chose now has a first-class fallback rather than only a development link: an authorised human enters the room they already own, and it is labelled as such everywhere | Awaiting credentials |
+| File storage | `LocalStorageProvider` — a real store under `.storage/`, used automatically whenever the four `STORAGE_*` credentials are not all present | `ObjectStorageProvider` — **MinIO**; SigV4 over `fetch`, also S3, R2, B2, Spaces. Selected automatically once endpoint, bucket, access key and secret key are all set | Implemented, both modes |
 | Calendar | — | `CalendarProvider` interface declared | Phase 2 |
 | Configuration-driven selection | `src/lib/config/env.js`; `APP_ENV` + one `*_PROVIDER` per integration | — | Implemented |
-| Production never silently fakes | `PAYMENT_PROVIDER`/`EMAIL_PROVIDER`/`STORAGE_PROVIDER=development` refused under `APP_ENV=production`; a named provider without credentials stops the boot | — | Implemented |
+| Production never silently fakes | `PAYMENT_PROVIDER`/`EMAIL_PROVIDER=development` refused under `APP_ENV=production`; a named provider without credentials stops the boot. **File storage is the exception**: its fallback is a real store rather than a fake, so incomplete credentials degrade to the local filesystem with a warning instead of refusing to boot — `STORAGE_REQUIRE_EXTERNAL=true` restores the hard failure | — | Implemented |
 | Start-up validation | `src/instrumentation.js` — warns in development, refuses to boot in production | — | Implemented |
 | Operator visibility | Admin → Platform settings → Integrations: provider, mode and recent webhook deliveries | — | Implemented |
 | UI unchanged when the real provider lands | All access goes through `get*Provider()`; no service or component names a provider | — | Implemented |
@@ -582,6 +597,8 @@ so it is safe to run in CI.
 | Webhooks | A wrong secret is rejected; an hour-old signature is rejected; a duplicate of a processed event changes nothing; a *failed* delivery is reprocessed on redelivery and settles once the cause is gone; a claim abandoned by a dead process is reclaimed while a live one is not; a mismatched amount is refused and leaves the payment unsettled; a late failure cannot un-pay a settled payment; only card brand and last4 are stored; a dashboard refund reconciles once through either `charge.refunded` or `refund.*`; a pending refund is not counted as money returned; unknown events are acknowledged |
 | Reconciliation | A payment paid at the provider whose webhook never arrived is settled by the sweep rather than released; an unreachable provider keeps the hold; a provider amount that disagrees with the priced total settles nothing |
 | Checkout return | Webhook-before-redirect and redirect-before-webhook both end confirmed, and each confirms exactly once; a repeated reconciliation changes nothing; `PROCESSING` holds the slot and the later async success confirms it; an unpaid answer confirms nothing; an unreachable provider answers `UNKNOWN` rather than "unpaid"; a simultaneous webhook and reconciliation settle once between them; a refunded payment is not re-settled; the development provider is never asked, because it has no remote state to read |
+| Storage — mode selection | No configuration at all selects local; a complete configuration selects the object store; each of the four required fields missing on its own falls back to local and names itself in the diagnostic; a missing region or key prefix does not; `STORAGE_REQUIRE_EXTERNAL=true` turns the fallback back into a hard failure; an unknown provider name is still refused by name |
+| Storage — local mode | Upload, read-back, metadata, `exists`, scope separation and deletion against a real temporary directory; the uploader's filename never becomes a key; nine traversal keys (`../`, `..\`, `.`, `..`, empty, percent-escaped, NUL) each read and delete nothing outside the scope; a missing object is a 404 with no filesystem path; a key written by an earlier version still resolves, and resolves identically through the object provider |
 | Storage | SigV4 reproduces AWS's published vector; upload/read/head/replace/delete round-trip; the uploader's filename never becomes a key; scopes cannot read each other; a traversal key is flattened; no URL is ever returned; no per-object SSE by default; credentials are redacted from provider errors; bad credentials, missing objects, unreachable hosts and timeouts are each named distinctly |
 | Email | Key travels in a header not a URL; both HTML and text parts are sent; delivery is idempotent; a provider rejection surfaces its reason; an outage does not throw into the calling service; all 13 templates render; template input is HTML-escaped; a security notice carries no token |
 | OAuth | A valid token verifies; wrong audience, wrong issuer, tampered signature and a mismatched nonce are all rejected; Apple's string booleans and one-time name are handled; an unconfigured provider refuses rather than trusting |
@@ -672,6 +689,18 @@ no queue or worker process.
    `NOTIFICATION_CHANNELS`. In-app, email and SMS are delivered; push is not.
 2. **Message attachments.** `Message.attachments` is on the schema and unused.
 3. **Student-facing analytics.** Named as Phase 3 in §41.
+4. **Meeting credentials are not operator-editable.** Zoom, Google Meet and
+   Microsoft Teams are configured from the environment only — they are the one
+   integration missing from `INTEGRATION_MODULES`, so an operator cannot turn
+   Zoom on from Admin → Integrations the way they can email, payments,
+   calendar, SMS and storage. `getMeetingProvider()` is correspondingly the
+   only **synchronous** provider factory, reading `lib/config/env.js` rather
+   than the database-aware `lib/config/integrations.js`. Adding it means a
+   sixth registry entry with three providers, encrypted secrets and a status
+   round-trip, and making that factory `async` at every call site in
+   `booking.service` and `group.service`. Nothing depends on it: a deployment
+   that sets the environment variables gets real rooms today, and one that does
+   not can have an authorised human enter a room by hand (§27).
 
 Calendar sync (Google and Microsoft), SMS, and the Google Meet and Microsoft
 Teams meeting adapters are all implemented. Each needs real provider

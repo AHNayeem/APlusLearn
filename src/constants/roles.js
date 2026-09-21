@@ -100,6 +100,24 @@ export const PERMISSIONS = {
    * without being able to do the second (§36).
    */
   ADMIN_INTEGRATION_MANAGE: "ADMIN_INTEGRATION_MANAGE",
+
+  /**
+   * Set or withdraw the joining details on a lesson that is already booked
+   * (§27).
+   *
+   * Held apart from BOOKING_COMPLETE and ADMIN_BOOKING_MANAGE because it is a
+   * different kind of act: completing a lesson settles money, while this
+   * decides the URL a family will click. It is the tutor's to hold because the
+   * tutor is the host — when a provider is down, or the deployment has no
+   * credentials for the platform the learner picked, the tutor is the one
+   * holding a usable room in their own account.
+   *
+   * The permission opens the door; it does not say *which* lesson. Ownership
+   * is checked in the service against the loaded booking, never against a
+   * request field, so a tutor holding this can only ever reach their own
+   * lessons.
+   */
+  BOOKING_MEETING_MANAGE: "BOOKING_MEETING_MANAGE",
 };
 
 const LEARNER_PERMISSIONS = [
@@ -139,6 +157,7 @@ export const ROLE_PERMISSIONS = {
     PERMISSIONS.BOOKING_VIEW,
     PERMISSIONS.BOOKING_CANCEL,
     PERMISSIONS.BOOKING_COMPLETE,
+    PERMISSIONS.BOOKING_MEETING_MANAGE,
     PERMISSIONS.MESSAGE_VIEW,
     PERMISSIONS.MESSAGE_SEND,
     PERMISSIONS.REQUEST_VIEW,

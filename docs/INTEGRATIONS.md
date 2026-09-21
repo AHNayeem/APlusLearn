@@ -22,7 +22,7 @@ to one factory.
 | OAuth | `DevOAuthProvider` | **Google**, **Apple** — OIDC ID tokens | `OAUTH_PROVIDER` |
 | Geocoding | `LocalTableGeocodingProvider` | **Google Geocoding API** | `GEOCODING_PROVIDER` |
 | Meeting links | `MockMeetingProvider` | **Zoom**, **Google Meet**, **Microsoft Teams** — any combination | `MEETING_PROVIDER` |
-| File storage | `LocalStorageProvider` | **MinIO** — S3-compatible object storage | `STORAGE_PROVIDER` |
+| File storage | `LocalStorageProvider` (automatic fallback) | **MinIO** — S3-compatible object storage | the four `STORAGE_*` credentials |
 
 ## How a provider is chosen
 
@@ -331,6 +331,31 @@ overwritten with a failed lookup.
 
 ---
 
+## 5pre. Meeting links — when there is no integration at all
+
+Zoom, Google Meet and Microsoft Teams below are real adapters against real
+APIs. They need credentials, and a deployment that has none for the platform a
+learner chose falls back to the development provider's deterministic link.
+
+That is fine for development and not fine for a family who has paid. So a room
+can also be supplied by a **person**: the tutor teaching the lesson, or an
+administrator, enters the joining details of a meeting they have already set up
+in their own account, through the meeting panel on the lesson
+(`POST /api/bookings/:id/meeting`, `POST /api/tutor/groups/:id/meeting`).
+
+Such a room is stored with `source: "MANUAL"` and that distinction has teeth.
+This application never calls a provider API about one — a reschedule does not
+move it and clearing it does not delete it — because it is a resource in
+somebody else's account and acting on it would destroy or move something the
+platform does not own. The UI says so wherever a manual room is shown.
+
+This is deliberately *not* a fake integration. Nothing claims to have created a
+Zoom meeting. The application manages the configuration and the lifecycle, and
+the same endpoint keeps working unchanged when real credentials arrive — at
+which point `retry` asks the adapter for a room and stores it as `PROVIDER`.
+
+---
+
 ## 5. Meeting links — Zoom
 
 ```
@@ -459,14 +484,85 @@ with the link to be filled in later rather than losing a paid lesson.
 
 ## 6. File storage
 
+### Two modes, chosen automatically
+
+File storage always has somewhere to put a file. Which of the two stores is
+live is decided in exactly one place — `describeStorageMode()` in
+[`src/services/external/storage-provider.js`](../src/services/external/storage-provider.js)
+— from one question:
+
+| Are `STORAGE_ENDPOINT`, `STORAGE_BUCKET`, `STORAGE_ACCESS_KEY` and `STORAGE_SECRET_KEY` **all** set? | Mode | Where files go |
+|---|---|---|
+| Yes | `EXTERNAL` | Straight to that S3-compatible endpoint. Nothing is written locally first. |
+| No — any one of them missing or blank | `LOCAL` | `.storage/` on the application's own filesystem (`STORAGE_LOCAL_DIR` moves it). |
+
+`STORAGE_REGION` and `STORAGE_PREFIX` are optional and never affect the
+choice: without a region the client default (`us-east-1`, which is also
+MinIO's) applies, and without a prefix objects sit at the root of the bucket.
+
+Local mode is a **real store**, not a stub: uploads, reads, metadata and
+deletes all work, and the `storageKey` written to the database is the same
+provider-independent value in both modes — a bare filename, never a path,
+never a URL, never a bucket. A deployment can therefore move from one mode to
+the other without touching a single stored document.
+
+Nothing outside the provider reads a `STORAGE_*` variable or asks which mode
+is live. Routes and services call `getStorageProvider()` and use the
+interface:
+
+```
+StorageProvider   put · get · head · exists · remove · verify
+  ├── LocalStorageProvider    .storage/<scope>/<uuid>.<ext>
+  └── ObjectStorageProvider   <bucket>/<prefix>/<scope>/<uuid>.<ext>
+```
+
+Which mode is live is printed at boot and again on first use, with no
+credential in either line:
+
+```
+  ● File storage   MinIO (S3-compatible object storage)
+[storage] EXTERNAL — bucket "aplus-learn" at minio.example.com
+
+  ○ File storage   Local filesystem (.storage/)
+[storage] LOCAL — uploads are written to .storage/ because STORAGE_BUCKET … are not set.
+```
+
+`storageDiagnostics()` returns the same facts to the admin panel, and the
+integrations **Test connection** button reports local mode as
+`NOT_CONFIGURED` rather than as a passing object-store check — pressing it
+asks about the bucket, and a green tick for the local disk would not be an
+answer.
+
+**Local mode in production is a real risk, and it is allowed anyway.** A host
+with an ephemeral filesystem accepts a tutor's identity document and then
+loses it on the next deploy, and nothing is shared between instances. The
+platform warns loudly rather than refusing to boot, because a deployment that
+has not been given a bucket yet is still a working application. A deployment
+that would rather fail than store uploads on its own disk sets
+**`STORAGE_REQUIRE_EXTERNAL=true`**, which turns the fallback back into a
+start-up-time and point-of-use error naming the variables to set.
+
+Two rules the fallback does **not** bend:
+
+- **A stored credential that will not decrypt** — the usual consequence of
+  rotating `AUTH_SECRET` — is an error state, never a fallback. Silently
+  writing new uploads to disk while older ones sit in a bucket nobody can open
+  would split one deployment's files across two stores and look like it had
+  worked.
+- **A provider name this build does not know** (`STORAGE_PROVIDER=s3`) is a
+  typo with a correct value behind it, so it is refused by name. Absence falls
+  back; a mistake does not.
+
+### Scopes
+
 Two scopes, both written outside `public/`. Nothing is ever written into the
 served web root — a writable directory inside it is how an upload feature
 becomes a remote-code-execution feature.
 
 | Scope | Location | Audience |
 |---|---|---|
-| `documents` | `.storage/documents` or `<prefix>/documents/` | Private. Verification paperwork, served only through the audited admin route. The storage key is `select: false` on the model so it cannot leak through a serialised document. |
-| `branding` | `.storage/branding` or `<prefix>/branding/` | Public *content*, private *files*. Logos and icons uploaded at Admin → Platform settings, served by `/api/branding/[asset]`. |
+| `documents` | `.storage/documents/` or `<bucket>/<prefix>/documents/` | Private. Verification paperwork, served only through the audited admin route. The storage key is `select: false` on the model so it cannot leak through a serialised document. |
+| `branding` | `.storage/branding/` or `<bucket>/<prefix>/branding/` | Public *content*, private *files*. Logos and icons uploaded at Admin → Platform settings, served by `/api/branding/[asset]`. |
 
 Branding assets are addressed by **setting name**, never by storage key: the
 route resolves `logo`, `favicon`, `appleTouchIcon`, `logoDark` or `ogImage`
@@ -488,16 +584,38 @@ quotes are stripped from it, because it is later echoed in a
 The admin retrieval route answers with `nosniff`, a `sandbox` content-security
 policy and `no-store`.
 
-### MinIO
+### Local mode
 
 ```
-STORAGE_PROVIDER=minio
+# nothing at all — this is the default
+STORAGE_LOCAL_DIR=.storage    # optional; relative paths resolve against the project root
+```
+
+Keys are generated (`<uuid><ext>`), never derived from the uploader's
+filename, and the original name is kept only as a label on the database
+record — it is what an administrator sees and what the
+`Content-Disposition` header carries, and it is re-sanitised on the way out.
+Writes use `wx`, so an upload can never replace a file that is already there.
+A stored key is reduced to a bare object name and then checked against
+`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$` before it reaches the filesystem, and the
+resolved path is proved to be inside its scope directory, so `../`, `..\`,
+a percent-escape, a NUL or an absolute path addresses nothing. A missing
+object answers 404 with no filesystem path in the message — the directory is a
+location the client is never told.
+
+The directory is created on demand, sits outside `public/` and outside `src/`,
+and is git-ignored, so an uploaded file can be neither served directly nor
+committed.
+
+### External mode — MinIO and any S3-compatible store
+
+```
 STORAGE_ENDPOINT=https://minio.example.com   # the S3 API root, not the console
 STORAGE_BUCKET=aplus-learn
 STORAGE_ACCESS_KEY=…
 STORAGE_SECRET_KEY=…
-STORAGE_REGION=us-east-1      # MinIO's default
-STORAGE_PREFIX=prod           # one bucket, several environments
+STORAGE_REGION=us-east-1      # optional — MinIO's default, and the client's
+STORAGE_PREFIX=prod           # optional — one bucket, several environments
 STORAGE_FORCE_PATH_STYLE=true # MinIO serves path-style
 STORAGE_SSE=                  # leave unset for MinIO — see below
 STORAGE_TIMEOUT_MS=20000
@@ -543,10 +661,10 @@ as a storage error with the endpoint host rather than escaping raw. Anything
 the store echoes back has the access key and secret redacted out of it before
 it reaches a log.
 
-**`STORAGE_PROVIDER=development` is refused when `APP_ENV=production.`** A
-serverless filesystem does not survive the request that wrote to it, so a
-production deployment on it accepts a tutor's identity paperwork and then
-loses it. Failing to start is the better outcome, and is what happens.
+`STORAGE_PROVIDER` is optional: the four credentials above are what select
+the object store. Setting it to `development` forces local mode even when a
+bucket is configured, and the diagnostic then says *that* is the reason rather
+than blaming variables the operator has already set.
 
 ### Migrating an existing deployment
 
@@ -562,9 +680,10 @@ Filenames are preserved exactly, because they are the keys the database
 already holds. Objects already present are skipped, so the command is safe to
 re-run. The content type is re-derived from the bytes on the way in, exactly
 as the upload path does it, rather than guessed from the extension. Nothing is
-deleted from `.storage/` — set `STORAGE_PROVIDER=minio`, restart, confirm a
+deleted from `.storage/` — set the four credentials, restart, confirm a
 document opens under **Admin → Verification**, and remove the directory
-yourself once you are satisfied.
+yourself once you are satisfied. Files uploaded in either mode keep resolving,
+because the key never encoded which store wrote it.
 
 
 ---

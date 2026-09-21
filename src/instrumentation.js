@@ -29,13 +29,27 @@ export async function register() {
   const { assertConfiguration, appEnv, integrationStatus, isProduction } = await import(
     "@/lib/config/env"
   );
+  // Plain data — no database, no crypto, safe in the traced start-up bundle.
+  const { UPLOAD } = await import("@/constants/config");
+
+  const localUploadDir = () => process.env.STORAGE_LOCAL_DIR?.trim() || UPLOAD.localStorageDir;
 
   // Environment-level gate. Unchanged: this is what refuses to boot a
   // production deployment with no configuration at all.
   assertConfiguration();
 
   const rows = integrationStatus()
-    .map((s) => `  ${s.ok ? (s.mode === "production" ? "●" : "○") : "✗"} ${s.label.padEnd(14)} ${s.providerLabel}`)
+    .map((s) => {
+      const mark = s.ok ? (s.mode === "production" ? "●" : "○") : "✗";
+      // An integration on its declared fallback says where that is — for file
+      // storage, "where do uploaded files go" is the first question anyone
+      // debugging an upload asks. Read from the constant rather than the
+      // provider: a boot report must not import the module that decrypts
+      // credentials, which is also why the stored view below is a separate,
+      // duller module.
+      const detail = s.fellBack && s.key === "storage" ? ` (${localUploadDir()}/)` : "";
+      return `  ${mark} ${s.label.padEnd(14)} ${s.providerLabel}${detail}`;
+    })
     .join("\n");
   console.info(`\nAPlus Learn — APP_ENV=${appEnv()}\n${rows}\n`);
 

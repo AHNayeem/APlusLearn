@@ -33,7 +33,12 @@ import { buildEmailProvider, resetEmailProvider } from "./external/email-provide
 import { buildPaymentProvider, resetPaymentProvider } from "./external/payment-provider";
 import { buildSmsProvider, resetSmsProvider } from "./external/sms-provider";
 import { buildCalendarProvider, resetCalendarProviders } from "./external/calendar-provider";
-import { buildStorageProvider, resetStorageProvider } from "./external/storage-provider";
+import {
+  buildStorageProvider,
+  describeStorageMode,
+  resetStorageProvider,
+  STORAGE_MODES,
+} from "./external/storage-provider";
 
 /**
  * External module administration (§26, §36, §38, §39).
@@ -804,8 +809,23 @@ async function testCalendar(resolved) {
  * The storage adapter throws on failure rather than returning a verdict — it
  * predates this panel and its other caller is a CLI that wants the stack.
  * Normalised here rather than changed there.
+ *
+ * A module whose external configuration is incomplete resolves to the local
+ * filesystem, and testing *that* would answer a question nobody asked: the
+ * operator pressed the button to find out whether their bucket works. So the
+ * incomplete case is reported as what it is, rather than as a green tick for
+ * a store the credentials never reached.
  */
 async function testStorage(resolved) {
+  const mode = describeStorageMode(resolved);
+  if (mode.mode === STORAGE_MODES.LOCAL) {
+    return {
+      ok: false,
+      code: "NOT_CONFIGURED",
+      message: `No object store to test — uploads are being written to the local filesystem because ${mode.reason}.`,
+    };
+  }
+
   const provider = buildStorageProvider(resolved);
   try {
     const result = await provider.verify();

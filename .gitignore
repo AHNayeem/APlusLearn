@@ -41,4 +41,10 @@ yarn-error.log*
 next-env.d.ts
 
 # local file storage (verification documents + uploaded branding)
+#
+# Written by LocalStorageProvider whenever no S3-compatible endpoint is
+# configured. Never commit these: they are tutors' identity documents. The
+# second entry covers the conventional directory name in case STORAGE_LOCAL_DIR
+# points there.
 /.storage/
+/uploads/

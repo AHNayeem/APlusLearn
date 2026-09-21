@@ -15,6 +15,7 @@ import {
   ACTIVE_GROUP_STATUSES,
   GROUP_ENROLMENT_STATUS,
   SEAT_HOLDING_ENROLMENT_STATUSES,
+  ACTIVE_SESSION_STATUSES,
   ATTENDANCE,
   BOOKING_STATUS,
   BLOCKING_BOOKING_STATUSES,
@@ -39,7 +40,12 @@ import { calculateLessonPrice } from "@/lib/booking/pricing";
 import { isSlotBookable } from "@/lib/booking/slots";
 import { getSettings } from "./settings.service";
 import { createPaymentForBooking, refundPayment } from "./payment.service";
-import { getMeetingProvider } from "./external/meeting-provider";
+import {
+  provisionMeeting,
+  meetingForViewer,
+  syncSeatMeetings,
+  retireMeeting,
+} from "./meeting.service";
 import { externalBusyPeriods } from "./calendar.service";
 import { refreshNextAvailable } from "./availability.service";
 import { notify, notifyMany } from "./notification.service";
@@ -264,6 +270,31 @@ export async function updateGroupSession(id, input, actor) {
   for (const field of ["title", "description", "minParticipants", "maxParticipants", ...lockedFields]) {
     if (input[field] === undefined) continue;
     session[field] = field === "startAt" ? new Date(input[field]) : input[field];
+  }
+
+  /**
+   * The platform, while the session is still nobody's but the tutor's.
+   *
+   * It is not in `lockedFields` because it is not one of the things a learner
+   * agreed to when they paid — but it is fixed the moment a room exists,
+   * because changing it then would leave a Zoom room behind a Google Meet
+   * label. Once there is a room, replacing it is what the meeting endpoint is
+   * for, and that path tears the old one down.
+   */
+  if (input.meetingProvider !== undefined) {
+    if (hasEnrolments || session.meeting?.joinUrl) {
+      throw new BusinessRuleError(
+        "This session already has a meeting room. Change the joining details instead.",
+        "SESSION_MEETING_EXISTS",
+      );
+    }
+    if (session.mode !== LESSON_MODES.ONLINE) {
+      throw new BusinessRuleError(
+        "This is an in-person session, so it has no meeting platform.",
+        "SESSION_NOT_ONLINE",
+      );
+    }
+    session.meetingProvider = input.meetingProvider;
   }
 
   if (input.startAt !== undefined || input.durationMinutes !== undefined) {
@@ -522,29 +553,20 @@ async function ensureGroupMeeting(sessionId) {
   const session = await GroupSession.findById(sessionId);
   if (!session || session.mode !== LESSON_MODES.ONLINE || session.meeting?.joinUrl) return;
 
-  try {
-    const provider = getMeetingProvider(session.meetingProvider);
-    const meeting = await provider.createMeeting({
-      topic: session.title,
-      startAt: session.startAt,
-      durationMinutes: session.durationMinutes,
-      timeZone: session.timeZone,
-      reference: session.reference,
-    });
+  // The same provisioning a one-to-one lesson uses, so a group room is created
+  // on the same terms and fails in the same way — one implementation of the
+  // rule, not a second copy that could drift from it.
+  const meeting = await provisionMeeting(session);
 
-    session.meeting = { ...meeting, provider: meeting.provider ?? session.meetingProvider };
-    await session.save();
+  // A room that could not be created must not stop a session being confirmed;
+  // the tutor or an administrator supplies one through
+  // `POST /api/tutor/groups/:id/meeting` (§27).
+  if (!meeting) return;
 
-    // Every learner sees the same link on their own booking.
-    await Booking.updateMany(
-      { groupSessionId: session._id },
-      { $set: { meeting: session.meeting } },
-    );
-  } catch (error) {
-    // A room that could not be created must not stop a session being
-    // confirmed; the tutor can add one by hand (§27).
-    console.error("[group] could not create the meeting room:", error.message);
-  }
+  session.meeting = meeting;
+  await session.save();
+  // Every learner sees the same link on their own booking.
+  await syncSeatMeetings(session);
 }
 
 // --- Leaving ---------------------------------------------------------------
@@ -674,6 +696,7 @@ export async function cancelGroupSession(id, { reason }, actor) {
   if (!claimed.modifiedCount) throw new ConflictError("That session has already been cancelled.");
 
   const refunded = await refundEveryone(session, reason ?? "The session was cancelled.");
+  await retireSessionRoom(session);
 
   await notifyParticipants(session._id, {
     type: NOTIFICATION_TYPES.GROUP_SESSION_CANCELLED,
@@ -694,6 +717,32 @@ export async function cancelGroupSession(id, { reason }, actor) {
   });
 
   return { ...toPlain(await GroupSession.findById(session._id).lean()), ...refunded };
+}
+
+/**
+ * Stand a cancelled session's room down (§27).
+ *
+ * A one-to-one cancellation has always done this. A group cancellation did
+ * not: the session kept its `joinUrl` and passcode, every seat kept the copy
+ * `syncSeatMeetings` had put there, and — for a room this platform had created
+ * — the Zoom/Meet/Teams meeting itself stayed live in the platform's own
+ * account, referenced by nothing and torn down by nothing. Twelve families had
+ * the link. The read paths refused to hand it out again, which is not the same
+ * as the room being gone.
+ *
+ * `retireMeeting` is the same rule the one-to-one path uses, so the two kinds
+ * of lesson give a room up on identical terms, and a MANUAL room is still only
+ * forgotten rather than deleted out of somebody else's account.
+ */
+async function retireSessionRoom(session) {
+  if (!session.meeting) return;
+
+  const retired = await retireMeeting(session);
+  await GroupSession.updateOne({ _id: session._id }, { $set: { meeting: retired } });
+
+  // Every seat holds its own copy, and each one has to lose the credentials too.
+  session.meeting = retired;
+  await syncSeatMeetings(session);
 }
 
 /** Cancel every booking in a session and send the money back. */
@@ -889,6 +938,7 @@ export async function settleUnderfilledSessions({ now = new Date(), limit = 100 
     if (!claimed.modifiedCount) continue;
 
     const result = await refundEveryone(session, "Not enough people signed up.");
+    await retireSessionRoom(session);
     refundedCents += result.refundedCents;
     cancelled += 1;
 
@@ -988,10 +1038,26 @@ export async function getGroupSession(id, actor) {
 
   return {
     session: publicSession(toPlain(session)),
-    // The meeting link belongs to the people actually attending (§27).
-    meeting: isTutor || myEnrolments.some((e) => e.status === GROUP_ENROLMENT_STATUS.CONFIRMED)
-      ? (session.meeting ?? null)
-      : null,
+    /**
+     * The meeting link belongs to the people actually attending (§27) — the
+     * tutor hosting it, an administrator who may have to fix it, and anybody
+     * holding a confirmed seat. A waitlisted learner has no lesson yet and so
+     * no room.
+     *
+     * `meetingForViewer` then decides how much of it they get: a withdrawn
+     * link stays visible to the host who has to replace it and is kept from
+     * everyone else, and a cancelled or finished session hands out no live
+     * credentials at all.
+     */
+    meeting: meetingForViewer(
+      isTutor || isAdmin || myEnrolments.some((e) => e.status === GROUP_ENROLMENT_STATUS.CONFIRMED)
+        ? (toPlain(session.meeting) ?? null)
+        : null,
+      {
+        isManager: Boolean(isTutor || isAdmin),
+        live: ACTIVE_SESSION_STATUSES.includes(session.status),
+      },
+    ),
     myEnrolments: toPlain(myEnrolments),
     roster: toPlain(roster).map((entry) => ({
       id: entry.id,
@@ -1002,6 +1068,17 @@ export async function getGroupSession(id, actor) {
       gradeName: entry.studentProfileId?.gradeName ?? null,
     })),
     canManage: Boolean(isTutor || isAdmin),
+    /**
+     * Whether this caller may set the joining details — the same rule
+     * `meeting.service` enforces, surfaced so the page can offer the control
+     * on a session that has *no* room yet. Without it an online session whose
+     * provider was down would render no meeting card at all, and the tutor
+     * would have nowhere to fix it from.
+     */
+    canManageMeeting:
+      Boolean(isTutor || isAdmin) &&
+      session.mode === LESSON_MODES.ONLINE &&
+      ACTIVE_SESSION_STATUSES.includes(session.status),
   };
 }
 
@@ -1068,7 +1145,24 @@ export async function listAllSessions({ status, page = 1, pageSize } = {}) {
     GroupSession.countDocuments(query),
   ]);
 
-  return { items: toPlain(items), total, page, pageSize: size };
+  /**
+   * An administrator manages every session, so a live one's room is theirs to
+   * see — but "a cancelled or finished lesson keeps no live credentials for
+   * anybody" has no exception for administrators, and this list is mostly
+   * cancelled and finished sessions. Same rule as the detail read.
+   */
+  return {
+    items: toPlain(items).map((session) => ({
+      ...session,
+      meeting: meetingForViewer(session.meeting ?? null, {
+        isManager: true,
+        live: ACTIVE_SESSION_STATUSES.includes(session.status),
+      }),
+    })),
+    total,
+    page,
+    pageSize: size,
+  };
 }
 
 // --- Internals -------------------------------------------------------------
@@ -1081,6 +1175,18 @@ function publicSession(session) {
   return {
     ...session,
     tutorNotes: undefined,
+    /**
+     * The room never travels on the session itself (§27, §35).
+     *
+     * This function spreads the whole document, so anything not named here
+     * goes out with it — and `publicSession` is what `listOpenSessions` maps
+     * over to build the *public* browse page. A join URL and passcode rode out
+     * on `session.meeting` to anyone who opened `/groups`, enrolled or not,
+     * while the separately-gated `meeting` field beside it correctly returned
+     * null. Callers entitled to a room get it from that field and from nowhere
+     * else.
+     */
+    meeting: undefined,
     location: session.location
       ? { ...session.location, addressLine: undefined }
       : undefined,

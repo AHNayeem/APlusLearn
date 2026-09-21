@@ -7,6 +7,7 @@ import {
   MEETING_PROVIDERS,
   IN_PERSON_LOCATIONS,
 } from "../constants/index.js";
+import { MeetingSchema } from "./Booking.js";
 
 /**
  * One lesson several learners attend together (§41 Phase 2).
@@ -46,20 +47,14 @@ const GroupSessionSchema = new mongoose.Schema(
 
     mode: { type: String, enum: Object.values(LESSON_MODES), required: true },
     meetingProvider: { type: String, enum: Object.values(MEETING_PROVIDERS) },
-    /** Created once for the whole group, not once per learner. */
-    meeting: {
-      type: new mongoose.Schema(
-        {
-          provider: { type: String, enum: Object.values(MEETING_PROVIDERS) },
-          joinUrl: { type: String, trim: true },
-          meetingId: { type: String, trim: true },
-          passcode: { type: String, trim: true },
-          createdAt: { type: Date },
-        },
-        { _id: false },
-      ),
-      default: undefined,
-    },
+    /**
+     * Created once for the whole group, not once per learner.
+     *
+     * The same `MeetingSchema` a one-to-one booking uses, imported rather than
+     * redeclared: a room is a room, and one shape means `meeting.service`
+     * configures both through one code path.
+     */
+    meeting: { type: MeetingSchema, default: undefined },
     location: {
       type: new mongoose.Schema(
         {

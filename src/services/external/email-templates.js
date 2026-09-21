@@ -247,6 +247,49 @@ export function emailTemplatesFor(brand = DEFAULT_EMAIL_BRAND) {
         cta: { label: "View the lesson", href: `${baseUrl()}/bookings/${booking.id}` },
       }),
 
+    /**
+     * The joining details for an online lesson changed (§27, §28).
+     *
+     * One template for all three cases — a link arriving, a link replaced, a
+     * link withdrawn — because they are the same message with a different
+     * reason, and because the thing that must be identical in all three is
+     * what the mail does *not* contain.
+     *
+     * It carries no join URL and no passcode. Mail is delivered over a path
+     * this platform does not control, sits in an inbox indefinitely and is
+     * forwarded without a thought; a room credential belongs on the lesson
+     * page behind a session, which is where the button below goes.
+     */
+    meetingUpdated: ({ firstName, booking, providerLabel, reason }) =>
+      email(`Joining details for ${booking.courseName}`, {
+        preheader:
+          reason === "withdrawn"
+            ? "The link has been withdrawn while a new one is arranged."
+            : `${booking.dateLabel} at ${booking.timeLabel}`,
+        heading:
+          reason === "withdrawn"
+            ? "The joining link has been withdrawn"
+            : reason === "changed"
+              ? "Your lesson has a new joining link"
+              : "Your lesson is ready to join",
+        body: [
+          `Hi ${firstName},`,
+          reason === "withdrawn"
+            ? "Your tutor is arranging a new link for the lesson below. The time is unchanged — we'll let you know as soon as the new one is ready."
+            : `The lesson below is ready to join on ${providerLabel}. Open it from your lesson page when it's time.`,
+        ],
+        details: [
+          ["Course", booking.courseName],
+          ["When", `${booking.dateLabel} at ${booking.timeLabel}`],
+          ["Platform", providerLabel],
+          ["Reference", booking.reference],
+        ],
+        cta: { label: "Open the lesson", href: `${baseUrl()}/bookings/${booking.id}` },
+        // Said plainly, so nobody waits for a link that is never coming by mail.
+        footnote:
+          "For your security the joining link and any passcode are only shown on the lesson page, never in email.",
+      }),
+
     bookingReminder: ({ firstName, booking, whenLabel, isTutor }) =>
       email(`Reminder — ${booking.courseName} ${whenLabel}`, {
         preheader: `${booking.dateLabel} at ${booking.timeLabel}`,

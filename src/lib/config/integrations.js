@@ -36,9 +36,12 @@ import {
  * ## What precedence does not bend
  *
  *   • `fakeAllowedInProduction: false` still holds. No database row can put
- *     payments, email or file storage into development mode on a production
- *     deployment — that guard is about what the platform will tolerate, not
- *     what an operator prefers, so it is not an operator's to override.
+ *     payments or email into development mode on a production deployment —
+ *     that guard is about what the platform will tolerate, not what an
+ *     operator prefers, so it is not an operator's to override. File storage
+ *     is the exception and is deliberately not one of them: its fallback is a
+ *     real store rather than a fake, so an incomplete bucket configuration
+ *     degrades to the local filesystem instead of refusing the upload.
  *
  *   • A stored secret that will not decrypt — the normal consequence of
  *     rotating `AUTH_SECRET` — puts the module into an explicit error state.
@@ -284,6 +287,9 @@ export async function resolveIntegrationConfig(moduleKey, { fresh = false } = {}
       secretSources: {},
       configured: false,
       missing: [],
+      // Broken, not absent. A module that cannot read its own credential must
+      // never be treated as one that was simply never configured.
+      code: "SECRET_UNREADABLE",
       error:
         `${registry.label}: ${undecryptable.join(" and ")} cannot be read. ` +
         "This happens when AUTH_SECRET changes after a secret was saved — enter the value again to repair it.",
@@ -322,6 +328,7 @@ export async function resolveIntegrationConfig(moduleKey, { fresh = false } = {}
     secretSources,
     configured: missing.length === 0,
     missing,
+    code: missing.length ? "INCOMPLETE" : null,
     error: missing.length
       ? `${registry.label}: ${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} required.`
       : null,
@@ -392,6 +399,18 @@ function fromEnvironmentOnly(moduleKey, registry) {
     secretSources,
     configured: resolved.configured,
     missing: resolved.missing ?? [],
+    // `env.js` already applied any declared fallback, so an environment that
+    // still reports itself unconfigured is refusing on purpose — an unknown
+    // provider name, or a deployment that insists on the real service. That is
+    // a hard error, not the incomplete-configuration state a module may choose
+    // to degrade through.
+    code: resolved.configured ? null : "REFUSED",
+    // An integration running on its declared fallback rather than on the
+    // external service it would prefer (`env.js`). Carried through so the
+    // factories and the admin panel read one description of the situation.
+    fellBack: Boolean(resolved.fellBack),
+    fallbackReason: resolved.reason ?? null,
+    warning: resolved.warning ?? null,
     error: resolved.error,
     usesDevelopment,
     updatedAt: null,
@@ -411,6 +430,7 @@ function failed(moduleKey, registry, enabled, message) {
     secretSources: {},
     configured: false,
     missing: [],
+    code: "REFUSED",
     error: message,
     usesDevelopment: false,
     updatedAt: null,

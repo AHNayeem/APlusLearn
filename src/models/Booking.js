@@ -3,6 +3,7 @@ import {
   BOOKING_STATUS,
   LESSON_MODES,
   MEETING_PROVIDERS,
+  MEETING_SOURCES,
   IN_PERSON_LOCATIONS,
   RECURRENCE,
 } from "../constants/index.js";
@@ -26,6 +27,23 @@ const PriceBreakdownSchema = new mongoose.Schema(
   { _id: false },
 );
 
+/**
+ * The joining details for one online lesson (§27).
+ *
+ * Shared with `GroupSession`, which imports this schema rather than declaring
+ * a second one, so a room is the same shape whether one learner attends or
+ * twelve — and a change here cannot apply to only half the platform.
+ *
+ * What is deliberately *not* here: the topic, the start time, the duration,
+ * the time zone and the host. Every one of those already lives on the lesson
+ * this sub-document hangs off, and a second copy would be a second thing to
+ * keep true through a reschedule. The adapters derive them from the lesson at
+ * the moment they call the provider.
+ *
+ * `passcode` is a credential. It is released only by `getBooking()` /
+ * `getGroupSession()`, only to people entitled to attend, and it is never
+ * logged — `meeting.service` redacts it from its own audit metadata.
+ */
 const MeetingSchema = new mongoose.Schema(
   {
     provider: { type: String, enum: Object.values(MEETING_PROVIDERS) },
@@ -33,9 +51,46 @@ const MeetingSchema = new mongoose.Schema(
     meetingId: { type: String, trim: true },
     passcode: { type: String, trim: true },
     createdAt: { type: Date },
+
+    /**
+     * Whether this application owns the room. See `MEETING_SOURCES` — it
+     * decides whether a reschedule may move the room and whether a
+     * cancellation may tear it down.
+     */
+    source: {
+      type: String,
+      enum: Object.values(MEETING_SOURCES),
+      default: MEETING_SOURCES.PROVIDER,
+    },
+
+    /**
+     * Joining instructions from the tutor — "use the waiting room, I'll let
+     * you in", a dial-in note, which browser to use. Free text shown beside
+     * the join button; it carries no behaviour.
+     */
+    instructions: { type: String, trim: true, maxlength: 500 },
+
+    /**
+     * Withdrawn from the people attending.
+     *
+     * This stops *this platform* handing the link out and refuses the join
+     * action. It does not close the room at the provider — nothing here can
+     * promise that, least of all for a MANUAL room in somebody else's
+     * account. It is the reversible control ("that link got shared around,
+     * stop giving it out while I sort out a new one"); clearing the meeting
+     * outright is the destructive one, and only that tears a PROVIDER room
+     * down.
+     */
+    disabled: { type: Boolean, default: false },
+
+    /** Who last set these details by hand, and when. Null for a PROVIDER room. */
+    configuredBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    configuredAt: { type: Date },
   },
   { _id: false },
 );
+
+export { MeetingSchema };
 
 /**
  * In-person location. `addressLine` is select:false and only ever released to

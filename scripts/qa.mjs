@@ -2241,10 +2241,69 @@ async function main() {
     !JSON.stringify(search.payload.data).match(/zoom\.us|meet\.google|teams\.microsoft/),
   );
 
-  const participantView = await parent(`/api/bookings/${bookingId}`);
+  /*
+    A *confirmed* lesson, booked and paid for here.
+
+    This block used to assert against `bookingId`, which the cancellation
+    section above has cancelled by the time it runs — so "the purchaser can see
+    their own meeting link" was passing on a lesson that was never going to
+    happen, and what it really proved was that a dead room's credentials
+    outlived it. That is now refused (§27), so the positive case needs a lesson
+    there is actually something to attend.
+
+    Both properties are asserted: participants see the room on a live lesson,
+    and nobody sees it on a cancelled one.
+  */
+  const privacySlots = await parent(
+    `/api/tutors/${tutorId}/availability?days=28&durationMinutes=60`,
+  );
+  const privacySlot = privacySlots.payload?.data?.days?.find((d) => d.slots.length > 0)
+    ?.slots[0]?.startAt;
+
+  const privacyBooking = await parent("/api/bookings", {
+    method: "POST",
+    body: {
+      tutorProfileId: tutorId,
+      studentProfileId: studentId,
+      courseId,
+      mode: "ONLINE",
+      startAt: privacySlot,
+      durationMinutes: 60,
+      meetingProvider: "ZOOM",
+      studentNotes: "QA — meeting privacy fixture",
+    },
+  });
+  const privacyBookingId = privacyBooking.payload?.data?.bookings?.[0]?.id;
+  await parent(`/api/payments/${privacyBooking.payload?.data?.payment?.id}/capture`, {
+    method: "POST",
+    body: {
+      card: { number: "4242424242424242", name: "QA", expiry: "12/28", cvc: "123" },
+      meetingProvider: "ZOOM",
+    },
+  });
+
+  const participantView = await parent(`/api/bookings/${privacyBookingId}`);
   check(
     "the purchaser can see their own meeting link",
     participantView.ok && Boolean(participantView.payload.data.booking?.meeting?.joinUrl),
+    JSON.stringify(participantView.payload?.data?.booking?.meeting ?? participantView.payload?.error),
+  );
+
+  // The cancelled lesson from the section above: still theirs to read, with
+  // nothing live left on it.
+  const cancelledView = await parent(`/api/bookings/${bookingId}`);
+  check(
+    "the purchaser can still open a cancelled lesson",
+    cancelledView.ok,
+  );
+  check(
+    "but a cancelled lesson carries NO join link for anyone",
+    !cancelledView.payload?.data?.booking?.meeting?.joinUrl,
+    JSON.stringify(cancelledView.payload?.data?.booking?.meeting),
+  );
+  check(
+    "and no passcode",
+    !cancelledView.payload?.data?.booking?.meeting?.passcode,
   );
 
   // The signed-in tutor is whoever the seed made; the booking above went to
@@ -2257,7 +2316,7 @@ async function main() {
   const tutorIsParticipant =
     String(tutorSelf.payload?.data?.profile?.id) === String(bookingTutorProfileId);
 
-  const tutorView = await tutor(`/api/bookings/${bookingId}`);
+  const tutorView = await tutor(`/api/bookings/${privacyBookingId}`);
   if (tutorIsParticipant) {
     check(
       "the tutor on the lesson can see its meeting link",
@@ -2271,14 +2330,20 @@ async function main() {
     );
   }
 
-  const adminView = await admin(`/api/bookings/${bookingId}`);
+  const adminView = await admin(`/api/bookings/${privacyBookingId}`);
   check(
     "an administrator can see the lesson for support and audit",
     adminView.ok && Boolean(adminView.payload.data.booking?.meeting?.joinUrl),
   );
 
-  const anonView = await anon(`/api/bookings/${bookingId}`);
+  const anonView = await anon(`/api/bookings/${privacyBookingId}`);
   check("an anonymous request cannot see a meeting link", anonView.status === 401);
+
+  // Leave the seeded calendar as it was found.
+  await parent(`/api/bookings/${privacyBookingId}/cancel`, {
+    method: "POST",
+    body: { reason: "QA — meeting privacy fixture teardown." },
+  });
 
   // Configuration is admin-only and never reaches a non-admin.
   const adminSettingsPage = await admin("/api/admin/settings");
@@ -4015,6 +4080,606 @@ async function main() {
     body: { tutorProfileId: ownTutorId, courseId: ownCourseId, durationMinutes: 60 },
   });
   check("a verified account is unaffected by the gate", verifiedStillWorks.ok);
+
+  // --- Meeting management ---------------------------------------------------
+  //
+  // Configuring the joining details on a lesson that is already booked (§27).
+  // Everything here goes over real HTTP, because the point is the endpoint's
+  // contract: who may reach it, what it refuses, and what it hands back to
+  // whom. The service-level rules are covered in `test:integrations`.
+  section("Meeting management — configuration, RBAC and visibility");
+
+  const [meetSlot] = await freeSlots(1);
+  const meetBooking = await parent("/api/bookings", {
+    method: "POST",
+    body: {
+      tutorProfileId: ownTutorId,
+      studentProfileId: studentId,
+      courseId: ownCourseId,
+      mode: "ONLINE",
+      startAt: meetSlot,
+      durationMinutes: 60,
+      meetingProvider: "ZOOM",
+      studentNotes: "QA — meeting management fixture",
+    },
+  });
+  const meetBookingId = meetBooking.payload?.data?.bookings?.[0]?.id;
+  const meetPaymentId = meetBooking.payload?.data?.payment?.id;
+  check("a lesson is booked for the meeting fixture", meetBooking.ok,
+    JSON.stringify(meetBooking.payload?.error));
+
+  // Before payment there is no lesson to attend and so nothing to configure.
+  const beforePayment = await tutor(`/api/bookings/${meetBookingId}/meeting`, {
+    method: "POST",
+    body: { action: "manual", provider: "ZOOM", joinUrl: "https://zoom.us/j/11111111111" },
+  });
+  check("an UNPAID lesson cannot be given joining details",
+    beforePayment.status === 422, `status ${beforePayment.status}`);
+
+  await parent(`/api/payments/${meetPaymentId}/capture`, {
+    method: "POST",
+    body: {
+      card: { number: "4242424242424242", name: "QA", expiry: "12/28", cvc: "123" },
+      meetingProvider: "ZOOM",
+    },
+  });
+
+  const afterPayment = await parent(`/api/bookings/${meetBookingId}`);
+  check("paying gives the lesson a room automatically",
+    Boolean(afterPayment.payload?.data?.booking?.meeting?.joinUrl));
+  check("and the learner is told they may not manage it",
+    afterPayment.payload?.data?.booking?.permissions?.canManageMeeting === false);
+
+  // --- Who may configure it -------------------------------------------------
+
+  const anonConfigure = await anon(`/api/bookings/${meetBookingId}/meeting`, {
+    method: "POST",
+    body: { action: "manual", provider: "ZOOM", joinUrl: "https://zoom.us/j/22222222222" },
+  });
+  check("an anonymous request cannot configure a meeting",
+    anonConfigure.status === 401, `status ${anonConfigure.status}`);
+
+  const learnerConfigure = await parent(`/api/bookings/${meetBookingId}/meeting`, {
+    method: "POST",
+    body: { action: "manual", provider: "ZOOM", joinUrl: "https://zoom.us/j/22222222222" },
+  });
+  check("the PURCHASER of the lesson cannot configure its meeting",
+    learnerConfigure.status === 403, `status ${learnerConfigure.status}`);
+
+  const learnerDelete = await parent(`/api/bookings/${meetBookingId}/meeting`, {
+    method: "DELETE",
+  });
+  check("nor remove it", learnerDelete.status === 403, `status ${learnerDelete.status}`);
+
+  const learnerDisable = await parent(`/api/bookings/${meetBookingId}/meeting`, {
+    method: "POST",
+    body: { action: "disable" },
+  });
+  check("nor withdraw it", learnerDisable.status === 403, `status ${learnerDisable.status}`);
+
+  const strangerTutorConfigure = await strangerTutor(`/api/bookings/${meetBookingId}/meeting`, {
+    method: "POST",
+    body: { action: "manual", provider: "ZOOM", joinUrl: "https://evil.example/j/1" },
+  });
+  check("a tutor who does NOT teach the lesson cannot configure its meeting",
+    strangerTutorConfigure.status === 403, `status ${strangerTutorConfigure.status}`);
+
+  /*
+    Ownership named in the body is not ownership.
+
+    The request says which lesson it is about in the path; who is allowed to
+    touch it is decided from the session and the loaded record, and nothing a
+    caller writes in the body may enter that decision. These are the fields a
+    forger would reach for, sent by a tutor who teaches a different lesson.
+  */
+  for (const [label, forged] of [
+    ["tutorUserId", { tutorUserId: "000000000000000000000001" }],
+    ["tutorId", { tutorId: "000000000000000000000001" }],
+    ["teacherId", { teacherId: "000000000000000000000001" }],
+    ["bookingId", { bookingId: meetBookingId }],
+    ["sessionId", { sessionId: meetBookingId }],
+    ["userId and role", { userId: "000000000000000000000001", role: "ADMIN" }],
+  ]) {
+    const res = await strangerTutor(`/api/bookings/${meetBookingId}/meeting`, {
+      method: "POST",
+      body: { action: "disable", ...forged },
+    });
+    check(`an unrelated tutor forging ${label} in the body is still REFUSED`,
+      res.status === 403 || res.status === 422, `status ${res.status}`);
+  }
+
+  const stillOriginal = await parent(`/api/bookings/${meetBookingId}`);
+  check("and none of those refusals changed the stored room",
+    stillOriginal.payload?.data?.booking?.meeting?.joinUrl ===
+      afterPayment.payload?.data?.booking?.meeting?.joinUrl);
+
+  // --- The happy path -------------------------------------------------------
+
+  const meetTutorView = await tutor(`/api/bookings/${meetBookingId}`);
+  check("the tutor teaching it IS told they may manage the meeting",
+    meetTutorView.payload?.data?.booking?.permissions?.canManageMeeting === true);
+
+  // The flag the meeting panel renders its controls from. It is a convenience
+  // for the UI and not the control — every refusal above was enforced by the
+  // endpoint with the form nowhere in sight — but it has to be right, or an
+  // administrator looking at a lesson during an incident sees no way to fix it.
+  const meetAdminView = await admin(`/api/bookings/${meetBookingId}`);
+  check("an administrator is told they may manage the meeting",
+    meetAdminView.payload?.data?.booking?.permissions?.canManageMeeting === true,
+    JSON.stringify(meetAdminView.payload?.data?.booking?.permissions));
+
+  const meetConfigured = await tutor(`/api/bookings/${meetBookingId}/meeting`, {
+    method: "POST",
+    body: {
+      action: "manual",
+      provider: "GOOGLE_MEET",
+      joinUrl: "https://meet.google.com/qaa-bbbb-ccc",
+      meetingId: "qaa-bbbb-ccc",
+      passcode: "Qa9137",
+      instructions: "QA — I'll admit you from the lobby.",
+    },
+  });
+  check("the tutor teaching it CAN configure the meeting", meetConfigured.ok,
+    JSON.stringify(meetConfigured.payload?.error));
+  check("the platform is changed as asked",
+    meetConfigured.payload?.data?.meeting?.provider === "GOOGLE_MEET");
+  check("and it is recorded as entered by hand, not as one we created",
+    meetConfigured.payload?.data?.meeting?.source === "MANUAL");
+
+  const meetPersisted = await parent(`/api/bookings/${meetBookingId}`);
+  check("the configuration persists and reaches the learner",
+    meetPersisted.payload?.data?.booking?.meeting?.joinUrl === "https://meet.google.com/qaa-bbbb-ccc");
+  check("the learner gets the passcode they need to attend",
+    meetPersisted.payload?.data?.booking?.meeting?.passcode === "Qa9137");
+  check("and the joining instructions",
+    meetPersisted.payload?.data?.booking?.meeting?.instructions === "QA — I'll admit you from the lobby.");
+
+  const meetNotified = await parent("/api/notifications?pageSize=50");
+  const meetingNotices = (meetNotified.payload?.data?.notifications ?? []).filter(
+    (n) => n.type === "MEETING_UPDATED",
+  );
+  check("the learner is notified that the joining details changed", meetingNotices.length > 0);
+  check("but the notification never carries the link or the passcode",
+    meetingNotices.every((n) => !/meet\.google\.com|Qa9137/.test(`${n.title} ${n.body}`)),
+    JSON.stringify(meetingNotices.map((n) => n.body)));
+
+  // --- Editing --------------------------------------------------------------
+
+  const meetEdited = await tutor(`/api/bookings/${meetBookingId}/meeting`, {
+    method: "POST",
+    body: {
+      action: "manual",
+      provider: "ZOOM",
+      joinUrl: "https://zoom.us/j/99999999999",
+      meetingId: "99999999999",
+      // Omitted passcode keeps the stored one; null is what clears it.
+      instructions: null,
+    },
+  });
+  check("the configuration can be edited", meetEdited.ok, JSON.stringify(meetEdited.payload?.error));
+  const afterEdit = await parent(`/api/bookings/${meetBookingId}`);
+  check("the edited values are what the learner now sees",
+    afterEdit.payload?.data?.booking?.meeting?.joinUrl === "https://zoom.us/j/99999999999");
+  check("an omitted passcode keeps the stored one rather than wiping it",
+    afterEdit.payload?.data?.booking?.meeting?.passcode === "Qa9137");
+  check("while an explicit null clears a field",
+    !afterEdit.payload?.data?.booking?.meeting?.instructions);
+
+  const clearedPasscode = await tutor(`/api/bookings/${meetBookingId}/meeting`, {
+    method: "POST",
+    body: {
+      action: "manual", provider: "ZOOM", joinUrl: "https://zoom.us/j/99999999999",
+      passcode: null,
+    },
+  });
+  check("and a passcode can be cleared deliberately",
+    clearedPasscode.ok && !clearedPasscode.payload?.data?.meeting?.passcode);
+
+  // --- Invalid configuration ------------------------------------------------
+
+  for (const [label, body] of [
+    ["an http:// link", { action: "manual", provider: "ZOOM", joinUrl: "http://zoom.us/j/1" }],
+    ["a javascript: link", { action: "manual", provider: "ZOOM", joinUrl: "javascript:alert(1)" }],
+    ["a link that is not a URL", { action: "manual", provider: "ZOOM", joinUrl: "zoom" }],
+    ["an empty link", { action: "manual", provider: "ZOOM", joinUrl: "" }],
+    ["no link at all", { action: "manual", provider: "ZOOM" }],
+    ["a platform we do not support", { action: "manual", provider: "WEBEX", joinUrl: "https://webex.com/j/1" }],
+    ["a passcode with a newline", { action: "manual", provider: "ZOOM", joinUrl: "https://zoom.us/j/1", passcode: "a\nb" }],
+    ["a data: link", { action: "manual", provider: "ZOOM", joinUrl: "data:text/html,<script>alert(1)</script>" }],
+    ["a link that is only whitespace", { action: "manual", provider: "ZOOM", joinUrl: "   " }],
+    ["a link far longer than any platform issues",
+      { action: "manual", provider: "ZOOM", joinUrl: `https://zoom.us/j/${"9".repeat(4000)}` }],
+    /*
+      A credential is read off the screen and typed into somebody else's app,
+      so the characters that do damage are the ones nobody can see they are
+      copying. A zero-width space makes a passcode that looks right and is
+      wrong when it is typed back; a right-to-left override reorders what the
+      badge renders, so what is shown is not what is stored. All of these were
+      accepted before — `\s` and `\p{Cc}` do not cover `\p{Cf}`.
+    */
+    ["a passcode with a zero-width space",
+      { action: "manual", provider: "ZOOM", joinUrl: "https://zoom.us/j/1", passcode: `a${String.fromCharCode(0x200b)}b` }],
+    ["a passcode with a right-to-left override",
+      { action: "manual", provider: "ZOOM", joinUrl: "https://zoom.us/j/1", passcode: `a${String.fromCharCode(0x202e)}b` }],
+    ["a passcode with a soft hyphen",
+      { action: "manual", provider: "ZOOM", joinUrl: "https://zoom.us/j/1", passcode: `a${String.fromCharCode(0xad)}b` }],
+    ["a meeting ID longer than any platform issues",
+      { action: "manual", provider: "ZOOM", joinUrl: "https://zoom.us/j/1", meetingId: "1".repeat(300) }],
+    ["an action that does not exist", { action: "teleport" }],
+    ["no action at all", {}],
+  ]) {
+    const res = await tutor(`/api/bookings/${meetBookingId}/meeting`, { method: "POST", body });
+    check(`${label} is REFUSED`, res.status === 422, `status ${res.status}`);
+  }
+
+  const meetSurvived = await parent(`/api/bookings/${meetBookingId}`);
+  check("no refused request changed the stored configuration",
+    meetSurvived.payload?.data?.booking?.meeting?.joinUrl === "https://zoom.us/j/99999999999");
+
+  // --- Withdrawing ----------------------------------------------------------
+
+  const meetWithdrawn = await tutor(`/api/bookings/${meetBookingId}/meeting`, {
+    method: "POST",
+    body: { action: "disable" },
+  });
+  check("the tutor can withdraw the link", meetWithdrawn.ok);
+
+  const learnerAfterWithdrawal = await parent(`/api/bookings/${meetBookingId}`);
+  check("a withdrawn link is NOT handed to the learner",
+    learnerAfterWithdrawal.payload?.data?.booking?.meeting?.joinUrl === null,
+    JSON.stringify(learnerAfterWithdrawal.payload?.data?.booking?.meeting));
+  check("nor is its passcode",
+    !learnerAfterWithdrawal.payload?.data?.booking?.meeting?.passcode);
+  check("but the learner is still told which platform it was on, and that it was withdrawn",
+    learnerAfterWithdrawal.payload?.data?.booking?.meeting?.provider === "ZOOM" &&
+      learnerAfterWithdrawal.payload?.data?.booking?.meeting?.disabled === true);
+
+  const hostAfterWithdrawal = await tutor(`/api/bookings/${meetBookingId}`);
+  check("the host still sees the withdrawn link, because they have to replace it",
+    hostAfterWithdrawal.payload?.data?.booking?.meeting?.joinUrl === "https://zoom.us/j/99999999999");
+
+  /*
+    Every way of reading the lesson, not only the lesson page.
+
+    Withdrawing a link is a control, and a control that one endpoint honours
+    and another does not is no control at all. The learner's booking *list*
+    and the dashboard's "next lesson" summary are two further read paths over
+    the same record, and both build a Join button straight out of what they
+    are given — so a link the tutor has withdrawn must be absent from all
+    three or it is absent from none of them. It went out on both of these.
+  */
+  /**
+   * One lesson out of a scope, whichever page it landed on.
+   *
+   * The family's history grows every run, so looking only at the first page
+   * makes a real assertion fail for the bookkeeping reason that the fixture
+   * scrolled off it. Pages until it is found, and hands back everything it
+   * read so the sweeping assertions can use it too.
+   */
+  const findInScope = async (client, scope, id, maxPages = 6) => {
+    const seen = [];
+    for (let page = 1; page <= maxPages; page += 1) {
+      const res = await client(`/api/bookings?scope=${scope}&page=${page}&pageSize=50`);
+      const rows = res.payload?.data?.bookings ?? [];
+      seen.push(...rows);
+      const hit = rows.find((b) => b.id === id);
+      if (hit || rows.length === 0) return { row: hit ?? null, seen };
+    }
+    return { row: null, seen };
+  };
+
+  const withdrawnScan = await findInScope(parent, "UPCOMING", meetBookingId);
+  const listedWhileWithdrawn = { payload: { data: { bookings: withdrawnScan.seen } } };
+  const withdrawnRow = withdrawnScan.row;
+  check("the withdrawn lesson is in the learner's own booking list", Boolean(withdrawnRow));
+  check("but the LIST endpoint hands out no withdrawn join link either",
+    withdrawnRow?.meeting?.joinUrl == null, `joinUrl ${withdrawnRow?.meeting?.joinUrl}`);
+  check("nor its passcode", !withdrawnRow?.meeting?.passcode,
+    `passcode ${withdrawnRow?.meeting?.passcode}`);
+  check("and no withdrawn credential appears anywhere in the list payload",
+    !JSON.stringify(listedWhileWithdrawn.payload?.data ?? {}).includes("99999999999"));
+  check("while the list still says which platform it was on, and that it was withdrawn",
+    withdrawnRow?.meeting?.provider === "ZOOM" && withdrawnRow?.meeting?.disabled === true,
+    JSON.stringify(withdrawnRow?.meeting));
+
+  const hostRow = (await findInScope(tutor, "UPCOMING", meetBookingId)).row;
+  check("the host's list still carries it, because they have to replace it",
+    hostRow?.meeting?.joinUrl === "https://zoom.us/j/99999999999",
+    JSON.stringify(hostRow?.meeting));
+
+  const meetRestored = await tutor(`/api/bookings/${meetBookingId}/meeting`, {
+    method: "POST",
+    body: { action: "enable" },
+  });
+  check("and can restore it", meetRestored.ok);
+  check("after which the learner can join again",
+    (await parent(`/api/bookings/${meetBookingId}`)).payload?.data?.booking?.meeting?.joinUrl ===
+      "https://zoom.us/j/99999999999");
+
+  // --- The administrator ----------------------------------------------------
+
+  const adminConfigured = await admin(`/api/bookings/${meetBookingId}/meeting`, {
+    method: "POST",
+    body: { action: "manual", provider: "MICROSOFT_TEAMS", joinUrl: "https://teams.microsoft.com/l/meetup-join/qa" },
+  });
+  check("an administrator can configure any lesson's meeting", adminConfigured.ok,
+    JSON.stringify(adminConfigured.payload?.error));
+
+  const adminRemoved = await admin(`/api/bookings/${meetBookingId}/meeting`, { method: "DELETE" });
+  check("and remove it", adminRemoved.ok && adminRemoved.payload?.data?.meeting === null);
+
+  const afterRemoval = await parent(`/api/bookings/${meetBookingId}`);
+  check("the learner then sees a confirmed lesson with no room",
+    afterRemoval.payload?.data?.booking?.status === "CONFIRMED" &&
+      !afterRemoval.payload?.data?.booking?.meeting?.joinUrl);
+
+  const rebuilt = await tutor(`/api/bookings/${meetBookingId}/meeting`, {
+    method: "POST",
+    body: { action: "retry" },
+  });
+  check("the tutor can ask the platform for a fresh room", rebuilt.ok,
+    JSON.stringify(rebuilt.payload?.error));
+  check("which is recorded as one WE created, not one entered by hand",
+    rebuilt.payload?.data?.meeting?.source === "PROVIDER");
+
+  // --- Two people at the same moment ---------------------------------------
+  //
+  // A lost edit is survivable — one of two links wins whole and the loser can
+  // look again. A duplicated *room* is not: it is a live meeting in the
+  // platform's own Zoom account that nothing references, that no cancellation
+  // will ever tear down, and that anyone holding the losing link can walk
+  // into. Four simultaneous retries used to produce two of them.
+
+  await admin(`/api/bookings/${meetBookingId}/meeting`, { method: "DELETE" });
+
+  const simultaneousRetries = await Promise.all(
+    Array.from({ length: 4 }, () =>
+      tutor(`/api/bookings/${meetBookingId}/meeting`, { method: "POST", body: { action: "retry" } })),
+  );
+  check("four simultaneous retries create AT MOST ONE room",
+    simultaneousRetries.filter((r) => r.ok).length === 1,
+    simultaneousRetries.map((r) => `${r.status}:${r.payload?.error?.code ?? "ok"}`).join(","));
+  check("and the losers are refused rather than failing",
+    simultaneousRetries.every((r) => r.status < 500),
+    simultaneousRetries.map((r) => r.status).join(","));
+
+  const afterRace = await tutor(`/api/bookings/${meetBookingId}`);
+  check("leaving the lesson with exactly one room",
+    Boolean(afterRace.payload?.data?.booking?.meeting?.joinUrl));
+
+  /*
+    A tutor and an administrator editing the same lesson at the same instant.
+
+    Both succeeding is a legitimate outcome and not asserted against: two
+    requests that did not actually overlap apply in order, and the later edit
+    replacing the earlier one is what an edit is for. What must hold whichever
+    way they interleave is that the lesson ends up with one of the two links
+    *whole* — never half of each, never a third thing, and never a 500. The
+    duplicated-room case above is the one where an overlap is unrecoverable,
+    and that is asserted exactly.
+  */
+  const simultaneousEdits = await Promise.all([
+    tutor(`/api/bookings/${meetBookingId}/meeting`, {
+      method: "POST",
+      body: { action: "manual", provider: "ZOOM", joinUrl: "https://zoom.us/j/55555555555" },
+    }),
+    admin(`/api/bookings/${meetBookingId}/meeting`, {
+      method: "POST",
+      body: { action: "manual", provider: "ZOOM", joinUrl: "https://zoom.us/j/66666666666" },
+    }),
+  ]);
+  check("simultaneous edits by a tutor and an administrator resolve cleanly",
+    simultaneousEdits.every((r) => r.status < 500) && simultaneousEdits.some((r) => r.ok),
+    simultaneousEdits.map((r) => `${r.status}:${r.payload?.error?.code ?? "ok"}`).join(","));
+
+  const settledEdit = (await tutor(`/api/bookings/${meetBookingId}`))
+    .payload?.data?.booking?.meeting?.joinUrl;
+  check("leaving one of the two links that were sent, whole",
+    ["https://zoom.us/j/55555555555", "https://zoom.us/j/66666666666"].includes(settledEdit),
+    settledEdit);
+
+  // --- A cancelled lesson keeps no live credentials -------------------------
+
+  await parent(`/api/bookings/${meetBookingId}/cancel`, {
+    method: "POST",
+    body: { reason: "QA — meeting management teardown." },
+  });
+
+  const afterCancel = await parent(`/api/bookings/${meetBookingId}`);
+  check("a cancelled lesson hands out NO join link",
+    !afterCancel.payload?.data?.booking?.meeting?.joinUrl,
+    JSON.stringify(afterCancel.payload?.data?.booking?.meeting));
+  check("and NO passcode", !afterCancel.payload?.data?.booking?.meeting?.passcode);
+  check("while still recording that it was an online lesson",
+    afterCancel.payload?.data?.booking?.mode === "ONLINE");
+
+  const cancelledScan = await findInScope(parent, "CANCELLED", meetBookingId);
+  check("the cancelled lesson is in the learner's cancelled list", Boolean(cancelledScan.row));
+  check("and the LIST hands out no credentials for it either",
+    !cancelledScan.row?.meeting?.joinUrl && !cancelledScan.row?.meeting?.passcode,
+    JSON.stringify(cancelledScan.row?.meeting));
+
+  /*
+    Every cancelled and finished lesson, not only this run's.
+
+    A lesson that is over keeps its room on the record until something takes
+    it away, and the list is the read path that sweeps up all of them at once
+    — which is what makes it worth asserting over everything it returns rather
+    than one fixture. The seeded history alone carried eight live join URLs
+    here.
+  */
+  const pastScan = await findInScope(parent, "PAST", meetBookingId);
+  const staleCredentials = [...cancelledScan.seen, ...pastScan.seen]
+    .filter((b) => b.meeting?.joinUrl || b.meeting?.passcode);
+  check("no cancelled or finished lesson hands out live credentials in the list",
+    staleCredentials.length === 0,
+    `${staleCredentials.length} carry one, e.g. ${staleCredentials[0]?.reference} → ${staleCredentials[0]?.meeting?.joinUrl}`);
+
+  const configureCancelled = await tutor(`/api/bookings/${meetBookingId}/meeting`, {
+    method: "POST",
+    body: { action: "manual", provider: "ZOOM", joinUrl: "https://zoom.us/j/33333333333" },
+  });
+  check("a cancelled lesson cannot be given a new room",
+    configureCancelled.status === 422, `status ${configureCancelled.status}`);
+
+  // --- Cross-lesson access --------------------------------------------------
+
+  const foreign = await tutor(`/api/bookings/${authBookingId}/meeting`, {
+    method: "POST",
+    body: { action: "disable" },
+  });
+  check("a request naming a lesson id is checked against THAT lesson's tutor",
+    foreign.ok || foreign.status === 403 || foreign.status === 422,
+    `status ${foreign.status}`);
+
+  const noSuchLesson = await admin(
+    `/api/bookings/000000000000000000000000/meeting`,
+    { method: "POST", body: { action: "disable" } },
+  );
+  check("a lesson that does not exist is a 404", noSuchLesson.status === 404,
+    `status ${noSuchLesson.status}`);
+
+  const malformedId = await admin("/api/bookings/not-an-id/meeting", {
+    method: "POST", body: { action: "disable" },
+  });
+  check("a malformed lesson id is refused cleanly", malformedId.status === 422,
+    `status ${malformedId.status}`);
+
+  // --- Group sessions share the same endpoint shape -------------------------
+
+  const openSessions = await anon("/api/groups?pageSize=10");
+  const publicSessions = openSessions.payload?.data?.sessions ?? [];
+  check("the public group listing NEVER carries a meeting room",
+    publicSessions.every((s) => !s.meeting?.joinUrl && !s.meeting?.passcode),
+    JSON.stringify(publicSessions.map((s) => s.meeting).filter(Boolean)));
+
+  /*
+    A group session of this run's own.
+
+    None are seeded, so asserting against whatever happens to be in the
+    database would mean skipping the group path entirely — and the group path
+    is where the room is shared by many learners and where the public listing
+    could leak it. The tutor creates one here, it is configured through the
+    same endpoint shape a one-to-one lesson uses, and it is cancelled at the
+    end so the seeded calendar is left as it was found.
+  */
+  const [groupSlot] = await freeSlots(1);
+  const groupCreated = await tutor("/api/tutor/groups", {
+    method: "POST",
+    body: {
+      title: `QA meeting group ${Date.now() % 100000}`,
+      courseId: ownCourseId,
+      mode: "ONLINE",
+      meetingProvider: "ZOOM",
+      startAt: groupSlot,
+      durationMinutes: 60,
+      minParticipants: 2,
+      maxParticipants: 6,
+      pricePerSeatCents: 3000,
+    },
+  });
+  check("a tutor can create a group session for the meeting fixture",
+    groupCreated.ok, JSON.stringify(groupCreated.payload?.error));
+
+  const groupId = groupCreated.payload?.data?.session?.id;
+
+  if (groupId) {
+    const groupConfigured = await tutor(`/api/tutor/groups/${groupId}/meeting`, {
+      method: "POST",
+      body: {
+        action: "manual",
+        provider: "GOOGLE_MEET",
+        joinUrl: "https://meet.google.com/qag-rrrr-ppp",
+        passcode: "Grp771",
+      },
+    });
+    check("the tutor who runs the session CAN configure its meeting",
+      groupConfigured.ok, JSON.stringify(groupConfigured.payload?.error));
+    check("and it is stored against the session",
+      groupConfigured.payload?.data?.meeting?.joinUrl === "https://meet.google.com/qag-rrrr-ppp");
+
+    const strangerConfiguresGroup = await strangerTutor(
+      `/api/tutor/groups/${groupId}/meeting`,
+      { method: "POST", body: { action: "disable" } },
+    );
+    check("a tutor who does NOT run it cannot touch its meeting",
+      strangerConfiguresGroup.status === 403, `status ${strangerConfiguresGroup.status}`);
+
+    const learnerConfiguresGroup = await parent(`/api/tutor/groups/${groupId}/meeting`, {
+      method: "POST",
+      body: { action: "manual", provider: "ZOOM", joinUrl: "https://zoom.us/j/44444444444" },
+    });
+    check("a learner cannot configure a group session's meeting",
+      learnerConfiguresGroup.status === 403, `status ${learnerConfiguresGroup.status}`);
+
+    const anonConfiguresGroup = await anon(`/api/tutor/groups/${groupId}/meeting`, {
+      method: "POST",
+      body: { action: "manual", provider: "ZOOM", joinUrl: "https://zoom.us/j/44444444444" },
+    });
+    check("nor can an anonymous request",
+      anonConfiguresGroup.status === 401, `status ${anonConfiguresGroup.status}`);
+
+    // Publishing opens it to the public listing — which must not carry the room.
+    const published = await tutor(`/api/tutor/groups/${groupId}`, { method: "POST" });
+    if (published.ok) {
+      const anonSession = await anon(`/api/groups/${groupId}`);
+      check("a visitor with no seat gets NO meeting room for a published session",
+        !anonSession.payload?.data?.meeting?.joinUrl,
+        JSON.stringify(anonSession.payload?.data?.meeting));
+      check("and the session object itself carries none either — this used to leak it",
+        !anonSession.payload?.data?.session?.meeting,
+        JSON.stringify(anonSession.payload?.data?.session?.meeting));
+      check("nor does a learner who has not joined",
+        !(await parent(`/api/groups/${groupId}`)).payload?.data?.meeting?.joinUrl);
+
+      const listedAgain = await anon("/api/groups?pageSize=20");
+      const thisOne = (listedAgain.payload?.data?.sessions ?? []).find((x) => x.id === groupId);
+      check("the published session appears in the public listing", Boolean(thisOne));
+      check("carrying no meeting room with it",
+        thisOne ? !thisOne.meeting : true, JSON.stringify(thisOne?.meeting));
+      check("and no passcode anywhere in the public payload",
+        !JSON.stringify(listedAgain.payload?.data ?? {}).includes("Grp771"));
+
+      const tutorSees = await tutor(`/api/groups/${groupId}`);
+      check("while the tutor running it still sees the room",
+        tutorSees.payload?.data?.meeting?.joinUrl === "https://meet.google.com/qag-rrrr-ppp",
+        JSON.stringify(tutorSees.payload?.data?.meeting));
+    }
+
+    await tutor(`/api/tutor/groups/${groupId}`, {
+      method: "DELETE",
+      body: { reason: "QA — meeting fixture teardown." },
+    });
+
+    const afterCancel = await tutor(`/api/tutor/groups/${groupId}/meeting`, {
+      method: "POST",
+      body: { action: "disable" },
+    });
+    check("a cancelled session cannot have its joining details changed",
+      afterCancel.status === 422, `status ${afterCancel.status}`);
+
+    /*
+      A cancelled session gives its room up, exactly as a cancelled one-to-one
+      lesson does.
+
+      The one-to-one path has always torn the room down and dropped the
+      credentials; the group path did neither, so twelve families kept a
+      working link to a lesson that was not happening and the room itself
+      stayed live in the platform's account with nothing left to tear it down.
+      What survives here is what a cancelled lesson has to be able to say
+      about itself: that it was online, and on which platform.
+    */
+    const cancelledSession = await tutor(`/api/groups/${groupId}`);
+    check("a cancelled session hands its host no join link",
+      !cancelledSession.payload?.data?.meeting?.joinUrl,
+      JSON.stringify(cancelledSession.payload?.data?.meeting));
+    check("nor a passcode", !cancelledSession.payload?.data?.meeting?.passcode);
+    check("while still recording which platform it was on",
+      cancelledSession.payload?.data?.meeting?.provider === "GOOGLE_MEET",
+      JSON.stringify(cancelledSession.payload?.data?.meeting));
+    check("and the whole response carries the passcode nowhere",
+      !JSON.stringify(cancelledSession.payload?.data ?? {}).includes("Grp771"));
+  }
 
   // --- Tutor search eligibility --------------------------------------------
   //

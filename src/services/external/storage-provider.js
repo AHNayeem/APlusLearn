@@ -2,10 +2,13 @@ import "server-only";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, writeFile, readFile, unlink, stat } from "node:fs/promises";
 import path from "node:path";
-import { requireIntegrationConfig, resolveIntegrationConfig } from "@/lib/config/integrations";
+import {
+  IntegrationDisabledError,
+  resolveIntegrationConfig,
+} from "@/lib/config/integrations";
 import { ConfigurationError } from "@/lib/config/env";
-import { INTEGRATION_MODULES } from "@/constants";
-import { ObjectStoreClient } from "./object-storage";
+import { INTEGRATION_MODULES, UPLOAD } from "@/constants";
+import { ObjectStoreClient, storageError } from "./object-storage";
 
 /**
  * Private file storage (§16, §35, §26).
@@ -25,34 +28,86 @@ import { ObjectStoreClient } from "./object-storage";
  * Nothing is written into `public/`. A writable directory inside the served
  * web root is how an upload feature becomes a remote-code-execution feature.
  *
- * Two implementations, chosen by `lib/config/env` from `STORAGE_PROVIDER`:
+ * Two implementations and one rule for choosing between them:
  *
- *   LocalStorageProvider   — development. Writes under `.storage/`.
- *   ObjectStorageProvider  — any real deployment. Speaks the S3 API directly,
- *                            against MinIO (and equally against S3, R2, B2 or
- *                            Spaces — only the endpoint changes).
+ *   ObjectStorageProvider  — used whenever an S3-compatible endpoint, bucket,
+ *                            access key and secret key are all available.
+ *                            Speaks the S3 API directly, so MinIO, S3, R2, B2
+ *                            and Spaces differ only by endpoint.
+ *   LocalStorageProvider   — used whenever any one of those four is missing.
+ *                            Writes under `.storage/` (`STORAGE_LOCAL_DIR`).
  *
- * The local provider is refused when `APP_ENV=production`: a serverless
- * filesystem does not survive the request that wrote to it, so a production
- * deployment on it loses every verification document it accepts.
+ * `describeStorageMode()` is that rule, and it is the only place it is
+ * written down. Nothing else in the application — no route, no service, no
+ * component — reads a STORAGE_* variable or asks which mode is live in order
+ * to decide what to do; they call `getStorageProvider()` and use the
+ * interface. Both modes accept the same uploads, return the same
+ * `{ storageKey, contentType, sizeBytes, checksum }`, and store the same
+ * provider-independent key in the database, so a deployment can move between
+ * them without touching a single stored document.
+ *
+ * The fallback is deliberate and it is not free. A host with an ephemeral
+ * filesystem accepts a tutor's identity document into local mode and then
+ * loses it on the next deploy, so local mode logs a warning on selection —
+ * loudly in production — and a deployment that would rather fail than fall
+ * back sets `STORAGE_REQUIRE_EXTERNAL=true`.
  */
 
 export const STORAGE_SCOPES = { DOCUMENTS: "documents", BRANDING: "branding" };
 
 /**
- * Every path below is spelled out with string literals rather than built from
- * a variable, so the bundler scopes filesystem tracing to these directories
- * instead of pulling the whole project into the server bundle.
+ * Where local mode writes.
+ *
+ * `.storage/` by default — outside `public/`, outside `src/`, and already
+ * ignored by git, so an uploaded file can neither be served directly nor
+ * committed. `STORAGE_LOCAL_DIR` moves it (to a mounted volume, say, or to a
+ * per-worker directory in a test), relative paths resolving against the
+ * project root. It is a *location*, never a key: nothing a client sends can
+ * reach this value, and this value never reaches a client.
  */
-function scopedDir(scope) {
-  return scope === STORAGE_SCOPES.BRANDING
-    ? path.join(process.cwd(), ".storage", "branding")
-    : path.join(process.cwd(), ".storage", "documents");
+export function localStorageRoot() {
+  const configured = process.env.STORAGE_LOCAL_DIR?.trim();
+  return configured
+    ? path.resolve(process.cwd(), configured)
+    : path.join(process.cwd(), UPLOAD.localStorageDir);
 }
 
-/** Refuse any key that tries to escape its storage root. */
+/** The two scope directories. The scope is ours; it is never caller-supplied. */
+function scopedDir(scope) {
+  return path.join(localStorageRoot(), scope === STORAGE_SCOPES.BRANDING ? "branding" : "documents");
+}
+
+/**
+ * What a stored key is allowed to look like.
+ *
+ * Every key this application writes is `<uuid><ext>`, so the shape is known
+ * exactly rather than guessed at. Anything else — a separator, a `..`, a
+ * percent-escape, a NUL, a leading dot, an absurd length — is not a key this
+ * store ever issued, and is refused rather than interpreted.
+ */
+const KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+/**
+ * Reduce a stored key to a bare object name, or refuse it.
+ *
+ * Two steps, and both matter. Directory components are dropped first, so a
+ * key that has somehow acquired a path addresses an object of that name
+ * inside our own scope and nothing outside it — the historical behaviour,
+ * which the object store relies on. What survives is then checked against the
+ * shape above, so a key that flattens to something that is still not a name
+ * (`..`, an empty string, a Windows-style path) is rejected outright instead
+ * of being handed to the filesystem or signed into a request.
+ */
 function safeKey(storageKey) {
-  return path.basename(String(storageKey));
+  const flattened = String(storageKey ?? "")
+    .replace(/\\/g, "/")
+    .split("/")
+    .pop();
+
+  if (!KEY_PATTERN.test(flattened ?? "")) {
+    throw storageError("That is not a valid storage key.", 400);
+  }
+  return flattened;
 }
 
 /**
@@ -95,6 +150,13 @@ export class StorageProvider {
   async remove() {
     throw new Error("not implemented");
   }
+  /**
+   * Whether an object is still there. Expressed in terms of `head` so both
+   * implementations answer it the same way and neither can drift.
+   */
+  async exists(args) {
+    return (await this.head(args)) !== null;
+  }
   /** Prove the store is reachable and writable enough to serve a request. */
   async verify() {
     throw new Error("not implemented");
@@ -111,11 +173,33 @@ export class LocalStorageProvider extends StorageProvider {
     return "LOCAL";
   }
 
+  /**
+   * The absolute path of one object, proved to be inside its scope.
+   *
+   * `safeKey` has already refused anything that is not a bare object name, so
+   * this cannot resolve outside the directory. It is checked anyway: this is
+   * the one function in the module that turns caller-influenced data into a
+   * filesystem path, and a second, independent guard there is worth more than
+   * the line it costs.
+   */
+  pathFor(storageKey, scope) {
+    const directory = scopedDir(scope);
+    const resolved = path.resolve(directory, safeKey(storageKey));
+    if (resolved !== path.join(directory, path.basename(resolved))) {
+      throw storageError("That is not a valid storage key.", 400);
+    }
+    return resolved;
+  }
+
   async put({ buffer, fileName, contentType, extension, scope = STORAGE_SCOPES.DOCUMENTS }) {
     await mkdir(scopedDir(scope), { recursive: true });
 
     const key = generateKey({ fileName, extension });
-    await writeFile(path.join(scopedDir(scope), key), buffer);
+    // `wx` — create, never overwrite. A UUID collision is not a realistic
+    // event, but "write only if this name is free" is the property that makes
+    // an upload incapable of replacing a file that is already there, and it
+    // costs a flag.
+    await writeFile(this.pathFor(key, scope), buffer, { flag: "wx" });
 
     return {
       storageKey: key,
@@ -126,14 +210,24 @@ export class LocalStorageProvider extends StorageProvider {
   }
 
   async get({ storageKey, scope = STORAGE_SCOPES.DOCUMENTS }) {
-    return readFile(path.join(scopedDir(scope), safeKey(storageKey)));
+    const file = this.pathFor(storageKey, scope);
+    try {
+      return await readFile(file);
+    } catch (error) {
+      // ENOENT is "not in the store", which is what the object provider
+      // reports for a missing object; the filesystem path never travels with
+      // it, because the caller has no business knowing where this is kept.
+      if (error?.code === "ENOENT") throw storageError("That object is not in the store.", 404);
+      throw storageError("Local file storage could not read that file.", 500, error?.code);
+    }
   }
 
   async head({ storageKey, scope = STORAGE_SCOPES.DOCUMENTS }) {
-    const info = await stat(path.join(scopedDir(scope), safeKey(storageKey))).catch(() => null);
+    const key = safeKey(storageKey);
+    const info = await stat(this.pathFor(key, scope)).catch(() => null);
     if (!info) return null;
     return {
-      key: safeKey(storageKey),
+      key,
       sizeBytes: info.size,
       contentType: null,
       lastModified: info.mtime.toUTCString(),
@@ -142,13 +236,25 @@ export class LocalStorageProvider extends StorageProvider {
   }
 
   async remove({ storageKey, scope = STORAGE_SCOPES.DOCUMENTS }) {
-    await unlink(path.join(scopedDir(scope), safeKey(storageKey))).catch(() => {});
-    return { removed: true };
+    // Reports what actually happened, the way the object provider does: a
+    // delete of something already gone is `false`, not an error.
+    try {
+      await unlink(this.pathFor(storageKey, scope));
+      return { removed: true };
+    } catch (error) {
+      if (error?.code === "ENOENT") return { removed: false };
+      throw storageError("Local file storage could not delete that file.", 500, error?.code);
+    }
   }
 
   async verify() {
     await mkdir(scopedDir(STORAGE_SCOPES.DOCUMENTS), { recursive: true });
-    return { ok: true, provider: this.name, detail: ".storage/ is writable" };
+    await mkdir(scopedDir(STORAGE_SCOPES.BRANDING), { recursive: true });
+    return {
+      ok: true,
+      provider: this.name,
+      detail: `${path.relative(process.cwd(), localStorageRoot()) || localStorageRoot()}/ is writable`,
+    };
   }
 }
 
@@ -244,18 +350,82 @@ export class ObjectStorageProvider extends StorageProvider {
   }
 }
 
-let cached = null;
+/* --- Which store is live ---------------------------------------------------- */
+
+export const STORAGE_MODES = { EXTERNAL: "EXTERNAL", LOCAL: "LOCAL" };
 
 /**
- * Pick the provider for this deployment.
+ * The four values an S3-compatible endpoint cannot be addressed without.
  *
- * `STORAGE_PROVIDER` decides, through the same rules as every other
- * integration (`lib/config/env`): development auto-detects whichever
- * credentials are present, and production must name its provider. The local
- * filesystem is refused outright under `APP_ENV=production` — silently
- * writing identity documents to a disk that will not exist on the next
- * request is the exact failure this provider exists to prevent.
+ * Field name as the resolver returns it, environment variable as an operator
+ * sets it, and whether it is a secret — because secrets arrive in a different
+ * bag and must never be read out of the same one as the rest.
+ *
+ * `region` and `prefix` are deliberately absent: a store without a region uses
+ * the client default (`us-east-1`, which is also MinIO's), and a store without
+ * a prefix keeps its objects at the root of the bucket. Neither absence makes
+ * the store unaddressable, so neither may trigger the fallback.
  */
+export const REQUIRED_EXTERNAL_FIELDS = [
+  { name: "endpoint", env: "STORAGE_ENDPOINT", secret: false },
+  { name: "bucket", env: "STORAGE_BUCKET", secret: false },
+  { name: "accessKey", env: "STORAGE_ACCESS_KEY", secret: false },
+  { name: "secretKey", env: "STORAGE_SECRET_KEY", secret: true },
+];
+
+function present(value) {
+  return typeof value === "string" ? value.trim() !== "" : value != null;
+}
+
+/**
+ * The storage mode, decided in one place from one resolved configuration.
+ *
+ * This is the whole of the rule. External storage is live only when all four
+ * required values are actually there — wherever they came from, the
+ * environment or an operator's saved configuration, since by this point the
+ * resolver has already merged the two per field. Anything missing means the
+ * local filesystem, and `missing` says which, by environment variable name,
+ * so the diagnostic can tell an operator what to set rather than that
+ * something is wrong.
+ *
+ * @returns {{ mode: string, missing: string[], detail: string }}
+ */
+export function describeStorageMode(resolved) {
+  const missing = REQUIRED_EXTERNAL_FIELDS.filter(
+    (field) => !present(field.secret ? resolved?.secrets?.[field.name] : resolved?.config?.[field.name]),
+  ).map((field) => field.env);
+
+  if (missing.length) {
+    // The resolver's own account of why it fell back, when it has one — an
+    // explicit `STORAGE_PROVIDER=development` is a different situation from a
+    // missing bucket, and reporting the second for the first would send an
+    // operator to look at variables they have already set correctly.
+    const reason =
+      resolved?.fallbackReason ??
+      `${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} not set`;
+    return { mode: STORAGE_MODES.LOCAL, missing, reason, detail: `local filesystem — ${reason}` };
+  }
+
+  return {
+    mode: STORAGE_MODES.EXTERNAL,
+    missing: [],
+    reason: null,
+    // Endpoint, bucket and region are not secrets and are exactly what an
+    // operator needs to see to recognise the store. The access key is not
+    // here, and the secret key is not anywhere.
+    detail: `bucket "${resolved.config.bucket}" at ${hostOf(resolved.config.endpoint)}`,
+  };
+}
+
+/** Host only: a configured endpoint may carry a path, and never a credential. */
+function hostOf(endpoint) {
+  try {
+    return new URL(endpoint).host;
+  } catch {
+    return "the configured endpoint";
+  }
+}
+
 /**
  * Build the adapter one resolved configuration describes.
  *
@@ -263,12 +433,13 @@ let cached = null;
  * described but not yet switched on.
  */
 export function buildStorageProvider(resolved) {
-  if (resolved.provider !== "minio") return new LocalStorageProvider();
+  if (describeStorageMode(resolved).mode === STORAGE_MODES.LOCAL) return new LocalStorageProvider();
 
   return new ObjectStorageProvider({
     label: "MINIO",
     bucket: resolved.config.bucket,
-    region: resolved.config.region || "us-east-1",
+    // Optional: absent means the client's own default, not a failure.
+    region: resolved.config.region || undefined,
     accessKeyId: resolved.config.accessKey,
     secretAccessKey: resolved.secrets.secretKey,
     sessionToken: process.env.STORAGE_SESSION_TOKEN || undefined,
@@ -276,6 +447,7 @@ export function buildStorageProvider(resolved) {
     // Path style is what MinIO serves, and works everywhere; virtual-hosted
     // style is opt-in for buckets that require it.
     forcePathStyle: resolved.config.forcePathStyle !== false,
+    // Optional: absent means objects sit at the root of the bucket.
     prefix: resolved.config.prefix || "",
     // Off unless asked for: MinIO refuses per-object SSE without a KMS. Left
     // in the environment deliberately — it is a property of the bucket's
@@ -286,42 +458,156 @@ export function buildStorageProvider(resolved) {
   });
 }
 
+/* --- The factory ------------------------------------------------------------ */
+
+let cached = null;
+
+/**
+ * Resolve the storage module, applying the two rules that are not the mode.
+ *
+ * `enabled: false` still refuses a *write*: an operator switching storage off
+ * means new uploads stop, and falling back to the local disk instead would
+ * quietly do the thing they turned off. Reads are never refused for that
+ * reason — breaking retrieval of a tutor's identity documents is an incident,
+ * not a setting (§39).
+ *
+ * A configuration that is *broken* rather than *absent* still throws, in both
+ * directions. A stored secret that will not decrypt, or a provider name this
+ * build does not know, is an operator's mistake with a real fix; falling back
+ * to the local disk there would split one deployment's files across two stores
+ * and look like it had worked.
+ */
+async function resolveStorage({ forWrite }) {
+  const resolved = await resolveIntegrationConfig(INTEGRATION_MODULES.STORAGE);
+
+  if (forWrite && !resolved.enabled) throw new IntegrationDisabledError(resolved.label);
+
+  if (!resolved.configured && resolved.code && resolved.code !== "INCOMPLETE") {
+    throw new ConfigurationError(resolved.error ?? `${resolved.label} is not configured.`);
+  }
+
+  // A deployment may insist on the external store rather than accept the
+  // fallback — for a host whose filesystem does not survive a deploy, losing
+  // an upload is worse than refusing one.
+  const mode = describeStorageMode(resolved);
+  if (mode.mode === STORAGE_MODES.LOCAL && requireExternalStorage()) {
+    throw new ConfigurationError(
+      `File storage: STORAGE_REQUIRE_EXTERNAL is set, so the local filesystem fallback is refused. Set ${mode.missing.join(", ")}.`,
+    );
+  }
+
+  return resolved;
+}
+
+function requireExternalStorage() {
+  const value = process.env.STORAGE_REQUIRE_EXTERNAL?.trim().toLowerCase();
+  return value === "1" || value === "true" || value === "yes";
+}
+
+/**
+ * The store, for writing.
+ *
+ * Never throws because storage is *unconfigured* — that is the fallback's
+ * whole purpose. It throws when the module is switched off, when a stored
+ * credential is unreadable, or when this deployment has said it will not
+ * accept the fallback.
+ */
 export async function getStorageProvider() {
-  const resolved = await requireIntegrationConfig(INTEGRATION_MODULES.STORAGE);
-  return fromResolved(resolved);
+  return fromResolved(await resolveStorage({ forWrite: true }));
 }
 
 /**
  * The store, for reading only.
  *
  * Switching the storage module off stops *new* uploads. It deliberately does
- * not stop reads, because the files already in the bucket include tutors'
- * identity documents and the platform's own logo: an operator turning a
- * provider off while they reconfigure it should not thereby break
- * verification review and every page's branding. That would be an incident,
- * not a setting (§39).
- *
- * The configuration still has to be *valid* — a disabled module with no
- * credentials cannot serve a read either, and says so.
+ * not stop reads, because the files already stored include tutors' identity
+ * documents and the platform's own logo: an operator turning a provider off
+ * while they reconfigure it should not thereby break verification review and
+ * every page's branding. That would be an incident, not a setting (§39).
  */
 export async function getStorageProviderForRead() {
-  const resolved = await resolveIntegrationConfig(INTEGRATION_MODULES.STORAGE);
-  if (!resolved.configured) {
-    throw new ConfigurationError(resolved.error ?? "File storage is not configured.");
-  }
-  return fromResolved(resolved);
+  return fromResolved(await resolveStorage({ forWrite: false }));
 }
 
 function fromResolved(resolved) {
-  const key = `${resolved.provider}:${resolved.source}:${resolved.updatedAt?.getTime?.() ?? 0}`;
+  const mode = describeStorageMode(resolved);
+  const key = [
+    mode.mode,
+    resolved.provider,
+    resolved.source,
+    resolved.updatedAt?.getTime?.() ?? 0,
+    // The local root is an environment value rather than part of the resolved
+    // configuration, so a test (or an operator) moving it must not be served a
+    // provider still pointed at the old directory.
+    mode.mode === STORAGE_MODES.LOCAL ? localStorageRoot() : mode.detail,
+  ].join(":");
+
   if (cached?.key === key) return cached.provider;
 
   const provider = buildStorageProvider(resolved);
   cached = { key, provider };
+  announce(mode, key);
   return provider;
+}
+
+/**
+ * Say which store is live, once per selection.
+ *
+ * Names and locations only — never an access key, never a secret, never a
+ * signed URL, none of which this module logs anywhere. Local mode in
+ * production is a warning rather than an informational line, because there it
+ * usually means a deployment is about to lose the files it accepts.
+ */
+let announced = null;
+
+function announce(mode, key) {
+  if (announced === key) return;
+  announced = key;
+
+  if (mode.mode === STORAGE_MODES.EXTERNAL) {
+    console.info(`[storage] EXTERNAL — ${mode.detail}`);
+    return;
+  }
+
+  const where = path.relative(process.cwd(), localStorageRoot()) || localStorageRoot();
+  const message = `[storage] LOCAL — uploads are written to ${where}/ because ${mode.reason}.`;
+
+  if (process.env.APP_ENV === "production") {
+    console.warn(
+      `${message} On a host with an ephemeral filesystem these files do not survive a redeploy ` +
+        "and are not shared between instances. Configure object storage, or set " +
+        "STORAGE_REQUIRE_EXTERNAL=true to refuse this fallback.",
+    );
+  } else {
+    console.info(message);
+  }
+}
+
+/**
+ * Which store is live and why, for the admin panel, the CLI and the boot
+ * report. Safe to display: it contains no credential.
+ */
+export async function storageDiagnostics() {
+  const resolved = await resolveIntegrationConfig(INTEGRATION_MODULES.STORAGE);
+  const mode = describeStorageMode(resolved);
+
+  return {
+    mode: mode.mode,
+    detail: mode.detail,
+    reason: mode.reason,
+    missing: mode.missing,
+    enabled: resolved.enabled,
+    source: resolved.source,
+    requiresExternal: requireExternalStorage(),
+    location:
+      mode.mode === STORAGE_MODES.LOCAL
+        ? path.relative(process.cwd(), localStorageRoot()) || localStorageRoot()
+        : mode.detail,
+  };
 }
 
 /** Tests and the admin health panel; never reached by a request. */
 export function resetStorageProvider() {
   cached = null;
+  announced = null;
 }

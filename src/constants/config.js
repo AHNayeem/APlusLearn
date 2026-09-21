@@ -583,6 +583,16 @@ export const SESSION = {
 export const UPLOAD = {
   maxDocumentBytes: 8 * 1024 * 1024,
   acceptedDocumentTypes: ["application/pdf", "image/jpeg", "image/png", "image/webp"],
+  /**
+   * Where file storage writes when no object store is configured (§16, §38).
+   *
+   * Outside `public/` so nothing here is ever served directly, outside `src/`
+   * so nothing here is ever committed, and named here rather than in the
+   * provider so the boot report can say where files are going without
+   * importing the resolver that decrypts credentials.
+   * `STORAGE_LOCAL_DIR` overrides it.
+   */
+  localStorageDir: ".storage",
 };
 
 /**

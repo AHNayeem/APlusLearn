@@ -15,7 +15,7 @@ import {
 import { PageHero } from "@/components/marketing/PageHero";
 import { JoinGroupButton } from "@/components/groups/JoinGroupButton";
 import { AttendanceForm } from "@/components/groups/AttendanceForm";
-import { JoinLessonButton } from "@/components/booking/JoinLessonButton";
+import { MeetingPanel } from "@/components/booking/MeetingPanel";
 import { formatMoney, formatDate, formatTime, formatDuration } from "@/lib/utils/format";
 
 export const dynamic = "force-dynamic";
@@ -49,7 +49,7 @@ export default async function GroupSessionPage({ params }) {
   const result = await getGroupSession(id, user).catch(() => null);
   if (!result) notFound();
 
-  const { session, meeting, myEnrolments, roster, canManage } = result;
+  const { session, meeting, myEnrolments, roster, canManage, canManageMeeting } = result;
   const isLearner = Boolean(user && LEARNER_ROLES.includes(user.role));
   const students = isLearner ? await listStudents(user) : [];
 
@@ -133,16 +133,31 @@ export default async function GroupSessionPage({ params }) {
               </CardBody>
             </Card>
 
-            {meeting?.joinUrl && (
-              <Card>
-                <CardHeader
-                  title="Joining the session"
-                  description="The same room for everybody. It opens shortly before the start time."
-                />
-                <CardBody>
-                  <JoinLessonButton booking={{ meeting, startAt: session.startAt }} />
-                </CardBody>
-              </Card>
+            {/*
+              The online classroom (§27).
+
+              This card used to hand `JoinLessonButton` a `booking` prop it has
+              never accepted — the component takes `joinUrl`, found nothing,
+              and returned null, so the card rendered empty and nobody could
+              join a group session they had paid for. `MeetingPanel` is the one
+              component both kinds of lesson use, which is what stops the two
+              drifting apart again.
+
+              It is rendered for anyone the service released a room to — which
+              is the tutor, an administrator and every confirmed seat, and
+              nobody else — so a learner with a seat but no link yet is told so
+              rather than shown nothing.
+            */}
+            {(meeting || canManageMeeting) && (
+              <MeetingPanel
+                meeting={meeting}
+                startAt={session.startAt}
+                endAt={session.endAt}
+                timeZone={session.timeZone}
+                live={!cancelled && !finished}
+                canManage={Boolean(canManageMeeting)}
+                endpoint={`/api/tutor/groups/${session.id}/meeting`}
+              />
             )}
 
             {canManage && roster.length > 0 && (

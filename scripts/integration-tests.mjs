@@ -19,6 +19,9 @@
  * The webhook section needs MongoDB; it reports as skipped without one.
  */
 import { createHmac, randomUUID, generateKeyPairSync } from "node:crypto";
+import { mkdtemp, rm, readdir, readFile, writeFile, mkdir } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import mongoose from "mongoose";
 
 let passed = 0;
@@ -1563,6 +1566,7 @@ async function meetingTests() {
   await googleMeetTests();
   await microsoftTeamsTests();
   await meetingSelectionTests();
+  await meetingConfigurationTests();
 }
 
 // --- 7a. Google Meet -------------------------------------------------------
@@ -1937,6 +1941,492 @@ async function meetingSelectionTests() {
   });
 }
 
+// --- 7d. Meeting configuration ---------------------------------------------
+
+/**
+ * Configuring a room by hand (§27).
+ *
+ * The rules that do not need a database — the schema and the release rule —
+ * run always. The service's own behaviour needs real documents, so it runs
+ * against MongoDB when there is one and reports as skipped when there is not,
+ * the same as every other DB-backed section here.
+ */
+async function meetingConfigurationTests() {
+  section("Meeting links — configuration, release and authorisation");
+
+  const { configureMeetingSchema } = await import("@/lib/validation/meetings");
+  const { meetingForViewer } = await import("@/services/meeting.service");
+  const { MEETING_SOURCES } = await import("@/constants");
+
+  // --- The schema ---------------------------------------------------------
+
+  const parse = (body) => configureMeetingSchema.safeParse(body);
+  const manual = (extra = {}) => ({
+    action: "manual",
+    provider: "ZOOM",
+    joinUrl: "https://zoom.us/j/98765432101",
+    ...extra,
+  });
+
+  check("a well-formed manual configuration is accepted", parse(manual()).success);
+
+  check("an http:// link is REFUSED — a passcode must not travel in the clear",
+    !parse(manual({ joinUrl: "http://zoom.us/j/1" })).success);
+
+  for (const hostile of [
+    "javascript:alert(1)",
+    "JavaScript:alert(1)",
+    "data:text/html;base64,PHNjcmlwdD4=",
+    "vbscript:msgbox(1)",
+    "file:///etc/passwd",
+    "//evil.example/j/1",
+    "not a url at all",
+    "",
+  ]) {
+    check(`a join link of "${hostile.slice(0, 28)}" is REFUSED`, !parse(manual({ joinUrl: hostile })).success);
+  }
+
+  check("a manual configuration with no link at all is REFUSED",
+    !parse({ action: "manual", provider: "ZOOM" }).success);
+
+  check("a platform the application does not know is REFUSED",
+    !parse(manual({ provider: "WEBEX" })).success);
+
+  check("a passcode carrying a newline is REFUSED",
+    !parse(manual({ passcode: "12\n34" })).success);
+
+  check("a passcode carrying a space is REFUSED",
+    !parse(manual({ passcode: "12 34" })).success);
+
+  check("an ordinary alphanumeric passcode is accepted",
+    parse(manual({ passcode: "Ab3xQ9" })).success);
+
+  /*
+    Invisible characters in a credential.
+
+    A passcode is read off a screen and typed into somebody else's app, so the
+    characters worth refusing are the ones a person cannot see they are
+    copying. `\s` and `\p{Cc}` miss all of these: the format characters
+    (`\p{Cf}`) that make a passcode which looks right and is wrong when typed
+    back, the bidirectional overrides that make what is rendered differ from
+    what is stored, the non-ASCII space separators, and a lone surrogate,
+    which is not a character at all.
+  */
+  for (const [name, code] of [
+    ["a zero-width space", 0x200b],
+    ["a right-to-left override", 0x202e],
+    ["a left-to-right mark", 0x200e],
+    ["a soft hyphen", 0x00ad],
+    ["a word joiner", 0x2060],
+    ["a byte-order mark", 0xfeff],
+    ["a non-breaking space", 0x00a0],
+    ["an ideographic space", 0x3000],
+    ["a lone surrogate", 0xd800],
+  ]) {
+    const passcode = `Ab3${String.fromCharCode(code)}xQ9`;
+    check(`a passcode containing ${name} is REFUSED`, !parse(manual({ passcode })).success);
+    check(`and a meeting ID containing ${name} is REFUSED`,
+      !parse(manual({ meetingId: passcode })).success);
+  }
+
+  check("null clears a passcode rather than failing validation",
+    parse(manual({ passcode: null })).success);
+
+  check("a 600-character joining note is REFUSED",
+    !parse(manual({ instructions: "x".repeat(600) })).success);
+
+  for (const action of ["retry", "disable", "enable", "clear"]) {
+    check(`"${action}" needs no other field`, parse({ action }).success);
+  }
+
+  check("an action the service does not implement is REFUSED by the schema",
+    !parse({ action: "launch" }).success);
+
+  check("a body with no action at all is REFUSED", !parse({}).success);
+
+  // --- Who gets what ------------------------------------------------------
+
+  const live = {
+    provider: "ZOOM",
+    joinUrl: "https://zoom.us/j/1",
+    meetingId: "1",
+    passcode: "secret",
+    source: MEETING_SOURCES.PROVIDER,
+    disabled: false,
+  };
+
+  check("a learner on a live lesson gets the whole room",
+    meetingForViewer(live, { isManager: false, live: true })?.joinUrl === live.joinUrl);
+
+  const withdrawnForLearner = meetingForViewer(
+    { ...live, disabled: true }, { isManager: false, live: true },
+  );
+  check("a withdrawn link is NOT given to a learner",
+    withdrawnForLearner.joinUrl === null && withdrawnForLearner.passcode === null);
+  check("but the learner is still told which platform it was, so the page can explain itself",
+    withdrawnForLearner.provider === "ZOOM" && withdrawnForLearner.disabled === true);
+
+  check("the host still sees a withdrawn link, because they have to replace it",
+    meetingForViewer({ ...live, disabled: true }, { isManager: true, live: true })?.joinUrl === live.joinUrl);
+
+  for (const manager of [true, false]) {
+    const past = meetingForViewer(live, { isManager: manager, live: false });
+    check(`a finished lesson hands out no credentials, not even to ${manager ? "the host" : "the learner"}`,
+      past.joinUrl === null && past.passcode === null && past.meetingId === null);
+    check(`and still records that it was a ${manager ? "hosted " : ""}Zoom lesson`, past.provider === "ZOOM");
+  }
+
+  check("no room at all stays null", meetingForViewer(null, { isManager: true }) === null);
+
+  // --- The service --------------------------------------------------------
+
+  const uri = process.env.MONGODB_URI;
+  if (!uri) return skip("meeting configuration service", "MONGODB_URI is not set");
+
+  if (mongoose.connection.readyState !== 1) {
+    try {
+      await mongoose.connect(uri, { serverSelectionTimeoutMS: 2500 });
+    } catch {
+      return skip("meeting configuration service", "MongoDB is not reachable");
+    }
+  }
+
+  const { Booking, TutorProfile, StudentProfile, AuditLog, Notification } = await import("@/models");
+  const { configureMeeting } = await import("@/services/meeting.service");
+  const { BOOKING_STATUS, LESSON_MODES, ROLES, AUDIT_ACTIONS } = await import("@/constants");
+
+  const tutor = await TutorProfile.findOne({ isSearchable: true }).populate("userId", "_id").lean();
+  const student = await StudentProfile.findOne({ archivedAt: null }).lean();
+  if (!tutor || !student) {
+    return skip("meeting configuration service", "no seeded tutor/student — run `bun run seed`");
+  }
+
+  const tutorUserId = String(tutor.userId._id ?? tutor.userId);
+  const host = { id: tutorUserId, role: ROLES.TUTOR };
+  const admin = { id: String(new mongoose.Types.ObjectId()), role: ROLES.ADMIN };
+  const otherTutor = { id: String(new mongoose.Types.ObjectId()), role: ROLES.TUTOR };
+  const learner = { id: String(student.ownerId), role: ROLES.PARENT };
+
+  const made = [];
+  let n = 0;
+  const makeBooking = async (overrides = {}) => {
+    const startAt = new Date(Date.now() + 86_400_000);
+    const booking = await Booking.create({
+      reference: `MEETCFG-${Date.now()}-${n++}`,
+      purchaserId: student.ownerId,
+      studentProfileId: student._id,
+      tutorProfileId: tutor._id,
+      tutorUserId,
+      courseId: tutor.courses?.[0]?.courseId ?? new mongoose.Types.ObjectId(),
+      courseName: tutor.courses?.[0]?.courseName ?? "Test course",
+      mode: LESSON_MODES.ONLINE,
+      meetingProvider: "ZOOM",
+      status: BOOKING_STATUS.CONFIRMED,
+      startAt,
+      endAt: new Date(startAt.getTime() + 3_600_000),
+      durationMinutes: 60,
+      timeZone: "America/Toronto",
+      price: {
+        hourlyRateCents: 5000, durationMinutes: 60, subtotalCents: 5000,
+        commissionPercent: 20, commissionCents: 1000, tutorEarningsCents: 4000,
+        totalCents: 5000, currency: "CAD",
+      },
+      ...overrides,
+    });
+    made.push(booking._id);
+    return booking;
+  };
+
+  try {
+    // Authorisation, against the loaded record.
+    const owned = await makeBooking();
+
+    const byStranger = await throws(() =>
+      configureMeeting("BOOKING", owned._id, manual(), otherTutor));
+    check("a tutor CANNOT configure a lesson they do not teach",
+      byStranger.threw && byStranger.error.status === 403, byStranger.error?.message);
+
+    const byLearner = await throws(() =>
+      configureMeeting("BOOKING", owned._id, manual(), learner));
+    check("the purchaser CANNOT configure the meeting on their own lesson",
+      byLearner.threw && byLearner.error.status === 403, byLearner.error?.message);
+
+    const byHost = await configureMeeting("BOOKING", owned._id, manual({
+      meetingId: "987 6543 2101", passcode: "Zx91", instructions: "Join a minute early.",
+    }), host);
+    check("the tutor who teaches it CAN", byHost.meeting?.joinUrl === "https://zoom.us/j/98765432101");
+    check("and it is recorded as entered by hand, not as a room we created",
+      byHost.meeting.source === MEETING_SOURCES.MANUAL);
+    check("the meeting ID and passcode are stored as given",
+      byHost.meeting.meetingId === "987 6543 2101".replace(/ /g, "") ||
+      byHost.meeting.meetingId === "987 6543 2101");
+    check("who configured it is recorded", String(byHost.meeting.configuredBy) === tutorUserId);
+
+    const byAdmin = await configureMeeting("BOOKING", owned._id, manual({
+      provider: "GOOGLE_MEET", joinUrl: "https://meet.google.com/abc-defg-hij",
+    }), admin);
+    check("an administrator can configure any lesson",
+      byAdmin.meeting?.provider === "GOOGLE_MEET");
+
+    // The passcode must not survive into the audit trail.
+    const audits = await AuditLog.find({
+      entityId: owned._id, action: { $in: [AUDIT_ACTIONS.MEETING_CONFIGURED, AUDIT_ACTIONS.MEETING_CLEARED] },
+    }).lean();
+    check("configuring a meeting is audited", audits.length >= 2);
+    const audited = JSON.stringify(audits);
+    check("the audit trail records NO passcode", !audited.includes("Zx91"));
+    check("and NO join URL", !audited.includes("98765432101"));
+    check("while still recording that a passcode was set",
+      audits.some((a) => a.metadata?.after?.hasPasscode === true));
+
+    // The people attending are told, without being handed the credentials.
+    const told = await Notification.find({
+      entityId: owned._id, type: "MEETING_UPDATED",
+    }).lean();
+    check("the purchaser is notified when the joining details change", told.length >= 1);
+    check("and the notification carries no link or passcode",
+      told.every((t) => !/zoom\.us\/j\/|Zx91/.test(`${t.title} ${t.body}`)));
+
+    // Withdrawing and restoring.
+    const withdrawn = await configureMeeting("BOOKING", owned._id, { action: "disable" }, host);
+    check("a link can be withdrawn", withdrawn.meeting.disabled === true);
+    check("withdrawing twice is REFUSED rather than silently repeated",
+      (await throws(() => configureMeeting("BOOKING", owned._id, { action: "disable" }, host))).threw);
+    const restored = await configureMeeting("BOOKING", owned._id, { action: "enable" }, host);
+    check("and restored", restored.meeting.disabled === false);
+
+    // Clearing.
+    const cleared = await configureMeeting("BOOKING", owned._id, { action: "clear" }, host);
+    check("clearing removes the configuration entirely", cleared.meeting === null);
+    check("clearing when there is nothing to clear is REFUSED",
+      (await throws(() => configureMeeting("BOOKING", owned._id, { action: "clear" }, host))).threw);
+
+    // Retry asks the provider, and the development provider answers.
+    const retried = await configureMeeting("BOOKING", owned._id, { action: "retry" }, host);
+    check("retry asks the provider for a room", Boolean(retried.meeting?.joinUrl));
+    check("and that room is marked as one we created",
+      retried.meeting.source === MEETING_SOURCES.PROVIDER);
+    check("retrying when a working room already exists is REFUSED",
+      (await throws(() => configureMeeting("BOOKING", owned._id, { action: "retry" }, host))).threw);
+
+    // Eligibility.
+    const inPerson = await makeBooking({ mode: LESSON_MODES.IN_PERSON, meetingProvider: undefined });
+    const onInPerson = await throws(() =>
+      configureMeeting("BOOKING", inPerson._id, manual(), host));
+    check("an in-person lesson CANNOT be given a meeting room",
+      onInPerson.threw && onInPerson.error.code === "LESSON_NOT_ONLINE", onInPerson.error?.message);
+
+    for (const status of [
+      BOOKING_STATUS.COMPLETED,
+      BOOKING_STATUS.CANCELLED_BY_STUDENT,
+      BOOKING_STATUS.EXPIRED,
+      BOOKING_STATUS.PENDING_PAYMENT,
+    ]) {
+      const past = await makeBooking({ status });
+      const attempt = await throws(() => configureMeeting("BOOKING", past._id, manual(), host));
+      check(`a ${status} lesson CANNOT have its joining details changed`,
+        attempt.threw && attempt.error.code === "LESSON_NOT_CONFIGURABLE", attempt.error?.message);
+    }
+
+    const missing = await throws(() =>
+      configureMeeting("BOOKING", new mongoose.Types.ObjectId(), manual(), admin));
+    check("a lesson that does not exist is a 404, not a leak of whose it was",
+      missing.threw && missing.error.status === 404);
+
+    // --- What each read path may release ------------------------------------
+    //
+    // `getBooking`, `listBookings` and the dashboard's "next lesson" summary
+    // are three read paths over the same record. They release the room through
+    // one function so they cannot answer differently — which they did: the two
+    // list paths returned the stored sub-document untouched, so a withdrawn
+    // link and a finished lesson's credentials went out on `GET /api/bookings`
+    // and rendered a working Join button, while the lesson page correctly
+    // refused them.
+    const { meetingOnBookingForViewer } = await import("@/services/meeting.service");
+
+    const room = {
+      provider: "ZOOM", joinUrl: "https://zoom.us/j/1", meetingId: "1",
+      passcode: "secret", source: MEETING_SOURCES.PROVIDER, disabled: false,
+    };
+    const asBooking = (overrides) => ({
+      tutorUserId, status: BOOKING_STATUS.CONFIRMED, meeting: room, ...overrides,
+    });
+
+    check("a learner on a confirmed lesson gets the room from any read path",
+      meetingOnBookingForViewer(asBooking(), learner)?.joinUrl === room.joinUrl);
+
+    check("a withdrawn link is withheld from the learner on every read path",
+      meetingOnBookingForViewer(
+        asBooking({ meeting: { ...room, disabled: true } }), learner,
+      )?.joinUrl === null);
+
+    check("but the host still gets it, because they have to replace it",
+      meetingOnBookingForViewer(
+        asBooking({ meeting: { ...room, disabled: true } }), host,
+      )?.joinUrl === room.joinUrl);
+
+    for (const status of [
+      BOOKING_STATUS.COMPLETED,
+      BOOKING_STATUS.CANCELLED_BY_STUDENT,
+      BOOKING_STATUS.NO_SHOW_TUTOR,
+      BOOKING_STATUS.PENDING_PAYMENT,
+    ]) {
+      for (const [who, actor] of [["the learner", learner], ["the host", host], ["an administrator", admin]]) {
+        const released = meetingOnBookingForViewer(asBooking({ status }), actor);
+        check(`a ${status} lesson releases no credentials to ${who}`,
+          released.joinUrl === null && released.passcode === null && released.meetingId === null);
+      }
+    }
+
+    check("a lesson with no room at all stays null",
+      meetingOnBookingForViewer(asBooking({ meeting: undefined }), host) === null);
+
+    // --- Standing a cancelled lesson's room down ----------------------------
+    const { retireMeeting } = await import("@/services/meeting.service");
+
+    for (const source of [MEETING_SOURCES.PROVIDER, MEETING_SOURCES.MANUAL]) {
+      const subject = await makeBooking({
+        meeting: { ...room, source, createdAt: new Date() },
+      });
+      const retired = await retireMeeting(subject);
+      check(`retiring a ${source} room drops the join URL`, retired.joinUrl === undefined);
+      check(`and the passcode`, retired.passcode === undefined);
+      check(`and the meeting ID`, retired.meetingId === undefined);
+      check(`while recording that it was a ${source} Zoom room, withdrawn`,
+        retired.provider === "ZOOM" && retired.source === source && retired.disabled === true);
+    }
+
+    const noRoom = await makeBooking();
+    check("retiring a lesson that never had a room is null, not an error",
+      (await retireMeeting(noRoom)) === null);
+  } finally {
+    await Booking.deleteMany({ _id: { $in: made } });
+    await AuditLog.deleteMany({ entityId: { $in: made } });
+    await Notification.deleteMany({ entityId: { $in: made } });
+  }
+
+  await groupMeetingCancellationTests({ tutor, tutorUserId, student });
+}
+
+/**
+ * A cancelled group session gives its room up (§27, §41 Phase 2).
+ *
+ * The one-to-one path has always torn the room down at the provider and
+ * dropped the credentials from the record. The group path did neither: the
+ * session kept its `joinUrl` and passcode, every seat kept the copy
+ * `syncSeatMeetings` had put there, and a room this platform had created
+ * stayed live in its own Zoom/Meet/Teams account, referenced by nothing and
+ * torn down by nothing. The read paths refusing to hand it out again is not
+ * the same as the room being gone.
+ *
+ * Asserted against the stored documents rather than a return value, because
+ * the defect was in what was left behind.
+ */
+async function groupMeetingCancellationTests({ tutor, tutorUserId, student }) {
+  section("Meeting links — a cancelled group session gives its room up");
+
+  const { GroupSession, GroupEnrolment, Booking, AuditLog, Notification } = await import("@/models");
+  const { cancelGroupSession } = await import("@/services/group.service");
+  const {
+    GROUP_SESSION_STATUS, GROUP_ENROLMENT_STATUS, BOOKING_STATUS, LESSON_MODES, ROLES,
+  } = await import("@/constants");
+
+  const startAt = new Date(Date.now() + 172_800_000);
+  const room = {
+    provider: "ZOOM",
+    joinUrl: "https://zoom.us/j/13579135791",
+    meetingId: "13579135791",
+    passcode: "Grp42x",
+    source: "PROVIDER",
+    createdAt: new Date(),
+    disabled: false,
+  };
+
+  const session = await GroupSession.create({
+    reference: `MEETGRP-${Date.now()}`,
+    tutorProfileId: tutor._id,
+    tutorUserId,
+    title: "Integration — group room teardown",
+    courseId: tutor.courses?.[0]?.courseId ?? new mongoose.Types.ObjectId(),
+    courseName: tutor.courses?.[0]?.courseName ?? "Test course",
+    mode: LESSON_MODES.ONLINE,
+    meetingProvider: "ZOOM",
+    meeting: room,
+    startAt,
+    endAt: new Date(startAt.getTime() + 3_600_000),
+    durationMinutes: 60,
+    minParticipants: 2,
+    maxParticipants: 6,
+    seatsTaken: 1,
+    pricePerSeatCents: 3000,
+    commissionPercent: 20,
+    status: GROUP_SESSION_STATUS.CONFIRMED,
+  });
+
+  const seat = await Booking.create({
+    reference: `MEETGRPSEAT-${Date.now()}`,
+    purchaserId: student.ownerId,
+    studentProfileId: student._id,
+    tutorProfileId: tutor._id,
+    tutorUserId,
+    groupSessionId: session._id,
+    courseId: session.courseId,
+    courseName: session.courseName,
+    mode: LESSON_MODES.ONLINE,
+    meetingProvider: "ZOOM",
+    meeting: room,
+    status: BOOKING_STATUS.CONFIRMED,
+    startAt,
+    endAt: session.endAt,
+    durationMinutes: 60,
+    timeZone: "America/Toronto",
+    price: {
+      hourlyRateCents: 3000, durationMinutes: 60, subtotalCents: 3000,
+      commissionPercent: 20, commissionCents: 600, tutorEarningsCents: 2400,
+      totalCents: 3000, currency: "CAD",
+    },
+  });
+
+  const enrolment = await GroupEnrolment.create({
+    sessionId: session._id,
+    bookingId: seat._id,
+    purchaserId: student.ownerId,
+    studentProfileId: student._id,
+    status: GROUP_ENROLMENT_STATUS.CONFIRMED,
+  });
+
+  try {
+    await cancelGroupSession(
+      session._id,
+      { reason: "Integration — teardown check." },
+      { id: tutorUserId, role: ROLES.TUTOR },
+    );
+
+    const storedSession = await GroupSession.findById(session._id).lean();
+    check("the cancelled session keeps no join URL at rest",
+      !storedSession.meeting?.joinUrl, JSON.stringify(storedSession.meeting));
+    check("and no passcode", !storedSession.meeting?.passcode);
+    check("and no meeting ID", !storedSession.meeting?.meetingId);
+    check("while still recording that it was a Zoom room this platform owned",
+      storedSession.meeting?.provider === "ZOOM" && storedSession.meeting?.source === "PROVIDER");
+    check("and marking it withdrawn", storedSession.meeting?.disabled === true);
+
+    // Every learner holds their own copy, and each one has to lose it too.
+    const storedSeat = await Booking.findById(seat._id).lean();
+    check("the seat booking's copy of the room loses its join URL as well",
+      !storedSeat.meeting?.joinUrl, JSON.stringify(storedSeat.meeting));
+    check("and its passcode", !storedSeat.meeting?.passcode);
+    check("and the seat is cancelled", storedSeat.status === BOOKING_STATUS.CANCELLED_BY_TUTOR,
+      storedSeat.status);
+  } finally {
+    await GroupEnrolment.deleteOne({ _id: enrolment._id });
+    await Booking.deleteOne({ _id: seat._id });
+    await GroupSession.deleteOne({ _id: session._id });
+    await AuditLog.deleteMany({ entityId: { $in: [session._id, seat._id] } });
+    await Notification.deleteMany({ entityId: { $in: [session._id, seat._id] } });
+  }
+}
+
 // --- 8. Storage ------------------------------------------------------------
 
 /** A `fetch` stand-in that also serves bytes and headers back, which GET/HEAD need. */
@@ -1969,8 +2459,14 @@ async function storageTests() {
     ObjectStorageProvider,
     LocalStorageProvider,
     STORAGE_SCOPES,
+    STORAGE_MODES,
     getStorageProvider,
+    getStorageProviderForRead,
     resetStorageProvider,
+    describeStorageMode,
+    storageDiagnostics,
+    localStorageRoot,
+    buildStorageProvider,
   } = await import("@/services/external/storage-provider");
   const { signRequest } = await import("@/services/external/object-storage");
 
@@ -2212,7 +2708,13 @@ async function storageTests() {
   check("a provider built without credentials refuses to exist",
     (await throws(() => new ObjectStorageProvider({ bucket: "b" }))).threw);
 
-  // --- selection
+  // --- selection: which of the two stores is live, and why ------------------
+  //
+  // The rule under test is `describeStorageMode`: external storage is used
+  // when an endpoint, a bucket, an access key and a secret key are all
+  // available, and the local filesystem is used whenever any one of them is
+  // not. Nothing else decides, and no upload is ever refused for want of a
+  // bucket.
   const withEnv = async (vars, fn) => {
     const saved = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]));
     Object.assign(process.env, vars);
@@ -2238,49 +2740,276 @@ async function storageTests() {
   };
   const NO_MINIO = Object.fromEntries(Object.keys(MINIO_ENV).map((k) => [k, undefined]));
 
+  // 1. Nothing configured at all.
   await withEnv({ APP_ENV: "development", STORAGE_PROVIDER: undefined, ...NO_MINIO }, async () => {
-    check("development still works with no credentials at all",
+    check("no storage configuration at all selects the local filesystem",
+      (await getStorageProvider()) instanceof LocalStorageProvider);
+    check("and reports itself as LOCAL rather than as broken",
+      (await storageDiagnostics()).mode === STORAGE_MODES.LOCAL);
+  });
+
+  // 2. Every required field present.
+  await withEnv({ APP_ENV: "development", STORAGE_PROVIDER: undefined, ...MINIO_ENV }, async () => {
+    check("a complete configuration selects the S3-compatible provider",
+      (await getStorageProvider()) instanceof ObjectStorageProvider);
+    const diagnostics = await storageDiagnostics();
+    check("the diagnostic names the bucket and host, and carries no credential",
+      diagnostics.mode === STORAGE_MODES.EXTERNAL &&
+        diagnostics.detail.includes("aplus-learn") &&
+        !JSON.stringify(diagnostics).includes("miniosecret") &&
+        !JSON.stringify(diagnostics).includes("minioadmin"),
+      JSON.stringify(diagnostics));
+  });
+
+  // 3–6. Each required field, missing on its own.
+  for (const [label, variable] of [
+    ["endpoint", "STORAGE_ENDPOINT"],
+    ["bucket", "STORAGE_BUCKET"],
+    ["access key", "STORAGE_ACCESS_KEY"],
+    ["secret key", "STORAGE_SECRET_KEY"],
+  ]) {
+    await withEnv(
+      { APP_ENV: "development", STORAGE_PROVIDER: undefined, ...MINIO_ENV, [variable]: undefined },
+      async () => {
+        const provider = await getStorageProvider();
+        const diagnostics = await storageDiagnostics();
+        check(`a missing ${label} falls back to local storage rather than failing`,
+          provider instanceof LocalStorageProvider && diagnostics.mode === STORAGE_MODES.LOCAL);
+        check(`and the diagnostic names ${variable} as the reason`,
+          diagnostics.missing.includes(variable), JSON.stringify(diagnostics.missing));
+      },
+    );
+  }
+
+  // 7–8. The optional fields are genuinely optional.
+  await withEnv(
+    { APP_ENV: "development", STORAGE_PROVIDER: undefined, ...MINIO_ENV, STORAGE_REGION: undefined },
+    async () => {
+      const provider = await getStorageProvider();
+      check("no region still uses external storage, on the client's default",
+        provider instanceof ObjectStorageProvider && provider.client.region === "us-east-1",
+        provider.client?.region);
+    },
+  );
+
+  await withEnv(
+    { APP_ENV: "development", STORAGE_PROVIDER: undefined, ...MINIO_ENV, STORAGE_PREFIX: undefined },
+    async () => {
+      const provider = await getStorageProvider();
+      check("no key prefix still uses external storage, with objects at the bucket root",
+        provider instanceof ObjectStorageProvider &&
+          provider.objectKey("a.pdf", STORAGE_SCOPES.DOCUMENTS) === "documents/a.pdf",
+        provider.objectKey?.("a.pdf", STORAGE_SCOPES.DOCUMENTS));
+    },
+  );
+
+  await withEnv(
+    { APP_ENV: "development", STORAGE_PROVIDER: undefined, ...MINIO_ENV, STORAGE_PREFIX: "prod" },
+    async () => {
+      const provider = await getStorageProvider();
+      check("a key prefix scopes every object under it",
+        provider.objectKey("a.pdf", STORAGE_SCOPES.DOCUMENTS) === "prod/documents/a.pdf");
+    },
+  );
+
+  // --- production: the fallback holds there too, and can be refused ---------
+  //
+  // This reverses an earlier rule that made local storage a hard failure under
+  // APP_ENV=production. The risk it was guarding against is real — an
+  // ephemeral filesystem loses what it is given — so the refusal survives as
+  // an explicit opt-in rather than as the default.
+  await withEnv({ APP_ENV: "production", STORAGE_PROVIDER: undefined, ...NO_MINIO }, async () => {
+    check("production with no storage configuration falls back rather than refusing",
       (await getStorageProvider()) instanceof LocalStorageProvider);
   });
 
-  await withEnv({ APP_ENV: "development", STORAGE_PROVIDER: undefined, ...MINIO_ENV }, async () => {
-    check("development auto-detects MinIO once an endpoint and bucket are configured",
-      (await getStorageProvider()) instanceof ObjectStorageProvider);
+  await withEnv({ APP_ENV: "production", STORAGE_PROVIDER: "minio", ...NO_MINIO }, async () => {
+    check("naming minio without its credentials falls back rather than failing the upload",
+      (await getStorageProvider()) instanceof LocalStorageProvider);
   });
 
   await withEnv({ APP_ENV: "production", STORAGE_PROVIDER: "minio", ...MINIO_ENV }, async () => {
     const provider = await getStorageProvider();
-    check("production selects MinIO and reports itself as such",
+    check("production selects the object store and reports itself as such",
       provider instanceof ObjectStorageProvider && provider.name === "MINIO");
     check("the configured endpoint is the one requests go to",
       provider.client.base.host === "wfss001.example.invalid");
     check("path-style addressing is the default", provider.client.forcePathStyle === true);
   });
 
-  await withEnv({ APP_ENV: "production", STORAGE_PROVIDER: "development", ...NO_MINIO }, async () => {
-    const failed = await await$throws(() => getStorageProvider());
-    check("production REFUSES the local filesystem — the R33 deployment break cannot recur",
-      failed.threw && failed.error.code === "PROVIDER_MISCONFIGURED", failed.error?.message);
-  });
+  await withEnv(
+    { APP_ENV: "production", STORAGE_REQUIRE_EXTERNAL: "true", STORAGE_PROVIDER: undefined, ...NO_MINIO },
+    async () => {
+      const refused = await await$throws(() => getStorageProvider());
+      check("STORAGE_REQUIRE_EXTERNAL=true restores the hard failure for deployments that need it",
+        refused.threw && refused.error.code === "PROVIDER_MISCONFIGURED", refused.error?.message);
+      check("and the refusal names what to set, never a value",
+        /STORAGE_BUCKET/.test(refused.error?.message ?? "") &&
+          !/miniosecret/.test(refused.error?.message ?? ""), refused.error?.message);
+    },
+  );
 
-  await withEnv({ APP_ENV: "production", STORAGE_PROVIDER: undefined, ...NO_MINIO }, async () => {
-    const failed = await await$throws(() => getStorageProvider());
-    check("production never silently guesses a storage provider",
-      failed.threw && failed.error.code === "PROVIDER_MISCONFIGURED");
-  });
+  await withEnv(
+    { APP_ENV: "production", STORAGE_REQUIRE_EXTERNAL: "true", STORAGE_PROVIDER: undefined, ...MINIO_ENV },
+    async () => {
+      check("and it is satisfied by a complete configuration",
+        (await getStorageProvider()) instanceof ObjectStorageProvider);
+    },
+  );
 
-  await withEnv({ APP_ENV: "production", STORAGE_PROVIDER: "minio", ...NO_MINIO }, async () => {
-    const failed = await await$throws(() => getStorageProvider());
-    check("naming MinIO without its bucket and endpoint is a hard failure",
-      failed.threw && /STORAGE_BUCKET/.test(failed.error.message), failed.error?.message);
-  });
-
+  // A typo is not an absence: a provider name this build does not know is
+  // still a hard failure, because there is a correct value the operator meant.
   await withEnv({ APP_ENV: "production", STORAGE_PROVIDER: "s3", ...MINIO_ENV }, async () => {
     const failed = await await$throws(() => getStorageProvider());
     check("the retired `s3` selector is rejected by name rather than silently ignored",
       failed.threw && /not a provider this build knows/.test(failed.error.message),
       failed.error?.message);
   });
+
+  await withEnv({ APP_ENV: "development", STORAGE_PROVIDER: "development", ...MINIO_ENV }, async () => {
+    const diagnostics = await storageDiagnostics();
+    check("an explicit STORAGE_PROVIDER=development uses local storage even with a bucket configured",
+      (await getStorageProvider()) instanceof LocalStorageProvider);
+    check("and says THAT is why, rather than blaming variables that are set",
+      /development/.test(diagnostics.reason ?? ""), diagnostics.reason);
+  });
+
+  // --- the local store is a real store --------------------------------------
+  const root = await mkdtemp(path.join(tmpdir(), "aplus-storage-"));
+  try {
+    await withEnv(
+      { APP_ENV: "development", STORAGE_PROVIDER: undefined, STORAGE_LOCAL_DIR: root, ...NO_MINIO },
+      async () => {
+        check("STORAGE_LOCAL_DIR decides where local mode writes", localStorageRoot() === root);
+
+        const local = await getStorageProvider();
+        const bytes = Buffer.from("%PDF-1.4 a police record check");
+
+        const put = await local.put({
+          buffer: bytes,
+          fileName: "../../etc/passwd; DROP TABLE.pdf",
+          contentType: "application/pdf",
+          extension: ".pdf",
+          scope: STORAGE_SCOPES.DOCUMENTS,
+        });
+
+        check("a local upload returns the same shape an object-store upload does",
+          typeof put.storageKey === "string" &&
+            put.sizeBytes === bytes.length &&
+            put.checksum.length === 64 &&
+            put.contentType === "application/pdf");
+        check("the uploader's filename is NOT trusted — the local key is generated too",
+          /^[0-9a-f-]{36}\.pdf$/.test(put.storageKey), put.storageKey);
+        check("no part of the uploaded filename survives into the local key",
+          !put.storageKey.includes("passwd") && !put.storageKey.includes("..") &&
+            !put.storageKey.includes("/"));
+        check("the local provider returns no path and no url — nothing a client could follow",
+          !("url" in put) && !("path" in put) && !JSON.stringify(put).includes(root));
+
+        const onDisk = await readdir(path.join(root, "documents"));
+        check("the bytes really are on disk, under the generated name",
+          onDisk.includes(put.storageKey), onDisk.join(", "));
+        check("and they are byte-identical when read back",
+          Buffer.compare(await local.get({ storageKey: put.storageKey }), bytes) === 0);
+
+        const meta = await local.head({ storageKey: put.storageKey });
+        check("local metadata reports the real size",
+          meta.sizeBytes === bytes.length, JSON.stringify(meta));
+        check("exists() answers through the same interface in local mode",
+          (await local.exists({ storageKey: put.storageKey })) === true &&
+            (await local.exists({ storageKey: "00000000-0000-4000-8000-000000000000.pdf" })) === false);
+
+        // Scope separation, the same property the object store has.
+        const branding = await local.put({
+          buffer: Buffer.from("PNG"),
+          contentType: "image/png",
+          extension: ".png",
+          scope: STORAGE_SCOPES.BRANDING,
+        });
+        check("branding is written to its own scope directory",
+          (await readdir(path.join(root, "branding"))).includes(branding.storageKey));
+        check("a documents key cannot be read through the branding scope",
+          (await throws(() => local.get({ storageKey: put.storageKey, scope: STORAGE_SCOPES.BRANDING }))).threw);
+
+        // Deletion.
+        check("local deletion reports what it did",
+          (await local.remove({ storageKey: branding.storageKey, scope: STORAGE_SCOPES.BRANDING })).removed === true);
+        check("the file is gone from disk",
+          !(await readdir(path.join(root, "branding"))).includes(branding.storageKey));
+        check("deleting something already gone is not an error, and says so",
+          (await local.remove({ storageKey: branding.storageKey, scope: STORAGE_SCOPES.BRANDING })).removed === false);
+
+        // Traversal, through the stored key rather than the filename.
+        const outside = path.join(root, "secret.txt");
+        await writeFile(outside, "not for the client");
+        for (const key of [
+          "../secret.txt",
+          "../../etc/passwd",
+          "..",
+          ".",
+          "",
+          "documents/../../secret.txt",
+          "..\\..\\secret.txt",
+          "a\u0000.pdf",
+          "%2e%2e%2fsecret.txt",
+        ]) {
+          const attempt = await throws(() => local.get({ storageKey: key, scope: STORAGE_SCOPES.DOCUMENTS }));
+          check(`a traversal key (${JSON.stringify(key)}) reads nothing outside its scope`,
+            attempt.threw && !String(attempt.error?.message).includes("not for the client"),
+            attempt.error?.message);
+        }
+        check("the file outside the store is still there — nothing was deleted through a key",
+          (await readFile(outside, "utf8")) === "not for the client");
+
+        const overwrite = await throws(() => local.remove({ storageKey: "../secret.txt" }));
+        check("and a traversal key cannot delete outside the store either",
+          overwrite.threw || (await readFile(outside, "utf8")) === "not for the client");
+
+        // Missing objects report as missing, without leaking where "here" is.
+        const missing = await throws(() => local.get({ storageKey: "11111111-1111-4111-8111-111111111111.pdf" }));
+        check("a missing local object reports 404 and no filesystem path",
+          missing.threw && missing.error.status === 404 && !String(missing.error.message).includes(root),
+          missing.error?.message);
+
+        // Backward compatibility: a key written before any of this still resolves.
+        const legacyKey = `${randomUUID()}.pdf`;
+        await mkdir(path.join(root, "documents"), { recursive: true });
+        await writeFile(path.join(root, "documents", legacyKey), bytes);
+        check("a storage key stored by an earlier version still reads back unchanged",
+          Buffer.compare(await local.get({ storageKey: legacyKey }), bytes) === 0);
+        check("reads work even while the module is switched off — retrieval is not a setting",
+          (await getStorageProviderForRead()) instanceof LocalStorageProvider);
+
+        // The same key shape both providers issue, so moving between them
+        // changes nothing in the database.
+        const remote = buildStorageProvider({
+          provider: "minio",
+          config: { endpoint: "https://wfss001.example.invalid", bucket: "b", accessKey: "k", region: "us-east-1" },
+          secrets: { secretKey: "s" },
+        });
+        check("both providers address the identical stored key, so references survive a move",
+          remote.objectKey(legacyKey, STORAGE_SCOPES.DOCUMENTS) === `documents/${legacyKey}`);
+      },
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+
+  // --- the mode rule itself, without any environment at all ------------------
+  const complete = {
+    config: { endpoint: "https://s.example", bucket: "b", accessKey: "k", region: "us-east-1", prefix: "p" },
+    secrets: { secretKey: "s" },
+  };
+  check("describeStorageMode is the whole rule: complete configuration is EXTERNAL",
+    describeStorageMode(complete).mode === STORAGE_MODES.EXTERNAL);
+  check("an empty string counts as missing, not as a value",
+    describeStorageMode({ ...complete, config: { ...complete.config, bucket: "   " } }).mode ===
+      STORAGE_MODES.LOCAL);
+  check("dropping only the optional fields keeps it EXTERNAL",
+    describeStorageMode({ config: { endpoint: "https://s.example", bucket: "b", accessKey: "k" }, secrets: { secretKey: "s" } })
+      .mode === STORAGE_MODES.EXTERNAL);
+  check("nothing at all is LOCAL, and lists all four variables",
+    describeStorageMode({ config: {}, secrets: {} }).missing.length === 4);
 
   await liveStorageTests();
 }

@@ -93,6 +93,32 @@ export const MEETING_PROVIDER_LABELS = {
   MICROSOFT_TEAMS: "Microsoft Teams",
 };
 
+/**
+ * Where a lesson's room came from (§27).
+ *
+ * `PROVIDER` is the normal case: the platform asked Zoom, Google or Microsoft
+ * for a room and the adapter returned one. `MANUAL` is a room a human already
+ * owns, pasted in by the tutor or an administrator — the deployment has no
+ * credentials for that platform, or the provider was down when the lesson
+ * confirmed and somebody had to unblock a family who had already paid.
+ *
+ * The distinction is kept because it changes what the platform may do with
+ * the room. A `PROVIDER` room is ours: a reschedule moves it and a
+ * cancellation tears it down. A `MANUAL` room belongs to whoever created it
+ * in their own account, so this application never calls a provider API about
+ * one — it would be acting on a resource it does not own, and a delete would
+ * destroy a room the tutor may be using for something else.
+ */
+export const MEETING_SOURCES = {
+  PROVIDER: "PROVIDER",
+  MANUAL: "MANUAL",
+};
+
+export const MEETING_SOURCE_LABELS = {
+  PROVIDER: "Created automatically",
+  MANUAL: "Entered by hand",
+};
+
 export const IN_PERSON_LOCATIONS = {
   STUDENT_HOME: "STUDENT_HOME",
   TUTOR_LOCATION: "TUTOR_LOCATION",
@@ -375,6 +401,8 @@ export const NOTIFICATION_TYPES = {
   BOOKING_CHANGED: "BOOKING_CHANGED",
   BOOKING_CANCELLED: "BOOKING_CANCELLED",
   BOOKING_REMINDER: "BOOKING_REMINDER",
+  /** The joining details changed — a new link, or one withdrawn (§27, §28). */
+  MEETING_UPDATED: "MEETING_UPDATED",
   BOOKING_COMPLETED: "BOOKING_COMPLETED",
   BOOKING_EXPIRED: "BOOKING_EXPIRED",
   REFUND_ISSUED: "REFUND_ISSUED",
@@ -755,6 +783,19 @@ export const GROUP_ENROLMENT_STATUS_LABELS = {
 };
 
 /** Enrolments that occupy a seat. A waitlisted learner does not. */
+/**
+ * A session that is still going to happen (§41 Phase 2).
+ *
+ * The complement of CANCELLED and COMPLETED. It is what "live" means for a
+ * meeting room: only these sessions may have their joining details changed,
+ * and only these hand live join credentials to anybody.
+ */
+export const ACTIVE_SESSION_STATUSES = [
+  GROUP_SESSION_STATUS.DRAFT,
+  GROUP_SESSION_STATUS.PUBLISHED,
+  GROUP_SESSION_STATUS.CONFIRMED,
+];
+
 export const SEAT_HOLDING_ENROLMENT_STATUSES = [
   GROUP_ENROLMENT_STATUS.PENDING_PAYMENT,
   GROUP_ENROLMENT_STATUS.CONFIRMED,
@@ -1058,6 +1099,9 @@ export const AUDIT_ACTIONS = {
   BOOKING_NO_SHOW_REPORTED: "BOOKING_NO_SHOW_REPORTED",
   BOOKING_EXPIRED: "BOOKING_EXPIRED",
   BOOKING_RESCHEDULED: "BOOKING_RESCHEDULED",
+  MEETING_CONFIGURED: "MEETING_CONFIGURED",
+  MEETING_DISABLED: "MEETING_DISABLED",
+  MEETING_CLEARED: "MEETING_CLEARED",
   PAYMENT_SETTLED: "PAYMENT_SETTLED",
   REFUND_ISSUED: "REFUND_ISSUED",
   PAYOUT_MARKED_PAID: "PAYOUT_MARKED_PAID",

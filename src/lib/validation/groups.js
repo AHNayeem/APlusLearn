@@ -64,6 +64,13 @@ export const updateGroupSessionSchema = z.object({
   minParticipants: sessionBody.minParticipants.optional(),
   maxParticipants: sessionBody.maxParticipants.optional(),
   pricePerSeatCents: cents.optional(),
+  /**
+   * The platform, correctable while the session is still the tutor's alone.
+   * The service refuses it once anybody has joined or a room exists — at that
+   * point the meeting endpoint is the way to change the joining details, and
+   * it tears the old room down rather than orphaning it.
+   */
+  meetingProvider: sessionBody.meetingProvider,
 });
 
 export const joinGroupSessionSchema = z.object({

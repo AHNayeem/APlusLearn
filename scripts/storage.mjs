@@ -22,6 +22,7 @@ import { inspectDocument } from "@/lib/images/inspect";
 import {
   ObjectStorageProvider,
   STORAGE_SCOPES,
+  localStorageRoot,
 } from "@/services/external/storage-provider";
 
 const args = new Set(process.argv.slice(2));
@@ -127,7 +128,7 @@ async function check() {
  */
 async function migrate() {
   ensureConfigured();
-  console.log(`\nMigrating .storage/ → MinIO${dryRun ? " (dry run)" : ""}\n` + "─".repeat(48));
+  console.log(`\nMigrating ${localStorageRoot()} → MinIO${dryRun ? " (dry run)" : ""}\n` + "─".repeat(48));
   describe();
   const store = provider();
 
@@ -141,10 +142,13 @@ async function migrate() {
   let failedCount = 0;
 
   for (const scope of [STORAGE_SCOPES.DOCUMENTS, STORAGE_SCOPES.BRANDING]) {
-    const dir = path.join(process.cwd(), ".storage", scope);
+    // The same directory the local provider writes to, honouring
+    // STORAGE_LOCAL_DIR — a migration that read a different one would report
+    // "nothing to copy" over a full store.
+    const dir = path.join(localStorageRoot(), scope);
     const names = await readdir(dir).catch(() => null);
     if (!names) {
-      console.log(`\n  ${scope}: nothing to copy (.storage/${scope} does not exist)`);
+      console.log(`\n  ${scope}: nothing to copy (${dir} does not exist)`);
       continue;
     }
 
