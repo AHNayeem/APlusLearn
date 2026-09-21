@@ -10,7 +10,7 @@ import {
 } from "@/lib/utils/format";
 import {
   BOOKING_STATUS, BOOKING_STATUS_LABELS, LESSON_MODES, MEETING_PROVIDER_LABELS,
-  CANCELLED_STATUSES, ROLES,
+  CANCELLED_STATUSES, ROLES, PAYMENT_STATUS,
 } from "@/constants";
 import { statusTone } from "./BookingRow";
 import { BookingActions } from "./BookingActions";
@@ -43,19 +43,34 @@ export function BookingDetail({ booking, viewerRole, justConfirmed }) {
           </Alert>
         )}
 
-        {booking.status === BOOKING_STATUS.PENDING_PAYMENT && (
-          <Alert
-            tone="warning"
-            title="Payment not completed"
-            action={
-              <Button href={`/bookings/checkout/${payment?.id ?? payment}`} size="sm">
-                Complete payment
-              </Button>
-            }
-          >
-            This lesson is held but not confirmed until payment goes through.
-          </Alert>
-        )}
+        {/*
+          A held lesson has two quite different reasons for being held, and
+          telling a purchaser whose money is already in flight to "complete
+          payment" is how somebody pays twice. PROCESSING is only ever set
+          from the provider's own answer, never from a browser.
+        */}
+        {booking.status === BOOKING_STATUS.PENDING_PAYMENT &&
+          payment?.status === PAYMENT_STATUS.PROCESSING && (
+            <Alert tone="info" title="Payment is being processed">
+              Your payment provider is still clearing this payment. The lesson time is held, and it
+              will be confirmed here as soon as the money arrives — there is nothing to do.
+            </Alert>
+          )}
+
+        {booking.status === BOOKING_STATUS.PENDING_PAYMENT &&
+          payment?.status !== PAYMENT_STATUS.PROCESSING && (
+            <Alert
+              tone="warning"
+              title="Payment not completed"
+              action={
+                <Button href={`/bookings/checkout/${payment?.id ?? payment}`} size="sm">
+                  Complete payment
+                </Button>
+              }
+            >
+              This lesson is held but not confirmed until payment goes through.
+            </Alert>
+          )}
 
         {booking.status === BOOKING_STATUS.EXPIRED && (
           <Alert

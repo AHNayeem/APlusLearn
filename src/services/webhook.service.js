@@ -117,8 +117,35 @@ export async function handlePaymentWebhook({ payload, signature, connect = false
   }
 
   // 3. Processing.
+  //
+  // One line in and one line out, with identifiers only — never a card, a
+  // customer, a credential or the payload (§35, §36). This is what makes a
+  // payment that did not confirm traceable: the provider's event id here is
+  // the same id its own dashboard shows for that delivery.
+  console.info(
+    "[webhook] received " +
+      JSON.stringify({
+        provider: provider.name,
+        eventId: event.id,
+        type: event.type,
+        livemode: Boolean(event.livemode),
+        attempt: record.attempts ?? 1,
+      }),
+  );
+
   try {
     const outcome = await dispatch(event);
+    console.info(
+      "[webhook] processed " +
+        JSON.stringify({
+          eventId: event.id,
+          type: event.type,
+          status: outcome.handled ? "PROCESSED" : "IGNORED",
+          paymentId: outcome.paymentId ? String(outcome.paymentId) : null,
+          payoutId: outcome.payoutId ? String(outcome.payoutId) : null,
+          result: outcome.result ?? null,
+        }),
+    );
     await WebhookEvent.updateOne(
       { _id: record._id },
       {
@@ -134,6 +161,10 @@ export async function handlePaymentWebhook({ payload, signature, connect = false
     );
     return { received: true, duplicate: false, type: event.type, ...outcome };
   } catch (error) {
+    console.error(
+      "[webhook] failed " +
+        JSON.stringify({ eventId: event.id, type: event.type, reason: error.message?.slice(0, 200) }),
+    );
     // Leave the row FAILED and rethrow: answering non-2xx asks the provider
     // to redeliver, which is what we want for a transient fault.
     await WebhookEvent.updateOne(
@@ -301,6 +332,18 @@ async function settle(object, { paymentIntentId, amountCents }) {
     metadata: { amountCents, confirmed, source: "webhook" },
   });
 
+  console.info(
+    "[webhook] settled " +
+      JSON.stringify({
+        paymentId: String(paymentId),
+        paymentIntentId: paymentIntentId ?? null,
+        amountCents,
+        before: payment.status,
+        after: PAYMENT_STATUS.PAID,
+        confirmed,
+      }),
+  );
+
   return {
     handled: true,
     paymentId,
@@ -392,8 +435,13 @@ async function expire(object) {
     };
   }
 
+  // PROCESSING belongs here beside REQUIRES_PAYMENT: reconciliation records
+  // it when the provider says the money is in flight, and a session that has
+  // since expired is just as dead for one as for the other.
+  const UNSETTLED = [PAYMENT_STATUS.REQUIRES_PAYMENT, PAYMENT_STATUS.PROCESSING];
+
   await Payment.updateOne(
-    { _id: paymentId, status: PAYMENT_STATUS.REQUIRES_PAYMENT },
+    { _id: paymentId, status: { $in: UNSETTLED } },
     { $unset: { providerCheckoutUrl: "", checkoutExpiresAt: "" } },
   );
 
@@ -403,7 +451,7 @@ async function expire(object) {
 
   if (expired) {
     await Payment.updateOne(
-      { _id: paymentId, status: PAYMENT_STATUS.REQUIRES_PAYMENT },
+      { _id: paymentId, status: { $in: UNSETTLED } },
       { $set: { status: PAYMENT_STATUS.FAILED, failureReason: "Checkout was not completed in time." } },
     );
   }

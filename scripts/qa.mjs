@@ -336,6 +336,32 @@ async function main() {
   });
   check("double-booking the same slot is rejected", duplicate.status === 409);
 
+  // --- the return from a hosted checkout (§20, §42)
+  //
+  // The success page asks the server to ask the *provider*. It carries no
+  // claim about the payment, and a body full of claims changes nothing: the
+  // development provider keeps no remote state, so the honest answer is that
+  // there is nothing to read back — not "paid".
+  const pretendPaid = await parent(`/api/payments/${paymentId}/reconcile`, {
+    method: "POST",
+    body: { status: "PAID", paid: true, amountCents: 1 },
+  });
+  check(
+    "the checkout return page cannot talk a payment into being paid",
+    pretendPaid.ok && pretendPaid.payload?.data?.payment?.status === "REQUIRES_PAYMENT",
+    JSON.stringify(pretendPaid.payload?.data?.payment?.status ?? pretendPaid.payload?.error),
+  );
+  check(
+    "and it says plainly that there was no provider state to read",
+    pretendPaid.payload?.data?.reconciliation?.outcome === "NOT_APPLICABLE",
+    JSON.stringify(pretendPaid.payload?.data?.reconciliation),
+  );
+  check(
+    "the lesson is still only held, not confirmed",
+    (await parent(`/api/bookings/${bookingId}`)).payload?.data?.booking?.status ===
+      "PENDING_PAYMENT",
+  );
+
   const declined = await parent(`/api/payments/${paymentId}/capture`, {
     method: "POST",
     body: {
@@ -2987,6 +3013,26 @@ async function main() {
     "fixture lesson is confirmed and belongs to the parent",
     confirmedFixture.ok && confirmedFixture.payload.data.booking.status === "CONFIRMED",
     JSON.stringify(confirmedFixture.payload?.error),
+  );
+
+  // Reconciliation reads a payment's state from the provider; who may ask is
+  // still decided against the loaded record, never the URL (§8).
+  const strangerReconcile = await stranger(`/api/payments/${authPaymentId}/reconcile`, {
+    method: "POST",
+  });
+  check(
+    "a stranger cannot reconcile someone else's payment",
+    !strangerReconcile.ok && [403, 404].includes(strangerReconcile.status),
+    `status ${strangerReconcile.status}`,
+  );
+  const strangerTutorReconcile = await strangerTutor(
+    `/api/payments/${authPaymentId}/reconcile`,
+    { method: "POST" },
+  );
+  check(
+    "nor can a tutor who is not on the lesson",
+    !strangerTutorReconcile.ok && [403, 404].includes(strangerTutorReconcile.status),
+    `status ${strangerTutorReconcile.status}`,
   );
 
   const reschedulePayload = {

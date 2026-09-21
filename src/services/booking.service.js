@@ -692,21 +692,154 @@ export async function expireStaleBookings({
 }
 
 /**
+ * Ask the provider what actually happened to one payment, and apply it
+ * (§20, §38).
+ *
+ * This is the **second authority** on whether a payment settled, and the only
+ * one besides the provider's own webhook. It exists because a webhook can be
+ * lost — an endpoint that was unreachable, a forwarder that was not running,
+ * a signing secret that belongs to a different account — and the browser
+ * coming back from the payment page proves nothing on its own.
+ *
+ * It is deliberately the *same* authority in both places that need it:
+ *
+ *   • `expireStaleBookings()` calls it before releasing a held slot, so a
+ *     paid lesson is never deleted because an event went missing;
+ *   • `POST /api/payments/:id/reconcile` calls it while the purchaser is
+ *     still looking at the "confirming your payment" page, so a missing
+ *     webhook costs them a second rather than the whole hold window.
+ *
+ * Nothing about it trusts the client. The caller supplies an id; the status,
+ * the amount and the decision all come from the provider's API.
+ *
+ * What each answer means:
+ *
+ *   PAID        settle and confirm, exactly as the webhook would.
+ *               `markPaymentPaid` claims the row conditionally, so a webhook
+ *               landing in the same second settles it once between them.
+ *   PROCESSING  the money is in flight — a delayed payment method, or a card
+ *               still being authorised. Recorded, so the purchaser is told
+ *               "processing" rather than "awaiting payment", and so nothing
+ *               reads an in-flight payment as one nobody ever started.
+ *   anything    left alone. Releasing a hold is the sweep's decision under
+ *   else        `shouldReleaseHold`, and it is not made from here.
+ *
+ * @param {string|object} paymentId
+ * @param {object}   [options]
+ * @param {Function} [options.readProviderStatus]  How the provider is asked.
+ *   Injected by tests, which must be able to make it answer without an
+ *   account at Stripe.
+ * @param {string}   [options.source]  What triggered this, for the audit log.
+ * @returns {Promise<{ outcome: string, remoteStatus: string|null, changed: boolean, confirmed: number }>}
+ *   `outcome` is one of SETTLED (nothing left to do), PAID, PROCESSING,
+ *   UNPAID, NOT_APPLICABLE (no remote state to read) or UNKNOWN (the provider
+ *   could not be asked, or its answer could not be applied) — and UNKNOWN is
+ *   the one a caller must never treat as "not paid".
+ */
+export async function settlePaymentFromProvider(
+  paymentId,
+  { readProviderStatus = providerPaymentStatus, source = "reconciliation" } = {},
+) {
+  const payment = await Payment.findById(paymentId)
+    .select("_id status provider providerCheckoutId providerPaymentIntentId totalCents")
+    .lean();
+  if (!payment) throw new NotFoundError("That payment no longer exists.");
+
+  // Already decided. Only a payment still waiting for money has anything to
+  // learn from the provider.
+  if (payment.status !== PAYMENT_STATUS.REQUIRES_PAYMENT && payment.status !== PAYMENT_STATUS.PROCESSING) {
+    return { outcome: "SETTLED", remoteStatus: null, changed: false, confirmed: 0 };
+  }
+
+  let remote;
+  try {
+    remote = await readProviderStatus(payment);
+  } catch (error) {
+    // A provider outage must not turn into deleted lessons, and must not be
+    // reported to a purchaser as a failed payment either.
+    console.warn(
+      `[payment] ${payment._id}: the provider could not be asked (${source}): ${error.message}`,
+    );
+    return { outcome: "UNKNOWN", remoteStatus: null, changed: false, confirmed: 0 };
+  }
+
+  // Nothing to ask: the development provider keeps no remote state, and a
+  // payment with no session opened yet has no provider object to name.
+  if (!remote) return { outcome: "NOT_APPLICABLE", remoteStatus: null, changed: false, confirmed: 0 };
+
+  if (remote.status === "PAID") {
+    try {
+      const { changed } = await markPaymentPaid(payment._id, {
+        paidAt: new Date(),
+        paymentIntentId: remote.paymentIntentId,
+        amountCents: remote.amountCents,
+      });
+
+      let confirmed = 0;
+      if (changed) {
+        ({ confirmed = 0 } = await confirmBookings(payment._id));
+        await recordAudit({
+          actor: { role: "SYSTEM" },
+          action: AUDIT_ACTIONS.PAYMENT_SETTLED,
+          entityType: "Payment",
+          entityId: payment._id,
+          metadata: { source, amountCents: remote.amountCents, confirmed },
+        });
+        console.info(
+          "[payment] reconciled " +
+            JSON.stringify({
+              paymentId: String(payment._id),
+              source,
+              remoteStatus: "PAID",
+              before: payment.status,
+              after: PAYMENT_STATUS.PAID,
+              confirmed,
+            }),
+        );
+      }
+
+      return { outcome: "PAID", remoteStatus: "PAID", changed, confirmed };
+    } catch (error) {
+      // An amount mismatch lands here, and is exactly the case where doing
+      // nothing automatically is right: the money is at the provider but it
+      // is not the money we priced, so a human looks at it.
+      console.error(
+        `[payment] ${payment._id} is paid at the provider but could not be settled: ${error.message}`,
+      );
+      return { outcome: "UNKNOWN", remoteStatus: "PAID", changed: false, confirmed: 0 };
+    }
+  }
+
+  if (remote.status === "PROCESSING") {
+    // Conditional, so this can never move a payment backwards out of a state
+    // a webhook has meanwhile put it in.
+    const claimed = await Payment.updateOne(
+      { _id: payment._id, status: PAYMENT_STATUS.REQUIRES_PAYMENT },
+      {
+        $set: {
+          status: PAYMENT_STATUS.PROCESSING,
+          ...(remote.paymentIntentId ? { providerPaymentIntentId: remote.paymentIntentId } : {}),
+        },
+      },
+    );
+    return {
+      outcome: "PROCESSING",
+      remoteStatus: "PROCESSING",
+      changed: claimed.modifiedCount > 0,
+      confirmed: 0,
+    };
+  }
+
+  return { outcome: "UNPAID", remoteStatus: remote.status ?? null, changed: false, confirmed: 0 };
+}
+
+/**
  * Catch up on payments whose confirming webhook never arrived (§20, §38).
  *
  * Called by the sweep above, on exactly the payments it is about to release
- * lessons for. For each one the provider's own API is asked what happened —
- * not a browser, not a redirect, the provider — and the answer is applied:
- *
- *   PAID    settle it and confirm its bookings, the same way the webhook
- *           would have. `markPaymentPaid` is a no-op if a webhook has since
- *           landed, so a race between the two settles once.
- *   FAILED  leave it; the sweep releases the slot as it already would.
- *   unknown keep the hold. We are about to do something irreversible and we
- *           could not establish that the purchaser was not charged.
- *
- * The development provider has no remote state and is never asked;
- * `providerPaymentStatus()` returns null for it.
+ * lessons for. Each one goes through `settlePaymentFromProvider` — the same
+ * single implementation the purchaser's return page uses — and the only thing
+ * decided here is what the sweep should do with the answer.
  *
  * @returns {Promise<Set<string>>} ids of payments whose state could not be
  *   established, whose bookings must therefore be left alone.
@@ -719,49 +852,21 @@ async function reconcileUnpaidPayments(payments, paymentById, readProviderStatus
       continue;
     }
 
-    let remote;
-    try {
-      remote = await readProviderStatus(payment);
-    } catch (error) {
-      // A provider outage must not turn into deleted lessons.
-      console.warn(
-        `[booking-expiry] could not reconcile payment ${payment._id} with the provider: ${error.message}`,
-      );
+    const { outcome } = await settlePaymentFromProvider(payment._id, {
+      readProviderStatus,
+      source: "reconciliation",
+    });
+
+    // We could not establish that the purchaser was not charged, and we are
+    // about to do something irreversible. Keep the hold for the next run.
+    if (outcome === "UNKNOWN") {
       unreconciled.add(String(payment._id));
       continue;
     }
 
-    // Nothing to ask (development provider, or no session was ever opened).
-    if (!remote) continue;
-
-    if (remote.status !== "PAID") continue;
-
-    try {
-      const { changed } = await markPaymentPaid(payment._id, {
-        paidAt: new Date(),
-        paymentIntentId: remote.paymentIntentId,
-        amountCents: remote.amountCents,
-      });
-      if (changed) {
-        await confirmBookings(payment._id);
-        await recordAudit({
-          actor: { role: "SYSTEM" },
-          action: AUDIT_ACTIONS.PAYMENT_SETTLED,
-          entityType: "Payment",
-          entityId: payment._id,
-          metadata: { source: "reconciliation", amountCents: remote.amountCents },
-        });
-      }
-      // Either way the money is in: the sweep must not touch these lessons.
+    // The money is in: the sweep must not touch these lessons.
+    if (outcome === "PAID" || outcome === "SETTLED") {
       paymentById.set(String(payment._id), { ...payment, status: PAYMENT_STATUS.PAID });
-    } catch (error) {
-      // An amount mismatch lands here, and is exactly the case where doing
-      // nothing automatically is right. It is audited by `markPaymentPaid`'s
-      // own error and the hold is kept for a human to look at.
-      console.error(
-        `[booking-expiry] payment ${payment._id} is paid at the provider but could not be settled: ${error.message}`,
-      );
-      unreconciled.add(String(payment._id));
     }
   }
 

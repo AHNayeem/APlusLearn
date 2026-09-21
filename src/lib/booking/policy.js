@@ -123,8 +123,12 @@ export function holdExpiresAt(booking, payment, settings) {
 /**
  * Payment states in which the money is in hand, or on its way. A booking
  * backed by one of these is never released, whatever its age.
+ *
+ * Exported because it is also what "already settled" means to
+ * `markPaymentPaid`: a late duplicate of the event that settled a payment
+ * must not walk a refund off the record. One list, two readers.
  */
-const SETTLED_PAYMENT_STATUSES = [
+export const SETTLED_PAYMENT_STATUSES = [
   PAYMENT_STATUS.PAID,
   PAYMENT_STATUS.PARTIALLY_REFUNDED,
   PAYMENT_STATUS.REFUNDED,

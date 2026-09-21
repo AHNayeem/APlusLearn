@@ -1,8 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useSyncExternalStore } from "react";
 import { useRouter } from "next/navigation";
-import { User, Bell, Lock, Trash2, ShieldCheck } from "lucide-react";
+import { User, Bell, Lock, Trash2, ShieldCheck, LayoutGrid, List } from "lucide-react";
+import { cn } from "@/lib/utils/cn";
 import { api } from "@/lib/api/client";
 import { useSubmit } from "@/hooks/useAsync";
 import {
@@ -13,15 +14,108 @@ import { CANADIAN_TIMEZONES } from "@/lib/utils/time";
 import { NOTIFICATION_CHANNELS } from "@/constants";
 import { PhonePanel } from "./PhonePanel";
 
+const VIEW_KEY = "aplus:settings-view";
+const VIEWS = [
+  { value: "grid", label: "Grid", Icon: LayoutGrid },
+  { value: "list", label: "List", Icon: List },
+];
+
+/**
+ * The arrangement is a browser preference, not account data, so it lives in
+ * localStorage and is read as an external store — that keeps the server
+ * snapshot ("grid") honest through hydration and picks up a change made in
+ * another tab.
+ */
+const viewListeners = new Set();
+let viewFallback = "grid"; // Used when storage is blocked (private browsing).
+
+function readView() {
+  try {
+    return window.localStorage.getItem(VIEW_KEY) === "list" ? "list" : "grid";
+  } catch {
+    return viewFallback;
+  }
+}
+
+function serverView() {
+  return "grid";
+}
+
+function subscribeView(onStoreChange) {
+  viewListeners.add(onStoreChange);
+  window.addEventListener("storage", onStoreChange);
+  return () => {
+    viewListeners.delete(onStoreChange);
+    window.removeEventListener("storage", onStoreChange);
+  };
+}
+
+function writeView(next) {
+  viewFallback = next;
+  try {
+    window.localStorage.setItem(VIEW_KEY, next);
+  } catch {
+    // Not worth telling anyone about — the choice still applies to this visit.
+  }
+  for (const notify of viewListeners) notify();
+}
+
 /** Profile, notifications, password and account deletion (§24, §35). */
 export function SettingsPanels({ user }) {
+  const view = useSyncExternalStore(subscribeView, readView, serverView);
+  const grid = view === "grid";
+
   return (
-    <div className="max-w-2xl space-y-6">
-      <ProfilePanel user={user} />
-      <PhonePanel user={user} />
-      <NotificationPanel user={user} />
-      <PasswordPanel />
-      <DangerPanel user={user} />
+    <div className={cn("space-y-4", grid ? "max-w-5xl" : "max-w-2xl")}>
+      {/* Both arrangements are a single column below lg, so the control would
+          do nothing there. */}
+      <ViewToggle value={view} onChange={writeView} className="hidden lg:flex" />
+
+      {/* Each card keeps its natural height (`items-start`) so a short panel
+          never stretches to match a tall neighbour. */}
+      <div className={cn("grid items-start gap-6", grid && "lg:grid-cols-2")}>
+        <ProfilePanel user={user} />
+        <PhonePanel user={user} />
+        <NotificationPanel user={user} />
+        <PasswordPanel />
+        <div className={grid ? "lg:col-span-2" : undefined}>
+          <DangerPanel user={user} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Segmented control choosing how the panels below are arranged. */
+function ViewToggle({ value, onChange, className }) {
+  return (
+    <div className={cn("justify-end", className)}>
+      <div
+        role="group"
+        aria-label="Arrange settings"
+        className="inline-flex gap-1 rounded-xl bg-ink-100 p-1"
+      >
+        {VIEWS.map(({ value: option, label, Icon }) => {
+          const active = option === value;
+          return (
+            <button
+              key={option}
+              type="button"
+              onClick={() => onChange(option)}
+              aria-pressed={active}
+              className={cn(
+                "inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors",
+                active
+                  ? "bg-white text-ink-900 shadow-xs"
+                  : "text-ink-500 hover:text-ink-800",
+              )}
+            >
+              <Icon className="size-4" aria-hidden="true" />
+              {label}
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }

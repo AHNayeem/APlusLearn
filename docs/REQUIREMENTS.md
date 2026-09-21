@@ -189,10 +189,16 @@ code is involved.
 |---|---|---|
 | Stripe Connect | `StripePaymentProvider` — hosted Checkout for the charge, Connect Express with separate charges and transfers for payouts | Awaiting credentials |
 | Card never touches this application | Hosted Checkout; `capturePayment()` is refused outright under Stripe, so the deployment stays outside PCI scope | Implemented |
-| Booking confirmed only by a verified webhook | `/api/webhooks/payments` → `webhook.service.js`; the browser's return page polls and confirms nothing | Implemented |
+| Booking confirmed only by a verified webhook or the provider's own API | `/api/webhooks/payments` → `webhook.service.js` is the normal path; `POST /api/payments/[id]/reconcile` is the other one, and it reads Stripe rather than the browser. The return page confirms nothing — it supplies an id and gets the server's answer | Implemented |
+| The return from checkout does not depend on the webhook arriving | `CheckoutPending` calls `reconcile` immediately and then on a widening backoff for about two minutes. A webhook that is late, lost, rejected or never configured costs the purchaser a second instead of the whole hold window | Implemented |
+| Delayed payment methods are a distinct state | A provider answer of `PROCESSING` is recorded as `PAYMENT_STATUS.PROCESSING`; the purchaser is told the money is clearing rather than being asked to pay again, and the slot stays held | Implemented |
 | Webhook idempotency | Unique `(provider, eventId)` index on `WebhookEvent`; a replay of a *processed* event is acknowledged and dropped | Implemented |
 | Webhook retryability | A delivery that failed, or whose process died holding the claim, is reprocessed when the provider redelivers — idempotency must not swallow the recovery mechanism. Safe because every handler asserts state rather than transitions it | Implemented |
-| A lost webhook cannot destroy a paid lesson | Before releasing any hold, `expireStaleBookings()` asks the provider's API directly (`providerPaymentStatus()`); paid ⇒ settled and confirmed, unpaid ⇒ released, unanswerable ⇒ **hold kept** and retried | Implemented |
+| A lost webhook cannot destroy a paid lesson | Before releasing any hold, `expireStaleBookings()` asks the provider's API directly; paid ⇒ settled and confirmed, unpaid ⇒ released, unanswerable ⇒ **hold kept** and retried | Implemented |
+| One implementation of "ask the provider and apply it" | `settlePaymentFromProvider()` in `booking.service.js`. The expiry sweep and the purchaser's return page are the same code with a different `source` on the audit entry | Implemented |
+| Two authorities settling at once confirm once | `markPaymentPaid()` claims the row with a conditional update, so of a simultaneous webhook and reconciliation exactly one reaches `confirmBookings()` — one meeting room, one confirmation email | Implemented |
+| A settled payment is never walked back | `markPaymentPaid()` treats `REFUNDED` and `PARTIALLY_REFUNDED` as settled alongside `PAID`, so a replayed success event cannot erase a refund | Implemented |
+| Backing out of hosted checkout does not loop | `?cancelled=1` renders the hold and a "Continue to payment" button instead of redirecting straight back to the provider's page | Implemented |
 | Webhook amount validation | An event whose amount disagrees with the priced total is refused | Implemented |
 | Payment idempotency | Idempotency keys on checkout, refund and transfer creation | Implemented |
 | Student payment, commission, tutor amount | `lib/booking/pricing.js`; QA asserts commission + earnings = subtotal exactly | Implemented |
@@ -575,6 +581,7 @@ so it is safe to run in CI.
 | Payments | The server-priced amount is what is charged; idempotency keys on checkout, refund and transfer; a raw card is refused; refund carries the policy outcome; Connect accounts start unpayable and are set to manual payouts; only masked bank details come back |
 | Webhooks | A wrong secret is rejected; an hour-old signature is rejected; a duplicate of a processed event changes nothing; a *failed* delivery is reprocessed on redelivery and settles once the cause is gone; a claim abandoned by a dead process is reclaimed while a live one is not; a mismatched amount is refused and leaves the payment unsettled; a late failure cannot un-pay a settled payment; only card brand and last4 are stored; a dashboard refund reconciles once through either `charge.refunded` or `refund.*`; a pending refund is not counted as money returned; unknown events are acknowledged |
 | Reconciliation | A payment paid at the provider whose webhook never arrived is settled by the sweep rather than released; an unreachable provider keeps the hold; a provider amount that disagrees with the priced total settles nothing |
+| Checkout return | Webhook-before-redirect and redirect-before-webhook both end confirmed, and each confirms exactly once; a repeated reconciliation changes nothing; `PROCESSING` holds the slot and the later async success confirms it; an unpaid answer confirms nothing; an unreachable provider answers `UNKNOWN` rather than "unpaid"; a simultaneous webhook and reconciliation settle once between them; a refunded payment is not re-settled; the development provider is never asked, because it has no remote state to read |
 | Storage | SigV4 reproduces AWS's published vector; upload/read/head/replace/delete round-trip; the uploader's filename never becomes a key; scopes cannot read each other; a traversal key is flattened; no URL is ever returned; no per-object SSE by default; credentials are redacted from provider errors; bad credentials, missing objects, unreachable hosts and timeouts are each named distinctly |
 | Email | Key travels in a header not a URL; both HTML and text parts are sent; delivery is idempotent; a provider rejection surfaces its reason; an outage does not throw into the calling service; all 13 templates render; template input is HTML-escaped; a security notice carries no token |
 | OAuth | A valid token verifies; wrong audience, wrong issuer, tampered signature and a mismatched nonce are all rejected; Apple's string booleans and one-time name are handled; an unconfigured provider refuses rather than trusting |
@@ -646,7 +653,18 @@ no queue or worker process.
    payouts stay administrator-initiated, **and abandoned checkouts never
    release the tutor's slot** — `booking-expiry` is the job that does it.
 3. **Webhook delivery needs a public URL.** Locally, use
-   `stripe listen --forward-to localhost:3000/api/webhooks/payments`.
+   `stripe listen --forward-to localhost:3000/api/webhooks/payments`. Without
+   it the return page's reconciliation still settles the payment from Stripe's
+   API, so a purchaser is not stranded — but `checkout.session.expired`,
+   `charge.succeeded` (card brand and last four) and dashboard refunds are only
+   ever delivered by webhook, so a deployment without one is incomplete.
+4. **The signing secret must belong to the same Stripe account as the secret
+   key.** Configuration merges per field across the environment and the admin
+   panel, so a key saved in Admin → Integrations sitting beside a
+   `STRIPE_WEBHOOK_SECRET` from a different account is a checkout that works
+   and a webhook that can never verify. The panel now says which layer is
+   answering for each credential rather than showing an environment-supplied
+   secret as "Not set".
 
 ### Not implemented
 

@@ -119,7 +119,7 @@ export async function getIntegrationModule(moduleKey) {
 
     /** Non-secret values only. Every secret field is absent from this object. */
     config: publicConfig(moduleKey, active, resolved.config),
-    secrets: publicSecrets(moduleKey, record),
+    secrets: publicSecrets(moduleKey, record, resolved.secretSources),
 
     lastTest: record?.lastTest
       ? {
@@ -214,8 +214,16 @@ function publicConfig(moduleKey, providers, config) {
  * Every secret field the module has across every provider, so switching the
  * provider dropdown in the browser does not blank out the indicator for a
  * credential that is still stored.
+ *
+ * `source` is the addition that matters. A field left blank here but answered
+ * by an environment variable used to read as "Not set", which is false — it is
+ * set, from somewhere else, and possibly from a different account than the
+ * fields beside it. A Stripe secret key saved in this panel next to a webhook
+ * signing secret still coming from the deployment's environment is a checkout
+ * that works and a webhook that can never verify, and the panel said nothing.
+ * Names and provenance only; no value is ever returned (§36).
  */
-function publicSecrets(moduleKey, record) {
+function publicSecrets(moduleKey, record, secretSources = {}) {
   const shown = {};
   for (const provider of providersFor(moduleKey)) {
     for (const field of fieldsFor(moduleKey, provider)) {
@@ -227,6 +235,9 @@ function publicSecrets(moduleKey, record) {
         // characters of a value the provider's own dashboard also shows.
         last4: field.hint === SECRET_HINTS.LAST4 ? (meta?.last4 ?? null) : null,
         updatedAt: meta?.updatedAt ?? null,
+        /** Which layer is actually answering for this field, if any. */
+        source: secretSources[field.name] ?? null,
+        env: field.env ?? null,
       };
     }
   }

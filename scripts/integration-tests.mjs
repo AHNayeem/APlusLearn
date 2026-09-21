@@ -145,6 +145,7 @@ async function runSections() {
   await configurationTests();
   await paymentTests();
   await webhookTests();
+  await checkoutReturnTests();
   await emailTests();
   await oauthTests();
   await geocodingTests();
@@ -795,6 +796,347 @@ async function webhookTests() {
   await Payment.deleteOne({ _id: payment._id });
   await WebhookEvent.deleteMany({ providerObjectId: { $exists: true } });
   await mongoose.disconnect();
+
+  delete process.env.PAYMENT_PROVIDER;
+  delete process.env.STRIPE_SECRET_KEY;
+  delete process.env.STRIPE_WEBHOOK_SECRET;
+}
+
+// --- 3b. The return from a hosted checkout ---------------------------------
+
+/**
+ * What happens when the purchaser comes back from Stripe (§20, §38).
+ *
+ * The webhook is the normal way a hosted payment confirms a booking, and it
+ * is not a guaranteed one: an endpoint the provider cannot reach, a signing
+ * secret belonging to a different account, a forwarder nobody started. When
+ * it does not arrive, the only other authority is the provider's own API —
+ * never the browser, which knows nothing and could be lying anyway.
+ *
+ * `settlePaymentFromProvider` is that second authority, and these are the
+ * orderings it has to survive. `readProviderStatus` is the injected seam
+ * standing in for the Stripe call; in production it is `getPaymentStatus()`
+ * on the payment provider and nothing else.
+ */
+async function checkoutReturnTests() {
+  section("Checkout return — reconciliation, ordering and idempotency");
+
+  const uri = process.env.MONGODB_URI;
+  if (!uri) return skip("checkout return", "MONGODB_URI is not set");
+
+  if (mongoose.connection.readyState !== 1) {
+    try {
+      await mongoose.connect(uri, { serverSelectionTimeoutMS: 2500 });
+    } catch {
+      return skip("checkout return", "MongoDB is not reachable");
+    }
+  }
+
+  const { Booking, Payment, TutorProfile, AuditLog, WebhookEvent } = await import("@/models");
+  const { settlePaymentFromProvider } = await import("@/services/booking.service");
+  const { handlePaymentWebhook } = await import("@/services/webhook.service");
+  const { BOOKING_STATUS, PAYMENT_STATUS } = await import("@/constants");
+
+  const tutor = await TutorProfile.findOne({ isSearchable: true }).lean();
+  if (!tutor) return skip("checkout return", "no seeded tutor — run `bun run seed`");
+
+  process.env.PAYMENT_PROVIDER = "stripe";
+  process.env.STRIPE_SECRET_KEY = STRIPE_KEY;
+  process.env.STRIPE_WEBHOOK_SECRET = WEBHOOK_SECRET;
+
+  // Far enough out that nothing seeded overlaps, and stepped per booking so
+  // two of these can never collide with each other.
+  let slotCursor = new Date("2032-05-04T15:00:00.000Z");
+  const created = [];
+
+  /** One held lesson and the unpaid payment behind it, as checkout leaves them. */
+  const makePending = async () => {
+    const startAt = new Date(slotCursor);
+    slotCursor = new Date(slotCursor.getTime() + 3 * 60 * 60 * 1000);
+    const purchaserId = new mongoose.Types.ObjectId();
+
+    // The booking exists before the payment does, exactly as `createBooking`
+    // writes it: the Payment names a booking, so it cannot be created first.
+    const booking = await Booking.create({
+      reference: `APL-R${randomUUID().replace(/-/g, "").slice(0, 8).toUpperCase()}`,
+      purchaserId,
+      studentProfileId: new mongoose.Types.ObjectId(),
+      tutorProfileId: tutor._id,
+      tutorUserId: tutor.userId,
+      courseId: new mongoose.Types.ObjectId(),
+      courseName: "Advanced Functions",
+      mode: "ONLINE",
+      meetingProvider: "GOOGLE_MEET",
+      startAt,
+      endAt: new Date(startAt.getTime() + 60 * 60 * 1000),
+      durationMinutes: 60,
+      status: BOOKING_STATUS.PENDING_PAYMENT,
+      price: {
+        hourlyRateCents: 6000, durationMinutes: 60, subtotalCents: 6000,
+        commissionPercent: 15, commissionCents: 900, tutorEarningsCents: 5100, totalCents: 6000,
+      },
+    });
+
+    const payment = await Payment.create({
+      bookingId: booking._id,
+      purchaserId,
+      tutorUserId: tutor.userId,
+      subtotalCents: 6000,
+      commissionPercent: 15,
+      commissionCents: 900,
+      tutorEarningsCents: 5100,
+      totalCents: 6000,
+      status: PAYMENT_STATUS.REQUIRES_PAYMENT,
+      provider: "STRIPE",
+      providerCheckoutId: `cs_test_${randomUUID().replace(/-/g, "").slice(0, 20)}`,
+    });
+
+    await Booking.updateOne({ _id: booking._id }, { $set: { paymentId: payment._id } });
+    created.push({ payment: payment._id, booking: booking._id });
+    return { payment, booking };
+  };
+
+  const statusOf = async (id) => (await Booking.findById(id).lean()).status;
+  const paymentStatusOf = async (id) => (await Payment.findById(id).lean()).status;
+  const settlementsFor = (paymentId) =>
+    AuditLog.countDocuments({ action: "PAYMENT_SETTLED", entityId: paymentId });
+
+  /** The provider, answering as Stripe would. Never the browser. */
+  const says = (status, overrides = {}) => async (payment) => ({
+    paymentIntentId: payment.providerPaymentIntentId ?? `pi_test_${String(payment._id).slice(-12)}`,
+    status,
+    amountCents: payment.totalCents,
+    ...overrides,
+  });
+
+  const paidSessionEvent = (payment, type = "checkout.session.completed") => ({
+    id: `evt_${randomUUID().replace(/-/g, "").slice(0, 16)}`,
+    type,
+    livemode: false,
+    data: {
+      object: {
+        id: payment.providerCheckoutId,
+        payment_status: "paid",
+        amount_total: payment.totalCents,
+        metadata: { paymentId: String(payment._id) },
+      },
+    },
+  });
+
+  const deliver = (body) => {
+    const payload = JSON.stringify(body);
+    return handlePaymentWebhook({
+      payload,
+      signature: stripeSignature(payload, WEBHOOK_SECRET),
+      connect: false,
+    });
+  };
+
+  // --- Case A. the webhook arrives first, then the purchaser comes back
+  {
+    const { payment, booking } = await makePending();
+    await deliver(paidSessionEvent(payment));
+
+    check("webhook-before-redirect: the webhook confirms the lesson",
+      (await paymentStatusOf(payment._id)) === "PAID" &&
+        (await statusOf(booking._id)) === BOOKING_STATUS.CONFIRMED);
+
+    const onReturn = await settlePaymentFromProvider(payment._id, {
+      readProviderStatus: says("PAID"),
+      source: "return-page",
+    });
+    check("and the return page finds nothing left to do",
+      onReturn.outcome === "SETTLED" && onReturn.changed === false, JSON.stringify(onReturn));
+    check("so the lesson is confirmed exactly once",
+      (await settlementsFor(payment._id)) === 1);
+  }
+
+  // --- Case B. the purchaser comes back first; the webhook is late or lost
+  //
+  // This is the reported failure. Before the return page could ask the
+  // provider, the payment sat in REQUIRES_PAYMENT until the hold lapsed and
+  // "Payment not completed" was all the purchaser ever saw.
+  let lateWebhookPayment;
+  {
+    const { payment, booking } = await makePending();
+    const onReturn = await settlePaymentFromProvider(payment._id, {
+      readProviderStatus: says("PAID"),
+      source: "return-page",
+    });
+
+    check("redirect-before-webhook: the return page settles it from the provider",
+      onReturn.outcome === "PAID" && onReturn.changed === true && onReturn.confirmed === 1,
+      JSON.stringify(onReturn));
+    check("the lesson is CONFIRMED without any webhook having arrived",
+      (await statusOf(booking._id)) === BOOKING_STATUS.CONFIRMED);
+    check("and the catch-up is audited as the return page, not as a webhook",
+      Boolean(await AuditLog.findOne({
+        action: "PAYMENT_SETTLED",
+        entityId: payment._id,
+        "metadata.source": "return-page",
+      })));
+
+    // The webhook turns up afterwards, as it eventually does.
+    const late = await deliver(paidSessionEvent(payment));
+    check("the late webhook recognises the payment as already settled",
+      late.handled === true && /already paid/i.test(late.result ?? ""), JSON.stringify(late));
+    check("and confirms nothing a second time",
+      (await settlementsFor(payment._id)) === 1);
+
+    lateWebhookPayment = payment;
+  }
+
+  // --- Case C. the same reconciliation run twice
+  {
+    const repeat = await settlePaymentFromProvider(lateWebhookPayment._id, {
+      readProviderStatus: says("PAID"),
+      source: "return-page",
+    });
+    check("reconciling an already-settled payment changes nothing",
+      repeat.outcome === "SETTLED" && repeat.changed === false);
+    check("and still leaves one settlement on the record",
+      (await settlementsFor(lateWebhookPayment._id)) === 1);
+  }
+
+  // --- Case D. a delayed payment method: processing, then success
+  {
+    const { payment, booking } = await makePending();
+    const pending = await settlePaymentFromProvider(payment._id, {
+      readProviderStatus: says("PROCESSING"),
+      source: "return-page",
+    });
+
+    check("a payment the provider is still processing is recorded as PROCESSING",
+      pending.outcome === "PROCESSING" && (await paymentStatusOf(payment._id)) === "PROCESSING",
+      JSON.stringify(pending));
+    check("and its lesson stays held rather than being confirmed",
+      (await statusOf(booking._id)) === BOOKING_STATUS.PENDING_PAYMENT);
+
+    const succeeded = await deliver(paidSessionEvent(payment, "checkout.session.async_payment_succeeded"));
+    check("the later async success confirms it",
+      succeeded.handled === true &&
+        (await statusOf(booking._id)) === BOOKING_STATUS.CONFIRMED,
+      JSON.stringify(succeeded));
+  }
+
+  // --- Case E. the payment failed, or was never made
+  {
+    const { payment, booking } = await makePending();
+    const unpaid = await settlePaymentFromProvider(payment._id, {
+      readProviderStatus: says("REQUIRES_PAYMENT"),
+      source: "return-page",
+    });
+    check("a payment the provider says is unpaid confirms nothing",
+      unpaid.outcome === "UNPAID" &&
+        (await statusOf(booking._id)) === BOOKING_STATUS.PENDING_PAYMENT,
+      JSON.stringify(unpaid));
+    check("and the payment is left where the hold rules can still reach it",
+      (await paymentStatusOf(payment._id)) === "REQUIRES_PAYMENT");
+  }
+
+  // --- Case F. the provider cannot be asked
+  //
+  // UNKNOWN must never be read as "not paid". A slot held ten minutes too
+  // long is recoverable; a lesson released out from under a charged card is
+  // not.
+  {
+    const { payment, booking } = await makePending();
+    const blind = await settlePaymentFromProvider(payment._id, {
+      readProviderStatus: async () => {
+        throw new Error("Stripe is unreachable");
+      },
+      source: "return-page",
+    });
+    check("an unreachable provider answers UNKNOWN, not 'unpaid'",
+      blind.outcome === "UNKNOWN" && blind.changed === false, JSON.stringify(blind));
+    check("and nothing about the booking or the payment moves",
+      (await statusOf(booking._id)) === BOOKING_STATUS.PENDING_PAYMENT &&
+        (await paymentStatusOf(payment._id)) === "REQUIRES_PAYMENT");
+  }
+
+  // --- Case G. the provider says paid, for the wrong amount
+  {
+    const { payment, booking } = await makePending();
+    const mismatch = await settlePaymentFromProvider(payment._id, {
+      readProviderStatus: says("PAID", { amountCents: 100 }),
+      source: "return-page",
+    });
+    check("a paid amount that disagrees with the price is NOT settled",
+      mismatch.outcome === "UNKNOWN" && (await paymentStatusOf(payment._id)) === "REQUIRES_PAYMENT",
+      JSON.stringify(mismatch));
+    check("and its lesson is not confirmed on a figure nobody agrees on",
+      (await statusOf(booking._id)) === BOOKING_STATUS.PENDING_PAYMENT);
+  }
+
+  // --- Case H. both authorities arrive at once
+  //
+  // The purchaser's return page and the provider's webhook routinely land in
+  // the same second. `markPaymentPaid` claims the row conditionally, so only
+  // one of them gets to run `confirmBookings` — the alternative is two
+  // meeting rooms and two confirmation emails for one lesson.
+  {
+    const { payment, booking } = await makePending();
+    const [viaReturn, viaWebhook] = await Promise.all([
+      settlePaymentFromProvider(payment._id, {
+        readProviderStatus: says("PAID"),
+        source: "return-page",
+      }),
+      deliver(paidSessionEvent(payment)),
+    ]);
+
+    check("a simultaneous webhook and reconciliation both succeed",
+      viaReturn.outcome !== "UNKNOWN" && viaWebhook.received === true,
+      `${JSON.stringify(viaReturn)} / ${JSON.stringify(viaWebhook)}`);
+    check("the lesson is CONFIRMED",
+      (await statusOf(booking._id)) === BOOKING_STATUS.CONFIRMED);
+    check("but exactly ONE of them settled it",
+      (await settlementsFor(payment._id)) === 1,
+      `settlements: ${await settlementsFor(payment._id)}`);
+  }
+
+  // --- Case I. a refunded payment is never walked back to PAID
+  {
+    const { payment } = await makePending();
+    await Payment.updateOne(
+      { _id: payment._id },
+      { $set: { status: "REFUNDED", refundedCents: 6000, paidAt: new Date() } },
+    );
+    const afterRefund = await settlePaymentFromProvider(payment._id, {
+      readProviderStatus: says("PAID"),
+      source: "return-page",
+    });
+    check("a refunded payment is not re-settled by a replayed 'paid' answer",
+      afterRefund.outcome === "SETTLED" && (await paymentStatusOf(payment._id)) === "REFUNDED",
+      JSON.stringify(afterRefund));
+  }
+
+  // --- Case J. the development provider is never consulted
+  //
+  // It settles in-app and keeps no remote state, so there is nothing to read
+  // back. Answering "paid" here would confirm a lesson on the strength of
+  // nothing having been examined at all.
+  {
+    const { payment, booking } = await makePending();
+    await Payment.updateOne({ _id: payment._id }, { $set: { provider: "MOCK" } });
+    delete process.env.PAYMENT_PROVIDER;
+    const { resetPaymentProvider } = await import("@/services/external/payment-provider");
+    resetPaymentProvider();
+
+    const mock = await settlePaymentFromProvider(payment._id, { source: "return-page" });
+    check("a development-provider payment has no remote state to reconcile",
+      mock.outcome === "NOT_APPLICABLE" && mock.changed === false, JSON.stringify(mock));
+    check("and nothing is confirmed on the strength of it",
+      (await statusOf(booking._id)) === BOOKING_STATUS.PENDING_PAYMENT);
+
+    process.env.PAYMENT_PROVIDER = "stripe";
+    resetPaymentProvider();
+  }
+
+  // --- clean up everything this section created
+  await Booking.deleteMany({ _id: { $in: created.map((c) => c.booking) } });
+  await Payment.deleteMany({ _id: { $in: created.map((c) => c.payment) } });
+  await AuditLog.deleteMany({ entityId: { $in: created.map((c) => c.payment) } });
+  await WebhookEvent.deleteMany({ paymentId: { $in: created.map((c) => c.payment) } });
 
   delete process.env.PAYMENT_PROVIDER;
   delete process.env.STRIPE_SECRET_KEY;

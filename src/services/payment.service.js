@@ -14,7 +14,7 @@ import { NotFoundError, BusinessRuleError, AuthorizationError } from "@/lib/api/
 import { requireVerifiedEmail } from "@/lib/auth/assert";
 import { toPlain } from "@/lib/utils/serialize";
 import { formatMoney } from "@/lib/utils/format";
-import { holdMinutes } from "@/lib/booking/policy";
+import { holdMinutes, SETTLED_PAYMENT_STATUSES } from "@/lib/booking/policy";
 import { getPaymentProvider } from "./external/payment-provider";
 import { getSettings } from "./settings.service";
 import { spendCredit, releaseCredit } from "./credit.service";
@@ -198,6 +198,24 @@ async function openCheckoutSession(payment, booking, provider, { bookingIds, pac
   payment.checkoutExpiresAt = checkout.expiresAt ? new Date(checkout.expiresAt) : undefined;
   payment.livemode = Boolean(checkout.livemode);
   await payment.save();
+
+  // One line per session, so a payment that never confirms can be traced from
+  // here to the provider's dashboard and to the webhook that should have
+  // settled it (§38). Identifiers and amounts only — a credential, a card
+  // number or a customer's email would make the log the leak.
+  console.info(
+    "[payment] checkout.session.created " +
+      JSON.stringify({
+        paymentId: String(payment._id),
+        provider: checkout.provider,
+        checkoutId: checkout.checkoutId,
+        paymentIntentId: checkout.paymentIntentId ?? null,
+        amountCents: checkout.amountCents,
+        currency: checkout.currency,
+        livemode: Boolean(checkout.livemode),
+        expiresAt: checkout.expiresAt ?? null,
+      }),
+  );
 
   // Remember the provider's customer so a returning parent keeps one record.
   if (checkout.customerId && !purchaser?.paymentCustomerId) {
@@ -435,7 +453,10 @@ export async function markPaymentPaid(
   const payment = await Payment.findById(paymentId);
   if (!payment) throw new NotFoundError("That payment no longer exists.");
 
-  if (payment.status === PAYMENT_STATUS.PAID) {
+  // Already settled. REFUNDED and PARTIALLY_REFUNDED belong here with PAID:
+  // the money arrived and has since been sent back, and a late duplicate of
+  // the event that settled it must not walk that refund off the record.
+  if (SETTLED_PAYMENT_STATUSES.includes(payment.status)) {
     return { changed: false, payment: toPlain(payment) };
   }
 
@@ -448,18 +469,37 @@ export async function markPaymentPaid(
     );
   }
 
-  payment.status = PAYMENT_STATUS.PAID;
-  payment.paidAt = paidAt ? new Date(paidAt) : new Date();
-  if (paymentMethodBrand) payment.paymentMethodBrand = paymentMethodBrand;
-  if (paymentMethodLast4) payment.paymentMethodLast4 = paymentMethodLast4;
-  if (chargeId) payment.providerChargeId = chargeId;
-  if (paymentIntentId) payment.providerPaymentIntentId = paymentIntentId;
-  payment.receiptNumber =
-    receiptNumber ?? payment.receiptNumber ?? `RCPT-${String(payment._id).slice(-8).toUpperCase()}`;
-  payment.failureReason = undefined;
-  await payment.save();
+  // The claim, not the check above, is what makes this safe to run twice at
+  // once. Two authorities can settle the same payment — the provider's
+  // webhook and the reconciliation the purchaser's own return page triggers
+  // — and they routinely arrive within the same second. A read-then-save
+  // would let both see REQUIRES_PAYMENT and both go on to `confirmBookings`,
+  // which would build two meeting rooms and send two confirmation emails.
+  // A conditional update makes exactly one of them the one that changed it.
+  const claimed = await Payment.findOneAndUpdate(
+    { _id: paymentId, status: { $nin: SETTLED_PAYMENT_STATUSES } },
+    {
+      $set: {
+        status: PAYMENT_STATUS.PAID,
+        paidAt: paidAt ? new Date(paidAt) : new Date(),
+        receiptNumber:
+          receiptNumber ?? payment.receiptNumber ?? `RCPT-${String(payment._id).slice(-8).toUpperCase()}`,
+        ...(paymentMethodBrand ? { paymentMethodBrand } : {}),
+        ...(paymentMethodLast4 ? { paymentMethodLast4 } : {}),
+        ...(chargeId ? { providerChargeId: chargeId } : {}),
+        ...(paymentIntentId ? { providerPaymentIntentId: paymentIntentId } : {}),
+      },
+      $unset: { failureReason: "" },
+    },
+    { returnDocument: "after" },
+  );
 
-  return { changed: true, payment: toPlain(payment) };
+  // Somebody else settled it between the read and the claim.
+  if (!claimed) {
+    return { changed: false, payment: toPlain(await Payment.findById(paymentId).lean()) };
+  }
+
+  return { changed: true, payment: toPlain(claimed) };
 }
 
 /** Record a declined payment from a verified provider event. */

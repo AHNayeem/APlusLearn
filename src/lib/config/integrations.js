@@ -238,7 +238,16 @@ export async function resolveIntegrationConfig(moduleKey, { fresh = false } = {}
   }
 
   // Secrets: stored first, environment behind it, per field.
+  //
+  // `secretSources` records *which* of the two answered, per field. It is the
+  // only way anybody can see that a module is running on credentials from two
+  // places at once — a Stripe secret key saved here and a webhook signing
+  // secret still coming from the deployment's environment, which is a working
+  // checkout whose every event fails signature verification. The values never
+  // leave the server; the provenance does, because an operator cannot fix
+  // what the panel will not show them.
   const secrets = {};
+  const secretSources = {};
   const undecryptable = [];
   for (const field of fieldsForProviders(moduleKey, active)) {
     if (field.kind !== FIELD_KINDS.SECRET) continue;
@@ -251,11 +260,15 @@ export async function resolveIntegrationConfig(moduleKey, { fresh = false } = {}
         continue;
       }
       secrets[field.name] = plaintext;
+      secretSources[field.name] = CONFIG_SOURCES.DATABASE;
       continue;
     }
 
     const fromEnv = field.env ? process.env[field.env]?.trim() : null;
-    if (fromEnv) secrets[field.name] = fromEnv;
+    if (fromEnv) {
+      secrets[field.name] = fromEnv;
+      secretSources[field.name] = CONFIG_SOURCES.ENVIRONMENT;
+    }
   }
 
   if (undecryptable.length) {
@@ -268,6 +281,7 @@ export async function resolveIntegrationConfig(moduleKey, { fresh = false } = {}
       source: CONFIG_SOURCES.DATABASE,
       config,
       secrets: {},
+      secretSources: {},
       configured: false,
       missing: [],
       error:
@@ -305,6 +319,7 @@ export async function resolveIntegrationConfig(moduleKey, { fresh = false } = {}
     source: CONFIG_SOURCES.DATABASE,
     config,
     secrets,
+    secretSources,
     configured: missing.length === 0,
     missing,
     error: missing.length
@@ -352,10 +367,14 @@ function fromEnvironmentOnly(moduleKey, registry) {
     : { ...defaultsFor(moduleKey, active), ...environmentValuesFor(moduleKey, active) };
 
   const secrets = {};
+  const secretSources = {};
   for (const field of fieldsForProviders(moduleKey, active)) {
     if (field.kind !== FIELD_KINDS.SECRET || !field.env) continue;
     const raw = process.env[field.env]?.trim();
-    if (raw) secrets[field.name] = raw;
+    if (raw) {
+      secrets[field.name] = raw;
+      secretSources[field.name] = CONFIG_SOURCES.ENVIRONMENT;
+    }
   }
 
   return {
@@ -370,6 +389,7 @@ function fromEnvironmentOnly(moduleKey, registry) {
     source: usesDevelopment ? CONFIG_SOURCES.DEFAULT : CONFIG_SOURCES.ENVIRONMENT,
     config,
     secrets,
+    secretSources,
     configured: resolved.configured,
     missing: resolved.missing ?? [],
     error: resolved.error,
@@ -388,6 +408,7 @@ function failed(moduleKey, registry, enabled, message) {
     source: CONFIG_SOURCES.DATABASE,
     config: {},
     secrets: {},
+    secretSources: {},
     configured: false,
     missing: [],
     error: message,

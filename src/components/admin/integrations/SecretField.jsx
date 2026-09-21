@@ -121,6 +121,30 @@ export function SecretField({ field, state, value, onChange, onClear, onUndoClea
               )}
               {state.updatedAt && <span>Last changed {formatDate(state.updatedAt)}</span>}
             </>
+          ) : state?.source === "environment" ? (
+            /*
+              Set, but not here. Saying "Not set" would be wrong, and the
+              wrongness is expensive: a key saved in this panel sitting beside
+              a signing secret still answered by the deployment's environment
+              is two accounts' credentials in one module, and nothing else in
+              the product would ever mention it.
+            */
+            <>
+              <Badge tone="warning" size="sm">
+                <KeyRound className="mr-1 inline size-3" aria-hidden="true" />
+                From the environment
+              </Badge>
+              <span className="text-ink-500">
+                {state.env ? (
+                  <>
+                    Answered by <code className="font-mono">{state.env}</code>. Check it belongs to
+                    the same account as the values stored here.
+                  </>
+                ) : (
+                  "Answered by this deployment's configuration, not by this panel."
+                )}
+              </span>
+            </>
           ) : (
             <Badge tone="neutral" size="sm">Not set</Badge>
           )}
