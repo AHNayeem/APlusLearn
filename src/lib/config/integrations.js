@@ -9,7 +9,7 @@ import {
   INTEGRATION_MODULE_KEYS,
   CONFIG_SOURCES,
   FIELD_KINDS,
-  fieldsFor,
+  fieldsForProviders,
   providersFor,
 } from "@/constants/integrations";
 import {
@@ -140,20 +140,32 @@ async function loadRecord(moduleKey, { fresh = false } = {}) {
   return record;
 }
 
-/** Registry defaults for one provider's fields. */
-function defaultsFor(moduleKey, provider) {
+/**
+ * Registry defaults for every field the active providers declare.
+ *
+ * Takes a list rather than one name because a `multi` module runs several
+ * adapters at once and each brings its own fields.
+ */
+function defaultsFor(moduleKey, providers) {
   const values = {};
-  for (const field of fieldsFor(moduleKey, provider)) {
+  for (const field of fieldsForProviders(moduleKey, providers)) {
     if (field.default !== undefined) values[field.name] = field.default;
   }
   return values;
 }
 
-/** The environment's answer for one provider's fields, where it has one. */
-function environmentValuesFor(moduleKey, provider) {
+/**
+ * The environment's answer for the active providers' *non-secret* fields.
+ *
+ * Secrets are deliberately absent. They are resolved into `secrets` by their
+ * own pass, from the same variables, and letting a plaintext credential sit in
+ * `config` as well would put one in the object the admin service reads —
+ * safe only for as long as every future caller remembers to filter by kind.
+ */
+function environmentValuesFor(moduleKey, providers) {
   const values = {};
-  for (const field of fieldsFor(moduleKey, provider)) {
-    if (!field.env) continue;
+  for (const field of fieldsForProviders(moduleKey, providers)) {
+    if (!field.env || field.kind === FIELD_KINDS.SECRET) continue;
     const raw = process.env[field.env]?.trim();
     if (!raw) continue;
     values[field.name] = coerce(field, raw);
@@ -210,11 +222,16 @@ export async function resolveIntegrationConfig(moduleKey, { fresh = false } = {}
   }
 
   const primary = chosen[0];
+  // Every provider this module is running, not just the first of them. A
+  // `multi` module holds one set of credentials per platform and all of them
+  // have to be resolved — resolving only the primary is how one platform ends
+  // up being handed another's client secret.
+  const active = registry.multi ? chosen : [primary];
   const config = {
-    ...defaultsFor(moduleKey, primary),
-    ...environmentValuesFor(moduleKey, primary),
+    ...defaultsFor(moduleKey, active),
+    ...environmentValuesFor(moduleKey, active),
   };
-  for (const field of fieldsFor(moduleKey, primary)) {
+  for (const field of fieldsForProviders(moduleKey, active)) {
     if (field.kind === FIELD_KINDS.SECRET) continue;
     const stored = record.config?.[field.name];
     if (isSet(stored)) config[field.name] = stored;
@@ -223,7 +240,7 @@ export async function resolveIntegrationConfig(moduleKey, { fresh = false } = {}
   // Secrets: stored first, environment behind it, per field.
   const secrets = {};
   const undecryptable = [];
-  for (const field of fieldsFor(moduleKey, primary)) {
+  for (const field of fieldsForProviders(moduleKey, active)) {
     if (field.kind !== FIELD_KINDS.SECRET) continue;
 
     const stored = record.secrets?.[field.name];
@@ -274,7 +291,7 @@ export async function resolveIntegrationConfig(moduleKey, { fresh = false } = {}
     return failed(moduleKey, registry, enabled, `${registry.label} cannot run its development provider when APP_ENV=production.`);
   }
 
-  const missing = fieldsFor(moduleKey, primary)
+  const missing = fieldsForProviders(moduleKey, active)
     .filter((field) => field.required)
     .filter((field) => !isSet(field.kind === FIELD_KINDS.SECRET ? secrets[field.name] : config[field.name]))
     .map((field) => field.label);
@@ -325,17 +342,20 @@ function fromEnvironmentOnly(moduleKey, registry) {
   const primary = resolved.names[0] ?? resolved.name;
   const usesDevelopment = primary === DEVELOPMENT || !resolved.configured;
 
+  // Same rule as the stored path: every provider the environment names, so a
+  // deployment running Google *and* Outlook from environment variables gets
+  // both sets of credentials rather than the first one twice.
+  const active = usesDevelopment ? [] : registry.multi ? resolved.names : [primary];
+
   const config = usesDevelopment
     ? {}
-    : { ...defaultsFor(moduleKey, primary), ...environmentValuesFor(moduleKey, primary) };
+    : { ...defaultsFor(moduleKey, active), ...environmentValuesFor(moduleKey, active) };
 
   const secrets = {};
-  if (!usesDevelopment) {
-    for (const field of fieldsFor(moduleKey, primary)) {
-      if (field.kind !== FIELD_KINDS.SECRET || !field.env) continue;
-      const raw = process.env[field.env]?.trim();
-      if (raw) secrets[field.name] = raw;
-    }
+  for (const field of fieldsForProviders(moduleKey, active)) {
+    if (field.kind !== FIELD_KINDS.SECRET || !field.env) continue;
+    const raw = process.env[field.env]?.trim();
+    if (raw) secrets[field.name] = raw;
   }
 
   return {

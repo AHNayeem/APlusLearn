@@ -10,14 +10,19 @@ Every numbered section of `docs/Project.md`, mapped to what implements it.
 - **Partial** — working, with a named limitation
 - **Phase 2/3** — deliberately deferred, with the architecture in place
 
-Verified: `bun run lint` (clean) → `bun run build` (clean) →
-`bun run test:integrations` (981 passed, 2 failed) → `bun run qa`
-(626 passed, 9 failed).
+Verified on a freshly seeded database: `bun run lint` (clean) →
+`bun run build` (clean) → `bun run test:integrations` (982 passed, 1 failed)
+→ `bun run qa` (637 passed, 9 failed), and a second `bun run qa` immediately
+afterwards with nothing reset (636 passed, the same 9 failed).
 
-The 11 failures are one environment problem, not a code one: the MinIO
-credentials in this machine's `.env.local` are refused by the bucket, so every
-upload and every document/branding read fails. They are identical before and
-after the External modules work.
+The 10 remaining failures are one environment problem, not a code one.
+`STORAGE_ACCESS_KEY`, `STORAGE_SECRET_KEY` and `STORAGE_BUCKET` in this
+machine's `.env.local` are still the literal placeholder `...`; the endpoint is
+reachable and is a real S3-compatible store, and it answers a signed request
+with HTTP 403 `InvalidAccessKeyId` for *any* bucket name, including one that
+does not exist — which is authentication being refused before a bucket is ever
+looked up. Filling those three variables in is the whole fix; no application
+code is involved.
 
 ---
 
@@ -312,7 +317,7 @@ taking a page down.
 |---|---|
 | `AUTH_SECRET`, `MONGODB_URI`, `CRON_SECRET`, `NEXT_PUBLIC_APP_URL` | Infrastructure. The application cannot read its own database or verify its own sessions without them, so editing them through a database-backed screen would saw off the branch (§36) |
 | Tutor approval before appearing in search | `isSearchable` is derived; making it optional would let an unverified tutor surface (§16) |
-| Password reset / verification / security-alert email | An operator who could disable these could lock people out of their own accounts |
+| Password reset / verification / security-alert email | No *notification* switch turns these off — an operator who could would lock people out of their own accounts. The email module's own on/off switch is a different control and does stop them, because it is the transport rather than a preference; the External modules panel states that cost before the switch is thrown (§26, §39) |
 | Rating scale | 1–5 is baked into the schema, indexes and every aggregate |
 | Review eligibility window | No such rule exists today; adding one to expose a setting would be a new business rule, not a configuration of an existing one |
 | Commission on existing bookings | Captured at creation; settings apply to new bookings only |
@@ -330,6 +335,8 @@ than dropped.
 | Requirement | Implementation | Status |
 |---|---|---|
 | One registry drives everything | `src/constants/integrations.js` — every module, provider, field, kind, secrecy and environment fallback. The Zod schemas, the Mongoose sub-documents, the masking and the admin form are all derived from it | Implemented |
+| One set of credentials per provider | Calendar is the only `multi` module — §41 lets a tutor pick Google or Outlook, so both adapters are live at once. Their fields are provider-qualified (`googleClientId`, `microsoftClientId`, …) and resolution, validation and display all work from the whole active set rather than the first provider. A shared field name would be one stored path per credential, so one platform would overwrite the other's and be handed the other's client secret at token exchange. QA asserts each platform's authorize URL carries only its own client id | Implemented |
+| A test never changes what it tests | Recording a connection-test result creates the stored document if there is none, and `enabled` defaults to false — so the write seeds `enabled` with whatever the module already resolved to. Otherwise pressing "Test" on a module configured by environment variables would switch it off, silently stopping password-reset mail, or checkout, or uploads. The same seeding applies to a first save that does not mention the switch. QA asserts both | Implemented |
 | Persistence | `Integration` model, one document per module, in its own collection — never in `Settings`, which is memoised and reaches client components as branding | Implemented |
 | Secrets encrypted at rest | `encryptSecret`/`decryptSecret` (AES-256-GCM, HKDF from `AUTH_SECRET`) under the `aplus:integration-secret` label, so a leaked calendar-token key does not open a Stripe key. `secrets` is `select: false` | Implemented |
 | Secrets never returned | `GET` reduces each to `{ set, updatedAt }`; last four characters only for the Stripe secret key, which Stripe's own dashboard also shows. QA plants unique values and asserts they appear in no response, no rendered HTML and no audit record | Implemented |

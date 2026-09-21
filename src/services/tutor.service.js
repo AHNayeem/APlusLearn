@@ -93,7 +93,17 @@ export function toPublicTutor(profile, user, { distanceKm } = {}) {
       inProgress: e.inProgress,
       verified: e.verified,
     })),
-    experience: profile.experience ?? [],
+    // Sub-documents keep an ObjectId `_id`; mapping the fields the profile
+    // actually shows keeps this object plain enough to cross to a Client
+    // Component (see `toPlain` — a lean() read does not convert these).
+    experience: (profile.experience ?? []).map((e) => ({
+      title: e.title,
+      organisation: e.organisation,
+      startYear: e.startYear,
+      endYear: e.endYear,
+      current: e.current,
+      description: e.description,
+    })),
     qualifications: profile.qualifications ?? [],
     yearsExperience: profile.yearsExperience ?? 0,
     languages: profile.languages ?? [],

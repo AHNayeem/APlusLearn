@@ -255,16 +255,25 @@ export const INTEGRATION_REGISTRY = {
     testLabel: "Test credentials",
     testFields: [],
     providers: {
+      /**
+       * Field names are provider-qualified, and on a `multi` module that is
+       * load-bearing rather than cosmetic. Both platforms may be live at once,
+       * so both sets of credentials have to be stored side by side — and the
+       * Mongoose sub-document is a union keyed by field name, so a shared
+       * `clientId` would be a single path that one platform overwrites for the
+       * other. It would also be handed to the wrong provider at build time,
+       * which means presenting one third party's client secret to another.
+       */
       google: {
         label: "Google Calendar",
         description: "An OAuth client from the Google Cloud console, with the Calendar API enabled.",
         fields: [
-          f("clientId", "Client ID", FIELD_KINDS.TEXT, {
+          f("googleClientId", "Client ID", FIELD_KINDS.TEXT, {
             env: "GOOGLE_CALENDAR_CLIENT_ID",
             required: true,
             placeholder: "....apps.googleusercontent.com",
           }),
-          f("clientSecret", "Client secret", FIELD_KINDS.SECRET, {
+          f("googleClientSecret", "Client secret", FIELD_KINDS.SECRET, {
             env: "GOOGLE_CALENDAR_CLIENT_SECRET",
             required: true,
             hint: SECRET_HINTS.NONE,
@@ -275,16 +284,16 @@ export const INTEGRATION_REGISTRY = {
         label: "Outlook Calendar",
         description: "An app registration in Microsoft Entra ID with delegated Calendars.ReadWrite.",
         fields: [
-          f("clientId", "Application (client) ID", FIELD_KINDS.TEXT, {
+          f("microsoftClientId", "Application (client) ID", FIELD_KINDS.TEXT, {
             env: "MICROSOFT_CALENDAR_CLIENT_ID",
             required: true,
           }),
-          f("clientSecret", "Client secret", FIELD_KINDS.SECRET, {
+          f("microsoftClientSecret", "Client secret", FIELD_KINDS.SECRET, {
             env: "MICROSOFT_CALENDAR_CLIENT_SECRET",
             required: true,
             hint: SECRET_HINTS.NONE,
           }),
-          f("tenantId", "Directory (tenant) ID", FIELD_KINDS.TEXT, {
+          f("microsoftTenantId", "Directory (tenant) ID", FIELD_KINDS.TEXT, {
             env: "MICROSOFT_CALENDAR_TENANT_ID",
             default: "common",
             help: "`common` lets any Microsoft account connect. A tenant GUID restricts it to one organisation.",
@@ -394,6 +403,44 @@ export const INTEGRATION_REGISTRY = {
 /** Every field of one provider, or an empty list for an unknown pair. */
 export function fieldsFor(moduleKey, provider) {
   return INTEGRATION_REGISTRY[moduleKey]?.providers?.[provider]?.fields ?? [];
+}
+
+/**
+ * Every field across a set of providers, de-duplicated by name.
+ *
+ * A `multi` module has more than one adapter live at once, and each carries
+ * its own credentials — so resolving, validating and displaying it has to work
+ * from the whole set rather than from whichever one happens to be first.
+ * Field names are provider-qualified precisely so this union is unambiguous.
+ */
+export function fieldsForProviders(moduleKey, providers) {
+  const seen = new Map();
+  for (const provider of providers ?? []) {
+    for (const field of fieldsFor(moduleKey, provider)) {
+      if (!seen.has(field.name)) seen.set(field.name, field);
+    }
+  }
+  return [...seen.values()];
+}
+
+/** True when a module may run several adapters at the same time. */
+export function isMultiModule(moduleKey) {
+  return Boolean(INTEGRATION_REGISTRY[moduleKey]?.multi);
+}
+
+/**
+ * The providers one module's configuration actually spans.
+ *
+ * One for an ordinary module; every platform an operator has turned on for a
+ * `multi` one. This is the set every other layer resolves against.
+ */
+export function activeProvidersFor(moduleKey, { provider, providers } = {}) {
+  const known = providersFor(moduleKey);
+  if (isMultiModule(moduleKey)) {
+    const listed = (providers ?? []).filter((name) => known.includes(name));
+    if (listed.length) return listed;
+  }
+  return known.includes(provider) ? [provider] : [];
 }
 
 /** Just the secret ones — the fields that are encrypted and never returned. */

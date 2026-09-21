@@ -77,9 +77,71 @@ process.env.APP_ENV = "development";
 process.env.NEXT_PUBLIC_APP_URL = "https://test.apluslearn.ca";
 process.env.AUTH_SECRET = process.env.AUTH_SECRET ?? "x".repeat(48);
 
+/**
+ * Take every stored external-module configuration out of play for the run.
+ *
+ * Every section here selects its provider through the environment —
+ * `process.env.PAYMENT_PROVIDER = "development"` and friends — and that stopped
+ * being sufficient the moment an operator could store configuration in the
+ * database, because stored configuration *overrides* the environment by
+ * design. A developer who had configured Stripe in the admin panel would find
+ * this suite quietly making real, billable calls to their real account with
+ * their real key, and one refusal from it takes the whole run down.
+ *
+ * So the suite owns the collection for its duration and hands it back
+ * afterwards, exactly as it found it. Deleting without restoring would be the
+ * other half of the same fault: a test run must not reconfigure the machine it
+ * ran on.
+ */
+async function withoutStoredIntegrations(run) {
+  const uri = process.env.MONGODB_URI;
+  if (!uri) return run();
+
+  try {
+    await mongoose.connect(uri, { serverSelectionTimeoutMS: 2500 });
+  } catch {
+    // No database, so there is no stored configuration to get in the way. The
+    // sections that need Mongo report themselves as skipped.
+    return run();
+  }
+
+  const { Integration } = await import("@/models");
+  const { invalidateIntegrationCache } = await import("@/lib/config/integrations");
+
+  const saved = await Integration.find({}).select("+secrets").lean();
+  await Integration.deleteMany({});
+  invalidateIntegrationCache();
+
+  try {
+    return await run();
+  } finally {
+    await Integration.deleteMany({});
+    for (const doc of saved) {
+      const { _id, __v, ...rest } = doc;
+      await Integration.collection.insertOne({ _id, ...rest });
+    }
+    invalidateIntegrationCache();
+  }
+}
+
 async function main() {
   console.log(`\nAPlus Learn — integration adapters\n${"─".repeat(56)}`);
 
+  await withoutStoredIntegrations(runSections);
+
+  // The services open their own memoised connection via `lib/db/connect`, so
+  // closing the one this file opened is not enough to let Node exit.
+  await mongoose.disconnect().catch(() => {});
+
+  console.log(`\n${"─".repeat(56)}`);
+  console.log(`${passed} passed, ${failed} failed${skipped ? `, ${skipped} skipped` : ""}\n`);
+  if (failures.length) {
+    for (const f of failures) console.log(`  ✗ ${f.name}${f.detail ? ` — ${f.detail}` : ""}`);
+    process.exitCode = 1;
+  }
+}
+
+async function runSections() {
   await configurationTests();
   await paymentTests();
   await webhookTests();
@@ -104,17 +166,6 @@ async function main() {
   await analyticsTests();
   await riskTests();
   await integrationModuleTests();
-
-  // The services open their own memoised connection via `lib/db/connect`, so
-  // closing the one this file opened is not enough to let Node exit.
-  await mongoose.disconnect().catch(() => {});
-
-  console.log(`\n${"─".repeat(56)}`);
-  console.log(`${passed} passed, ${failed} failed${skipped ? `, ${skipped} skipped` : ""}\n`);
-  if (failures.length) {
-    for (const f of failures) console.log(`  ✗ ${f.name}${f.detail ? ` — ${f.detail}` : ""}`);
-    process.exitCode = 1;
-  }
 }
 
 // --- 1. Configuration ------------------------------------------------------
@@ -5559,9 +5610,14 @@ async function groupSessionTests() {
         .every((b) => b.status === BOOKING_STATUS.CANCELLED_BY_TUTOR));
     check("no booking survived the cancellation as confirmed",
       cancelledBookings.every((b) => b.status !== BOOKING_STATUS.CONFIRMED));
-    check("and each records a full refund",
+    // Only the seats the *tutor* took away. A learner who left earlier in this
+    // section cancelled their own place through the ordinary booking path and
+    // was refunded by the notice policy, which is correctly less than the
+    // whole — sweeping every cancellation record together would assert that a
+    // voluntary cancellation is refunded like an abandoned class.
+    check("and each seat the tutor cancelled records a full refund",
       cancelledBookings
-        .filter((b) => b.cancellation)
+        .filter((b) => b.cancellation && b.status === BOOKING_STATUS.CANCELLED_BY_TUTOR)
         .every((b) => b.cancellation.refundPercent === 100));
 
     const cancelTwice = await throws(

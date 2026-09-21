@@ -3,7 +3,8 @@ import {
   INTEGRATION_REGISTRY,
   INTEGRATION_MODULE_KEYS,
   FIELD_KINDS,
-  fieldsFor,
+  fieldsForProviders,
+  isMultiModule,
   providersFor,
 } from "@/constants/integrations";
 
@@ -99,10 +100,18 @@ function optionalOrBlank(schema) {
   return z.union([z.literal(""), z.null(), schema]);
 }
 
-/** The strict config schema for one module + provider pair. */
-function configSchemaFor(moduleKey, provider) {
+/**
+ * The strict config schema for one module and the providers it is running.
+ *
+ * A list rather than one name, because a `multi` module saves every platform
+ * an operator has switched on in a single request — the form renders a
+ * fieldset per platform. Validating against only the first would reject the
+ * second's fields as unrecognised keys, which is precisely what stops an
+ * operator from configuring Outlook alongside Google.
+ */
+function configSchemaFor(moduleKey, providers) {
   const shape = {};
-  for (const field of fieldsFor(moduleKey, provider)) {
+  for (const field of fieldsForProviders(moduleKey, providers)) {
     if (field.kind === FIELD_KINDS.SECRET) continue;
     shape[field.name] = optionalOrBlank(schemaForField(field)).optional();
   }
@@ -117,9 +126,9 @@ function configSchemaFor(moduleKey, provider) {
  * held the existing credential, and is the whole reason the admin panel can
  * be useful without being a credential-disclosure surface (§36).
  */
-function secretsSchemaFor(moduleKey, provider) {
+function secretsSchemaFor(moduleKey, providers) {
   const shape = {};
-  for (const field of fieldsFor(moduleKey, provider)) {
+  for (const field of fieldsForProviders(moduleKey, providers)) {
     if (field.kind !== FIELD_KINDS.SECRET) continue;
     shape[field.name] = z.union([z.null(), schemaForField(field)]).optional();
   }
@@ -178,9 +187,12 @@ export const integrationTestSchema = z
  * @param {string} moduleKey
  * @param {string} provider   The provider the patch will be stored against.
  * @param {object} body       Already through the envelope schema.
+ * @param {string[]} [activeProviders]  Every provider the module will be
+ *   running once this patch lands. Only a `multi` module has more than one;
+ *   omitted means "just `provider`".
  * @returns {{ success: true, data: object } | { success: false, fieldErrors: object }}
  */
-export function validateModulePatch(moduleKey, provider, body) {
+export function validateModulePatch(moduleKey, provider, body, activeProviders) {
   const registry = INTEGRATION_REGISTRY[moduleKey];
   if (!registry) return { success: false, fieldErrors: { module: ["Unknown module."] } };
 
@@ -198,7 +210,7 @@ export function validateModulePatch(moduleKey, provider, body) {
   const result = { enabled: body.enabled, provider, config: {}, secrets: {} };
 
   if (body.providers !== undefined) {
-    if (!registry.multi) {
+    if (!isMultiModule(moduleKey)) {
       fieldErrors.providers = ["This module runs one provider at a time."];
     } else {
       const unknown = body.providers.filter((name) => !known.includes(name));
@@ -207,11 +219,19 @@ export function validateModulePatch(moduleKey, provider, body) {
     }
   }
 
-  const configResult = configSchemaFor(moduleKey, provider).safeParse(body.config ?? {});
+  // Which providers' fields this patch may legally carry. The caller works it
+  // out, because it is the only layer that can see the stored record as well
+  // as the request; falling back to the named provider keeps an ordinary
+  // single-provider module behaving exactly as before.
+  const scope = (activeProviders?.length ? activeProviders : [provider]).filter((name) =>
+    known.includes(name),
+  );
+
+  const configResult = configSchemaFor(moduleKey, scope).safeParse(body.config ?? {});
   if (configResult.success) result.config = configResult.data;
   else collect(fieldErrors, configResult.error, "config");
 
-  const secretsResult = secretsSchemaFor(moduleKey, provider).safeParse(body.secrets ?? {});
+  const secretsResult = secretsSchemaFor(moduleKey, scope).safeParse(body.secrets ?? {});
   if (secretsResult.success) result.secrets = secretsResult.data;
   else collect(fieldErrors, secretsResult.error, "secrets");
 

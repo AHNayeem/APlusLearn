@@ -877,17 +877,21 @@ export function buildCalendarProvider(providerKey, resolved) {
 
   if (!live) return new DevelopmentCalendarProvider(key);
 
+  // Each platform reads its *own* registry fields. Both may be live at once,
+  // so a shared `clientId`/`clientSecret` pair would mean handing Google the
+  // credentials registered with Microsoft — presenting one third party's
+  // confidential client secret to another, over the wire, at token exchange.
   if (key === CALENDAR_PROVIDERS.GOOGLE) {
     return new GoogleCalendarProvider({
-      clientId: resolved.config.clientId,
-      clientSecret: resolved.secrets.clientSecret,
+      clientId: resolved.config.googleClientId,
+      clientSecret: resolved.secrets.googleClientSecret,
     });
   }
 
   return new MicrosoftCalendarProvider({
-    clientId: resolved.config.clientId,
-    clientSecret: resolved.secrets.clientSecret,
-    tenantId: resolved.config.tenantId || "common",
+    clientId: resolved.config.microsoftClientId,
+    clientSecret: resolved.secrets.microsoftClientSecret,
+    tenantId: resolved.config.microsoftTenantId || "common",
   });
 }
 

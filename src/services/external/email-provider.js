@@ -446,9 +446,15 @@ export async function sendEmail(message, { critical = false, category } = {}) {
   } catch (error) {
     // An operator switching the module off is a configuration decision, not a
     // fault: it is reported as a skip with its own reason, the same way a
-    // disabled category is, so the delivery log tells the two apart. Security
-    // mail never reaches here — `emailCategoryEnabled` returns early for it,
-    // and a `critical` caller still gets the throw.
+    // disabled category is, so the delivery log tells the two apart.
+    //
+    // Security mail *is* affected by this one, unlike the category switches,
+    // which exempt it. The module switch is the transport, not a preference —
+    // an operator who turns email off has done the same thing as removing the
+    // credentials, and pretending a dead transport could still deliver a
+    // password reset would be the fake behaviour (§39). The admin panel states
+    // the cost before the switch is thrown. A `critical` caller still gets the
+    // throw rather than a silent skip.
     if (error?.code === "MODULE_DISABLED") {
       if (critical) throw error;
       return { delivered: false, provider: null, skipped: "MODULE_DISABLED" };

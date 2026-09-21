@@ -29,6 +29,19 @@ to run one area, comment out `section(...)` blocks.
   geocoding/meeting/storage adapters plus the booking-hold rules. Sections needing MongoDB
   report as skipped without it.
 
+**Both suites own the `integrations` collection for their duration.** Stored admin
+configuration overrides the environment by design, so a module configured in the admin
+panel would otherwise decide what these suites exercise — `PAYMENT_PROVIDER=development`
+stops meaning anything, and the run makes real, billable calls to a real Stripe account.
+`test:integrations` removes every stored module and puts it back exactly as it found it;
+`qa` clears them before its first assertion and leaves them cleared, because no endpoint
+can hand a secret back (that is the feature working), so it cannot restore them. **Run
+`qa` against a development database.**
+
+`qa` also consumes one seeded `COMPLETED` lesson per run for the no-show happy path and
+cannot recreate one over HTTP — it leaves the last one for the risk section and tells you
+to `bun run seed` when the pool runs down.
+
 Setup: `cp .env.example .env.local`, then set `MONGODB_URI` and `AUTH_SECRET`
 (≥32 chars, `openssl rand -base64 48`). Everything else has a dev fallback.
 Seeded accounts all use password `AplusLearn2024!` (see [README.md](README.md)).

@@ -32,6 +32,21 @@ function section(title) {
   console.log(`\n▸ ${title}`);
 }
 
+/**
+ * One client identity for this run.
+ *
+ * Login, registration and password reset are rate-limited per client address,
+ * and registration's window is fifteen minutes — which one run uses up
+ * entirely. Two runs inside that window would then report three unrelated
+ * features as broken, when the only thing that happened is the limiter doing
+ * its job. Giving each run its own address is what makes the suite re-runnable
+ * without weakening the limit or waiting a quarter of an hour for it.
+ *
+ * `clientKey` reads this header first, ahead of the socket address, which is
+ * how the application is meant to work behind a proxy.
+ */
+const RUN_IP = `203.0.113.${Math.floor(Math.random() * 200) + 10}`;
+
 /** Minimal cookie-jar client so each role keeps its own session. */
 function createClient() {
   const cookies = new Map();
@@ -42,7 +57,11 @@ function createClient() {
   ) {
     // `fetch` sets its own multipart Content-Type with the boundary, so a
     // FormData upload must not have one imposed on it.
-    const headers = { ...(form ? {} : { "Content-Type": "application/json" }), ...extraHeaders };
+    const headers = {
+      ...(form ? {} : { "Content-Type": "application/json" }),
+      "x-forwarded-for": RUN_IP,
+      ...extraHeaders,
+    };
     if (cookies.size) {
       headers.Cookie = [...cookies].map(([k, v]) => `${k}=${v}`).join("; ");
     }
@@ -208,6 +227,24 @@ async function main() {
   await login(tutor, "priya.sharma@example.com");
   await login(admin, "admin@apluslearn.ca");
   check("parent, tutor and admin all signed in", true);
+
+  // --- Start from the deployment environment -------------------------------
+  //
+  // Stored external-module configuration overrides the environment, by design.
+  // That makes it the one piece of state that can change what *every* later
+  // section is testing: a payment module configured in the admin panel sends
+  // the parent journey's checkout to a real Stripe account, however this
+  // server was started, and a module a crashed run left switched off silently
+  // stops mail for the whole suite.
+  //
+  // So the clear-down happens here, before the first assertion, rather than in
+  // the External modules section where it only protected that section and
+  // whatever came after it. It is also why this suite wants a development
+  // database: the records it removes hold real encrypted credentials, and no
+  // endpoint can hand them back — that is the feature working (§36).
+  for (const key of ["email", "payment", "calendar", "sms", "storage"]) {
+    await admin(`/api/admin/integrations/${key}`, { method: "DELETE" });
+  }
 
   const parentAdmin = await parent("/api/admin/users");
   check("parent forbidden from admin API", parentAdmin.status === 403);
@@ -561,6 +598,22 @@ async function main() {
 
   // --- Group tutoring: capacity, privacy and authorization -----------------
   section("Group sessions — capacity, privacy and authorization");
+
+  // Leftovers from a run that died before its own clean-up are the one thing
+  // that makes this section order- and history-dependent: a DRAFT or PUBLISHED
+  // fixture from yesterday still holds a slot on this tutor's calendar, so
+  // today's fixture cannot be created in the same window. Sweeping first makes
+  // the suite safe to re-run after a partial failure, which no amount of
+  // careful clean-up at the end can do on its own.
+  const staleGroups = await tutor("/api/tutor/groups?pageSize=50");
+  for (const stale of staleGroups.payload?.data?.sessions ?? []) {
+    if (!String(stale.title ?? "").startsWith("QA run —")) continue;
+    if (["CANCELLED", "COMPLETED"].includes(stale.status)) continue;
+    await tutor(`/api/tutor/groups/${stale.id}`, {
+      method: "DELETE",
+      body: { reason: "QA run — sweeping a fixture an earlier run left behind." },
+    });
+  }
 
   const publicGroups = await anon("/api/groups");
   check("group sessions are browsable without an account",
@@ -2225,11 +2278,9 @@ async function main() {
   // nothing. So every assertion below is paired.
   section("External modules");
 
-  // Start from the deployment environment, whatever a previous run left
-  // behind. A crashed run can leave a module switched off, and a disabled
-  // payment module stops checkout for the whole suite — so this is not
-  // tidiness, it is the difference between one section failing and all of
-  // them failing for a reason that has nothing to do with them.
+  // Belt and braces: the run already cleared these before its first
+  // assertion, and this section is the one that goes on to configure them, so
+  // it starts from the same known state whichever way it is reached.
   for (const key of ["email", "payment", "calendar", "sms", "storage"]) {
     await admin(`/api/admin/integrations/${key}`, { method: "DELETE" });
   }
@@ -2258,6 +2309,40 @@ async function main() {
     const tutorRes = await tutor(path, { method, body });
     check(`a tutor cannot reach ${label}`, tutorRes.status === 403, `status ${tutorRes.status}`);
   }
+
+  // A connection test is a diagnostic, and a diagnostic must not change what
+  // it is diagnosing. The stored document is created by that write, and
+  // `enabled` defaults to false — so before this was fixed, pressing "Test" on
+  // a module configured by the environment silently switched it off, taking
+  // password-reset mail (or checkout, or uploads) down with it.
+  const preTest = await admin("/api/admin/integrations/calendar");
+  check(
+    "a module configured outside this screen starts switched on",
+    preTest.payload?.data?.module?.enabled === true,
+    JSON.stringify(preTest.payload?.data?.module?.enabled),
+  );
+  await admin("/api/admin/integrations/calendar/test", { method: "POST", body: {} });
+  const postTest = await admin("/api/admin/integrations/calendar");
+  check(
+    "and testing it does not switch it off",
+    postTest.payload?.data?.module?.enabled === true,
+    `enabled=${postTest.payload?.data?.module?.enabled} status=${postTest.payload?.data?.module?.status}`,
+  );
+  await admin("/api/admin/integrations/calendar", { method: "DELETE" });
+
+  // The same hazard on the save path: a first save that says nothing about the
+  // switch must not be the thing that switches the module off either.
+  await admin("/api/admin/integrations/sms", {
+    method: "PATCH",
+    body: { provider: "twilio", config: { accountSid: "AC" + "9".repeat(32), fromNumber: "+16475559999" } },
+  });
+  const afterQuietSave = await admin("/api/admin/integrations/sms");
+  check(
+    "a save that does not mention the switch leaves it where it was",
+    afterQuietSave.payload?.data?.module?.enabled === true,
+    `enabled=${afterQuietSave.payload?.data?.module?.enabled}`,
+  );
+  await admin("/api/admin/integrations/sms", { method: "DELETE" });
 
   const modulesList = await admin("/api/admin/integrations");
   check("an administrator can read the module list", modulesList.ok);
@@ -2590,26 +2675,116 @@ async function main() {
   check("a switched-off SMS module cannot be made to send", !smsDisabledTest.ok);
 
   // --- Calendar -------------------------------------------------------------
+  //
+  // Calendar is the one `multi` module: §41 lets a tutor pick Google or
+  // Outlook, so both adapters may be live at once and each has its own app
+  // registration. That makes it the module where a shared field name would be
+  // a credential-handling fault rather than a tidiness one, and the checks
+  // below are written against that.
+  const GOOGLE_SECRET = "qa-google-client-secret-value";
+  const MICROSOFT_SECRET = "qa-microsoft-client-secret-value";
+
   const calSave = await admin("/api/admin/integrations/calendar", {
     method: "PATCH",
     body: {
       enabled: true,
       provider: "google",
       providers: ["google"],
-      config: { clientId: "qa-client-id.apps.googleusercontent.com" },
-      secrets: { clientSecret: "qa-client-secret-value" },
+      config: { googleClientId: "qa-google-client-id.apps.googleusercontent.com" },
+      secrets: { googleClientSecret: GOOGLE_SECRET },
     },
   });
   check("a calendar app registration saves", calSave.ok, JSON.stringify(calSave.payload?.error));
   check(
     "the client secret is stored and never returned",
-    calSave.payload?.data?.module?.secrets?.clientSecret?.set === true &&
-      !JSON.stringify(calSave.payload).includes("qa-client-secret-value"),
+    calSave.payload?.data?.module?.secrets?.googleClientSecret?.set === true &&
+      !JSON.stringify(calSave.payload).includes(GOOGLE_SECRET),
   );
   check(
     "entering client credentials does not by itself count as connected",
     calSave.payload?.data?.module?.status === "CONFIGURED",
     calSave.payload?.data?.module?.status,
+  );
+
+  // Turning the second platform on, with its own registration, in the one
+  // request the form actually sends. A schema that only knew about the primary
+  // provider refused this as an unrecognised key, which made a `multi` module
+  // impossible to finish configuring.
+  const calBoth = await admin("/api/admin/integrations/calendar", {
+    method: "PATCH",
+    body: {
+      enabled: true,
+      provider: "google",
+      providers: ["google", "microsoft"],
+      config: {
+        googleClientId: "qa-google-client-id.apps.googleusercontent.com",
+        microsoftClientId: "qa-microsoft-client-id",
+        microsoftTenantId: "common",
+      },
+      secrets: { microsoftClientSecret: MICROSOFT_SECRET },
+    },
+  });
+  check(
+    "a second calendar platform can be turned on with its own credentials",
+    calBoth.ok,
+    JSON.stringify(calBoth.payload?.error?.details?.fieldErrors ?? calBoth.payload?.error),
+  );
+  check(
+    "both platforms are live",
+    JSON.stringify(calBoth.payload?.data?.module?.providers ?? []) ===
+      JSON.stringify(["google", "microsoft"]),
+    JSON.stringify(calBoth.payload?.data?.module?.providers),
+  );
+  check(
+    "and each platform keeps its own client id",
+    calBoth.payload?.data?.module?.config?.googleClientId ===
+      "qa-google-client-id.apps.googleusercontent.com" &&
+      calBoth.payload?.data?.module?.config?.microsoftClientId === "qa-microsoft-client-id",
+    JSON.stringify(calBoth.payload?.data?.module?.config),
+  );
+  check(
+    "and its own client secret, side by side",
+    calBoth.payload?.data?.module?.secrets?.googleClientSecret?.set === true &&
+      calBoth.payload?.data?.module?.secrets?.microsoftClientSecret?.set === true,
+    JSON.stringify(calBoth.payload?.data?.module?.secrets),
+  );
+
+  // The consequence that matters. A tutor starting a Google connection must be
+  // sent to Google with *Google's* client id — handing over the registration
+  // made with Microsoft would present one third party's confidential client
+  // secret to another at token exchange.
+  const googleConnect = await tutor("/api/tutor/calendar/connect", {
+    method: "POST",
+    body: { provider: "GOOGLE" },
+  });
+  const googleAuthUrl = String(googleConnect.payload?.data?.authorizationUrl ?? "");
+  check(
+    "a Google connection is offered under the Google client id",
+    googleAuthUrl.includes("qa-google-client-id.apps.googleusercontent.com"),
+    googleAuthUrl.slice(0, 160),
+  );
+  check(
+    "and never under the Outlook one",
+    !googleAuthUrl.includes("qa-microsoft-client-id"),
+    googleAuthUrl.slice(0, 160),
+  );
+
+  const outlookConnect = await tutor("/api/tutor/calendar/connect", {
+    method: "POST",
+    body: { provider: "OUTLOOK" },
+  });
+  const outlookAuthUrl = String(outlookConnect.payload?.data?.authorizationUrl ?? "");
+  check(
+    "an Outlook connection is offered under the Outlook client id",
+    outlookAuthUrl.includes("qa-microsoft-client-id") &&
+      !outlookAuthUrl.includes("qa-google-client-id"),
+    outlookAuthUrl.slice(0, 160),
+  );
+  check(
+    "and no authorization URL ever carries a client secret",
+    ![GOOGLE_SECRET, MICROSOFT_SECRET].some(
+      (secret) => googleAuthUrl.includes(secret) || outlookAuthUrl.includes(secret),
+    ),
   );
 
   const calUnknown = await admin("/api/admin/integrations/calendar", {
@@ -2628,7 +2803,9 @@ async function main() {
   check("a tutor's calendar screen still loads", tutorCalendar.ok);
   check(
     "and it carries no client secret",
-    !JSON.stringify(tutorCalendar.payload).includes("qa-client-secret-value"),
+    ![GOOGLE_SECRET, MICROSOFT_SECRET].some((secret) =>
+      JSON.stringify(tutorCalendar.payload).includes(secret),
+    ),
   );
 
   await admin("/api/admin/integrations/calendar", { method: "PATCH", body: { enabled: false } });
@@ -2653,8 +2830,8 @@ async function main() {
   const everything = JSON.stringify((await admin("/api/admin/integrations")).payload);
   check(
     "no planted credential appears anywhere in the module list",
-    ![PLANTED, PLANTED_SMTP, PLANTED_TWILIO, PLANTED_STRIPE, "qa-client-secret-value"].some((secret) =>
-      everything.includes(secret),
+    ![PLANTED, PLANTED_SMTP, PLANTED_TWILIO, PLANTED_STRIPE, GOOGLE_SECRET, MICROSOFT_SECRET].some(
+      (secret) => everything.includes(secret),
     ),
   );
   check(
@@ -2693,8 +2870,8 @@ async function main() {
   check("the external modules page renders for an administrator", integrationsPage.status === 200);
   check(
     "and the rendered HTML carries no credential",
-    ![PLANTED, PLANTED_SMTP, PLANTED_TWILIO, PLANTED_STRIPE, "qa-client-secret-value"].some((secret) =>
-      integrationsHtml.includes(secret),
+    ![PLANTED, PLANTED_SMTP, PLANTED_TWILIO, PLANTED_STRIPE, GOOGLE_SECRET, MICROSOFT_SECRET].some(
+      (secret) => integrationsHtml.includes(secret),
     ),
   );
 
@@ -2964,18 +3141,30 @@ async function main() {
 
   // --- No-show on a lesson that has actually finished ---
   //
-  // Seeded history supplies these; each run consumes one. Re-seed if this
-  // section reports that it has run out.
+  // Seeded history supplies these, and this is the one assertion in the suite
+  // that consumes a fixture it cannot put back: reporting a no-show moves the
+  // lesson to NO_SHOW_TUTOR for good, and no endpoint can create a *past*
+  // completed lesson to replace it. So the run leaves one behind rather than
+  // taking the last, because the risk section later on needs a completed
+  // lesson to raise a dispute about — a suite whose early section starves its
+  // own later section fails for a reason that has nothing to do with the code.
+  //
+  // The steady state is therefore: plenty of fixtures, everything runs; one
+  // left, this happy path stands down and says so, and every other section
+  // keeps working until somebody re-seeds.
   const pastLessons = await parent("/api/bookings?scope=PAST&status=COMPLETED&pageSize=50");
-  const reportable = (pastLessons.payload?.data?.bookings ?? []).find(
+  const completedPool = (pastLessons.payload?.data?.bookings ?? []).filter(
     (b) => b.status === "COMPLETED",
   );
+  const reportable = completedPool.length > 1 ? completedPool[0] : null;
 
   if (!reportable) {
     check(
       "a completed lesson is available to test the no-show happy path",
       false,
-      "no COMPLETED past booking left — run `bun run seed` to restore the fixtures",
+      completedPool.length === 1
+        ? "only one COMPLETED past booking left, and it is reserved for the risk section — run `bun run seed` to restore the fixtures"
+        : "no COMPLETED past booking left — run `bun run seed` to restore the fixtures",
     );
   } else {
     const earningsBefore = (await tutor("/api/tutor/earnings")).payload?.data?.lifetime?.netCents;

@@ -17,7 +17,10 @@ import {
   SECRET_HINTS,
   FIELD_KINDS,
   CONFIG_SOURCES,
+  activeProvidersFor,
   fieldsFor,
+  fieldsForProviders,
+  isMultiModule,
   providersFor,
 } from "@/constants/integrations";
 import {
@@ -91,6 +94,9 @@ export async function getIntegrationModule(moduleKey) {
     ? (resolved.providers ?? []).filter((name) => registry.providers[name])
     : [];
 
+  /** Every provider this module is running, which is what its config spans. */
+  const active = activeProvidersFor(moduleKey, { provider, providers });
+
   return {
     module: moduleKey,
     label: registry.label,
@@ -112,7 +118,7 @@ export async function getIntegrationModule(moduleKey) {
     status: deriveStatus(resolved, record),
 
     /** Non-secret values only. Every secret field is absent from this object. */
-    config: publicConfig(moduleKey, provider, resolved.config),
+    config: publicConfig(moduleKey, active, resolved.config),
     secrets: publicSecrets(moduleKey, record),
 
     lastTest: record?.lastTest
@@ -187,11 +193,15 @@ function deriveStatus(resolved, record) {
   return INTEGRATION_STATUS.CONFIGURED;
 }
 
-/** Non-secret values for the chosen provider, and nothing else. */
-function publicConfig(moduleKey, provider, config) {
-  if (!provider) return {};
+/**
+ * Non-secret values for the providers this module is running, and nothing else.
+ *
+ * A list, because a `multi` module holds a set of fields per platform and the
+ * form renders all of them at once.
+ */
+function publicConfig(moduleKey, providers, config) {
   const shown = {};
-  for (const field of fieldsFor(moduleKey, provider)) {
+  for (const field of fieldsForProviders(moduleKey, providers)) {
     if (field.kind === FIELD_KINDS.SECRET) continue;
     if (config[field.name] !== undefined) shown[field.name] = config[field.name];
   }
@@ -233,15 +243,21 @@ function publicSecrets(moduleKey, record) {
  */
 function environmentOffer(moduleKey) {
   const resolved = resolveIntegration(moduleKey);
-  const provider =
-    resolved.configured && resolved.name !== DEVELOPMENT ? resolved.names[0] : null;
-  if (!provider) return { available: false, provider: null, fields: [] };
+  const live =
+    resolved.configured && resolved.name !== DEVELOPMENT
+      ? resolved.names.filter((name) => providersFor(moduleKey).includes(name))
+      : [];
+  if (!live.length) return { available: false, provider: null, providers: [], fields: [] };
 
-  const fields = fieldsFor(moduleKey, provider)
+  // Every platform the environment names, not just the first: a deployment
+  // running Google *and* Outlook has two sets of variables to adopt.
+  const providers = isMultiModule(moduleKey) ? live : [live[0]];
+
+  const fields = fieldsForProviders(moduleKey, providers)
     .filter((field) => field.env && process.env[field.env]?.trim())
     .map((field) => ({ name: field.name, label: field.label, env: field.env }));
 
-  return { available: fields.length > 0, provider, fields };
+  return { available: fields.length > 0, provider: providers[0], providers, fields };
 }
 
 /* --- Writing ---------------------------------------------------------------- */
@@ -270,12 +286,21 @@ export async function updateIntegrationModule(moduleKey, body, actor) {
     environmentOffer(moduleKey).provider ??
     providersFor(moduleKey)[0];
 
-  const validated = validateModulePatch(moduleKey, provider, body);
+  // Every provider the module will be running once this lands. A `multi`
+  // module saves all of its platforms at once, so the patch may legitimately
+  // carry each one's fields — validating against the primary alone is what
+  // made a second platform impossible to configure.
+  const active = activeProvidersFor(moduleKey, {
+    provider,
+    providers: body.providers ?? existing?.providers ?? [],
+  });
+
+  const validated = validateModulePatch(moduleKey, provider, body, active);
   if (!validated.success) throw new ValidationError({ fieldErrors: validated.fieldErrors });
 
   const { config, secrets } = validated.data;
 
-  const formatErrors = checkProviderFormats(moduleKey, provider, config, secrets);
+  const formatErrors = checkProviderFormats(moduleKey, active, config, secrets);
   if (Object.keys(formatErrors).length) throw new ValidationError({ fieldErrors: formatErrors });
 
   await checkProviderRules(moduleKey, provider, { config, secrets, existing });
@@ -283,6 +308,12 @@ export async function updateIntegrationModule(moduleKey, body, actor) {
   const update = { $set: { module: moduleKey, provider, updatedBy: actor?.id ?? null }, $unset: {} };
 
   if (body.enabled !== undefined) update.$set.enabled = body.enabled;
+  // A module that exists only because it was just saved must not be born
+  // switched off. `enabled` defaults to false in the schema and Mongoose
+  // applies defaults on upsert, so a first save that says nothing about the
+  // switch would silently take a working environment-configured module down.
+  // Whatever it resolved to a moment ago is the answer to keep.
+  else update.$setOnInsert = { enabled: await currentlyEnabled(moduleKey) };
   if (registry.multi && validated.data.providers) update.$set.providers = validated.data.providers;
 
   // Non-secret fields, dotted so a partial save never wipes a sibling the
@@ -306,7 +337,7 @@ export async function updateIntegrationModule(moduleKey, body, actor) {
     update.$set[`secrets.${name}`] = encryptSecret(value, SECRET_LABEL);
     update.$set[`secretMeta.${name}`] = {
       set: true,
-      last4: last4For(moduleKey, provider, name, value),
+      last4: last4For(moduleKey, active, name, value),
       updatedAt: new Date(),
       updatedBy: actor?.id ?? null,
     };
@@ -357,7 +388,7 @@ export async function importIntegrationFromEnvironment(moduleKey, actor) {
 
   const config = {};
   const secrets = {};
-  for (const field of fieldsFor(moduleKey, offer.provider)) {
+  for (const field of fieldsForProviders(moduleKey, offer.providers)) {
     if (!field.env) continue;
     const raw = process.env[field.env]?.trim();
     if (!raw) continue;
@@ -377,7 +408,9 @@ export async function importIntegrationFromEnvironment(moduleKey, actor) {
     moduleKey,
     {
       provider: offer.provider,
-      ...(registry.multi ? { providers: [offer.provider] } : {}),
+      // Every platform the environment configures, not just the first — this
+      // is the whole point of the import on a `multi` module.
+      ...(registry.multi ? { providers: offer.providers } : {}),
       config,
       secrets,
     },
@@ -421,17 +454,20 @@ export async function clearIntegrationModule(moduleKey) {
 /* --- Provider rules --------------------------------------------------------- */
 
 /** Documented, stable credential formats. Nothing here guesses. */
-function checkProviderFormats(moduleKey, provider, config, secrets) {
-  const rules = PROVIDER_FORMAT_RULES[moduleKey]?.[provider] ?? {};
+function checkProviderFormats(moduleKey, providers, config, secrets) {
+  const fields = fieldsForProviders(moduleKey, providers);
   const errors = {};
 
-  for (const [name, rule] of Object.entries(rules)) {
-    const isSecretField = fieldsFor(moduleKey, provider).find((f) => f.name === name)?.kind === FIELD_KINDS.SECRET;
-    const value = isSecretField ? secrets[name] : config[name];
-    if (value === undefined || value === null || value === "") continue;
+  for (const provider of providers) {
+    const rules = PROVIDER_FORMAT_RULES[moduleKey]?.[provider] ?? {};
+    for (const [name, rule] of Object.entries(rules)) {
+      const isSecretField = fields.find((f) => f.name === name)?.kind === FIELD_KINDS.SECRET;
+      const value = isSecretField ? secrets[name] : config[name];
+      if (value === undefined || value === null || value === "") continue;
 
-    const problem = rule(value);
-    if (problem) errors[`${isSecretField ? "secrets" : "config"}.${name}`] = [problem];
+      const problem = rule(value);
+      if (problem) errors[`${isSecretField ? "secrets" : "config"}.${name}`] = [problem];
+    }
   }
 
   return errors;
@@ -533,14 +569,25 @@ async function checkStripeMode({ config, secrets, existing }) {
   }
 }
 
+/**
+ * What the module resolves to right now, before this write lands.
+ *
+ * Used only to seed `enabled` on an insert, so adopting a module that the
+ * environment already configures does not take it down.
+ */
+async function currentlyEnabled(moduleKey) {
+  const resolved = await resolveIntegrationConfig(moduleKey, { fresh: true });
+  return resolved.enabled !== false;
+}
+
 function pick(...values) {
   for (const value of values) if (value !== undefined && value !== null && value !== "") return value;
   return undefined;
 }
 
 /** Four characters, only where the registry says they may be shown. */
-function last4For(moduleKey, provider, name, value) {
-  const field = fieldsFor(moduleKey, provider).find((f) => f.name === name);
+function last4For(moduleKey, providers, name, value) {
+  const field = fieldsForProviders(moduleKey, providers).find((f) => f.name === name);
   return field?.hint === SECRET_HINTS.LAST4 ? String(value).slice(-4) : undefined;
 }
 
@@ -580,6 +627,12 @@ export async function testIntegrationModule(moduleKey, input, actor) {
   await Integration.findOneAndUpdate(
     { module: moduleKey },
     {
+      // Recording a test result must never be the thing that switches a module
+      // off. There may be no stored document yet — the common case, where the
+      // configuration comes from the environment — and `enabled` defaults to
+      // false, which Mongoose applies on upsert. Seeding it with what the
+      // module resolved to keeps a diagnostic read-only.
+      $setOnInsert: { enabled: resolved.enabled },
       $set: {
         module: moduleKey,
         lastTest: {
