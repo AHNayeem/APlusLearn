@@ -10,12 +10,11 @@ Every numbered section of `docs/Project.md`, mapped to what implements it.
 - **Partial** — working, with a named limitation
 - **Phase 2/3** — deliberately deferred, with the architecture in place
 
-Verified on a freshly seeded database: `bun run lint` (clean) →
-`bun run build` (clean) → `bun run test:integrations` (982 passed, 1 failed)
-→ `bun run qa` (637 passed, 9 failed), and a second `bun run qa` immediately
-afterwards with nothing reset (636 passed, the same 9 failed).
+Verified on a seeded database: `bun run lint` (clean) → `bun run build`
+(clean) → `bun run test:integrations` (1202 passed, 1 failed) → `bun run qa`
+(814 passed, 0 failed).
 
-The 10 remaining failures are one environment problem, not a code one.
+The one remaining failure is an environment problem, not a code one.
 `STORAGE_ACCESS_KEY`, `STORAGE_SECRET_KEY` and `STORAGE_BUCKET` in this
 machine's `.env.local` are still the literal placeholder `...`; the endpoint is
 reachable and is a real S3-compatible store, and it answers a signed request
@@ -23,6 +22,10 @@ with HTTP 403 `InvalidAccessKeyId` for *any* bucket name, including one that
 does not exist — which is authentication being refused before a bucket is ever
 looked up. Filling those three variables in is the whole fix; no application
 code is involved.
+
+`qa` was run against a server using the local storage fallback
+(`STORAGE_PROVIDER=development`), which is what let the profile-photo section
+exercise upload, retrieval and replacement end to end on this machine.
 
 ---
 
@@ -72,6 +75,10 @@ code is involved.
 | Client-supplied identity never trusted | Actor comes from the session cookie only; QA asserts injected `price`/`status` are ignored | Implemented |
 | Parent scoped to own data | `listStudents`, `listBookings` etc. filter by `ownerId`/`purchaserId` | Implemented |
 | Tutor scoped to own data | Tutor services filter by `userId`/`tutorUserId` | Implemented |
+| Own profile: view and edit | `GET`/`PATCH /api/users/me` → `getUser`/`updateProfile`; `SettingsPanels` is mounted by all three role shells (`/settings`, `/tutor/settings`, `/admin/account`) and leads with a read-only summary of name, email, phone, location, role and confirmation state | Implemented |
+| Profile edits cannot escalate | `updateProfileSchema` names only the editable fields, so `role`, `status`, `email`, `emailVerifiedAt`, `phoneVerifiedAt`, `tokenVersion`, `creditBalanceCents` and `avatarUrl` are not heard at all. The account acted on is the session's, never an id in the request. QA posts every one of those in a single update and asserts each is ignored | Implemented |
+| Profile photo | `uploadAvatar`/`removeAvatar`/`readAvatar` in `user.service.js`; `POST`/`DELETE /api/users/me/avatar`, served from `GET /api/avatars/[key]`. `User.avatar` holds the storage reference, `User.avatarUrl` stays the pointer every existing read path already uses | Implemented |
+| Whose photo is public | Derived from the account, not the request: a tutor's photo is public because it is on search results anonymous visitors load; everybody else's needs a session. The key is an unguessable UUID either way, and the serve route resolves it back to the account holding it — so a replaced key, a stray file and a verification document's key are all 404 | Implemented |
 
 ## 9. Authentication
 
@@ -144,6 +151,9 @@ code is involved.
 | Assign & remove badges | `mutateBadge()`, `/api/admin/tutors/[id]/badges` | Implemented |
 | Not searchable before approval | `isSearchable` derived, never client-set; verified by approving the seeded pending tutor | Implemented |
 | Documents kept private | Stored outside `public/`, `select:false` key, admin-only audited route | Implemented |
+| A storage outage is legible, not a crash | `failFromError` maps `STORAGE_PROVIDER_ERROR` to a 502 `STORAGE_UNAVAILABLE` with a plain message. The store's own wording names the bucket, the credentials or the endpoint, so it is logged for the operator and never sent to the browser, and the upstream status is not reused — a 403 from the bucket is not the caller's 403. Nothing is written before the object lands, so a refused upload leaves the existing photo in place | Implemented |
+| A photo that cannot be drawn falls back | `renderableImageSrc()` is the single rule, and it reads the same host list `next.config.mjs` builds `remotePatterns` from. `next/image` throws `Invalid src prop` on an unconfigured host rather than showing a broken image, which took the surrounding page down; `Avatar` and `TutorGallery` now treat anything unrenderable as no photo and draw the initials or the monogram they already had. Both fields feeding it — `User.avatarUrl` and `TutorProfile.gallery` — are free text on records users control | Implemented |
+| Uploaded images checked on their bytes | `lib/images/inspect.js` decides the format from the container's magic number and the extension from the format; SVG is refused outright. The same inspection covers branding assets and profile photos, so there is one place the rule lives. Profile photos write to their own `avatars` storage scope, so an avatar key can never address a document | Implemented |
 | Badge expiry | `expireStaleVerifications()`, run by the `verification-expiry` scheduled job (§48). Expiring a badge takes it off the public profile and tells the tutor to re-verify | Implemented |
 | Search eligibility re-derived on every write | `deriveSearchable()` — the single rule (approved **and** complete), applied by `reviewApplication()`, `setTutorSearchable()` and `updateTutorProfile()`. QA asserts a profile edit never grants search visibility to an unapproved tutor | Implemented |
 
@@ -248,6 +258,7 @@ code is involved.
 | Parent/student — all 11 areas | 12 pages under `src/app/(dashboard)` | Implemented |
 | Tutor — all 13 areas | 14 pages under `src/app/tutor` | Implemented |
 | Admin — all 12 areas | 13 pages under `src/app/admin` | Implemented |
+| Every role can manage its own account | `/settings`, `/tutor/settings` and `/admin/account` mount the same `SettingsPanels`. The admin page is new: the user menu previously pointed administrators at the learner route, whose layout enforces `LEARNER_ROLES` and bounced them back. Self-service deletion is hidden for administrators — another administrator removes an admin account from user management | Implemented |
 
 ## 25. Admin analytics
 

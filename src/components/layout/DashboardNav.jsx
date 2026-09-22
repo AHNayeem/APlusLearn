@@ -77,7 +77,7 @@ export function DashboardNav({ items, user, badges = {}, branding }) {
       {/* Mobile top bar. Full width with the three slots pinned apart: the
           toggle and the avatar never shrink, so only the wordmark gives way if
           the viewport gets tight. */}
-      <header className="sticky top-0 z-40 flex h-16 w-full min-w-0 items-center justify-between gap-2 border-b border-ink-200 bg-white/90 px-4 backdrop-blur-lg sm:gap-3 sm:px-6 lg:hidden">
+      <header className="no-print sticky top-0 z-40 flex h-16 w-full min-w-0 items-center justify-between gap-2 border-b border-ink-200 bg-white/90 px-4 backdrop-blur-lg sm:gap-3 sm:px-6 lg:hidden">
         <button
           type="button"
           onClick={() => setOpen(true)}
@@ -97,7 +97,7 @@ export function DashboardNav({ items, user, badges = {}, branding }) {
 
       <AnimatePresence>
         {open && (
-          <div className="fixed inset-0 z-50 lg:hidden">
+          <div className="no-print fixed inset-0 z-50 lg:hidden">
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
@@ -132,7 +132,7 @@ export function DashboardNav({ items, user, badges = {}, branding }) {
       </AnimatePresence>
 
       {/* Desktop sidebar */}
-      <aside className="sticky top-0 hidden h-dvh w-64 shrink-0 flex-col border-r border-ink-200 bg-white lg:flex">
+      <aside className="no-print sticky top-0 hidden h-dvh w-64 shrink-0 flex-col border-r border-ink-200 bg-white lg:flex">
         <div className="flex h-[var(--header-height)] items-center px-5">
           <Logo branding={branding} />
         </div>

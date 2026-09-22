@@ -1,3 +1,5 @@
+import { REMOTE_IMAGE_HOSTS } from "./src/constants/config.js";
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactCompiler: true,
@@ -14,11 +16,10 @@ const nextConfig = {
 
   images: {
     // Tutor avatars are user-supplied URLs; only these hosts are permitted.
-    remotePatterns: [
-      { protocol: "https", hostname: "images.unsplash.com" },
-      { protocol: "https", hostname: "lh3.googleusercontent.com" },
-      { protocol: "https", hostname: "avatars.githubusercontent.com" },
-    ],
+    // The list lives in the application so the UI can check a photo against
+    // the same one before rendering it — an unlisted host makes `next/image`
+    // throw, and the UI's job is to fall back instead of letting it.
+    remotePatterns: REMOTE_IMAGE_HOSTS.map((hostname) => ({ protocol: "https", hostname })),
   },
 
   async headers() {

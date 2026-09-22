@@ -14,7 +14,7 @@ export function DashboardShell({ items, user, badges, branding, children }) {
     <div className="flex min-h-dvh w-full flex-col bg-canvas lg:flex-row">
       <DashboardNav items={items} user={user} badges={badges} branding={branding} />
       <div className="flex w-full min-w-0 max-w-full flex-1 flex-col">
-        <header className="sticky top-0 z-30 hidden h-[var(--header-height)] w-full items-center justify-end gap-4 border-b border-ink-200 bg-white/90 px-4 backdrop-blur-lg sm:px-6 lg:flex lg:px-8">
+        <header className="no-print sticky top-0 z-30 hidden h-[var(--header-height)] w-full items-center justify-end gap-4 border-b border-ink-200 bg-white/90 px-4 backdrop-blur-lg sm:px-6 lg:flex lg:px-8">
           <UserMenu user={user} />
         </header>
         <main id="main" className="w-full min-w-0 max-w-full flex-1">

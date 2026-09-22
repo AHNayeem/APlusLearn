@@ -75,7 +75,7 @@ export async function getOrCreateReferralCode(userId) {
       const updated = await User.findOneAndUpdate(
         { _id: userId, referralCode: { $in: [null, undefined] } },
         { $set: { referralCode: code } },
-        { new: true, select: "referralCode" },
+        { returnDocument: "after", select: "referralCode" },
       );
       if (updated?.referralCode) return updated.referralCode;
 

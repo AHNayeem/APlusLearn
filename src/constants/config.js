@@ -162,6 +162,53 @@ export const BRANDING_ASSETS = {
 export const BRANDING_ASSET_KEYS = Object.keys(BRANDING_ASSETS);
 
 /**
+ * A person's own profile photo, and the rules it is held to (§8, §16).
+ *
+ * Shaped exactly like a branding asset so `validateImage` checks it with the
+ * same header walk and the same refusals — an avatar is not a special kind of
+ * upload, it is the same kind with different bounds, and a second validator
+ * would be a second place for the SVG rule to be forgotten.
+ *
+ * Not `square`: people upload the photo they have, and every place the avatar
+ * is drawn crops it to a circle with `object-cover`. Refusing a portrait would
+ * be a rule the product does not need.
+ *
+ * 3 MB is roughly a phone photo straight from the camera roll. The pixel
+ * ceiling is what stops that same phone's 12 MP panorama from being stored
+ * whole and re-sent on every page that lists a name.
+ */
+export const AVATAR_IMAGE = {
+  key: "avatar",
+  label: "Profile photo",
+  hint: "A clear head-and-shoulders photo. JPG, PNG or WebP.",
+  accepts: ["image/png", "image/jpeg", "image/webp"],
+  maxBytes: 3 * 1024 * 1024,
+  minWidth: 64,
+  minHeight: 64,
+  maxWidth: 4096,
+  maxHeight: 4096,
+};
+
+/**
+ * The image hosts `next/image` is configured to fetch from.
+ *
+ * `next.config.mjs` builds its `remotePatterns` from this list, and
+ * `renderableImageSrc()` checks against the same one, so the optimizer's
+ * allow-list and the UI's idea of a usable photo cannot drift apart.
+ *
+ * Why it must not drift: a `src` on an unlisted host is not a broken image
+ * that quietly falls back — `next/image` throws `Invalid src prop`, which
+ * takes the whole surrounding render down. Profile photos and the tutor
+ * gallery are free-text URLs on records users control, so an unlisted host
+ * is an ordinary thing to find in the data, not an exotic one.
+ */
+export const REMOTE_IMAGE_HOSTS = [
+  "images.unsplash.com",
+  "lh3.googleusercontent.com",
+  "avatars.githubusercontent.com",
+];
+
+/**
  * How long an unpaid booking holds its slot (§19, §20).
  *
  * This is the *only* place the number lives. Three things read it and they

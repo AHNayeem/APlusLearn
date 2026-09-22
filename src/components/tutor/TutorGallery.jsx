@@ -4,6 +4,7 @@ import { useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { cn } from "@/lib/utils/cn";
+import { renderableImageSrc } from "@/lib/images/remote";
 
 /**
  * The photo column of a tutor card: one cover image plus a thumbnail strip
@@ -27,7 +28,12 @@ export function TutorGallery({
   className,
 }) {
   const [active, setActive] = useState(0);
-  const shown = images.slice(0, 5);
+
+  // `gallery` is free-text on the tutor's own record, so a URL the optimizer
+  // will not accept is ordinary data. Dropping it here is what lets the
+  // monogram cover below do its job — passing it to `next/image` would throw
+  // and break the card rather than leave one photo out of it.
+  const shown = images.map(renderableImageSrc).filter(Boolean).slice(0, 5);
   const cover = shown[active] ?? shown[0];
 
   return (

@@ -1,5 +1,6 @@
 import Image from "next/image";
 import { cn } from "@/lib/utils/cn";
+import { renderableImageSrc } from "@/lib/images/remote";
 import { initials as toInitials } from "@/lib/utils/format";
 
 const SIZES = {
@@ -31,30 +32,56 @@ function paletteFor(seed = "") {
   return PALETTE[hash % PALETTE.length];
 }
 
+/**
+ * Photos this application serves itself are not run through the image
+ * optimizer.
+ *
+ * The optimizer fetches the URL from the server, with no cookies — which is
+ * fine for a public logo and wrong for a profile photo, because everybody's
+ * but a tutor's needs the viewer's session to be readable at all. Letting the
+ * browser fetch it directly is what makes the avatar appear rather than break,
+ * and an avatar is already bounded in size and drawn at a few dozen pixels, so
+ * there is nothing much for the optimizer to have saved (§8).
+ */
+function isOwnUpload(src) {
+  return typeof src === "string" && src.startsWith("/api/");
+}
+
 export function Avatar({ src, name, firstName, lastName, size = "md", className, ring = false }) {
   const label = name ?? `${firstName ?? ""} ${lastName ?? ""}`.trim();
   const text = firstName || lastName ? toInitials(firstName, lastName) : toInitials(label.split(" ")[0], label.split(" ")[1]);
+
+  // A photo `next/image` would refuse is treated as no photo at all. The
+  // initials below are already the answer for somebody who never uploaded
+  // one; a stored URL on a host the optimizer does not know would otherwise
+  // throw rather than fall back, and take the surrounding page with it.
+  const photo = renderableImageSrc(src);
 
   return (
     <span
       className={cn(
         "relative inline-flex shrink-0 items-center justify-center overflow-hidden rounded-full font-bold",
         SIZES[size],
-        !src && paletteFor(label),
+        paletteFor(label),
         ring && "ring-2 ring-white",
         className,
       )}
     >
-      {src ? (
+      {/* Drawn underneath rather than instead of the photo, so an image that
+          404s — a photo taken down, an expired third-party URL — leaves the
+          person's initials showing instead of a broken-image icon. The empty
+          `alt` is what keeps the browser from painting the label over them;
+          the name is announced once, by the `sr-only` span below. */}
+      <span aria-hidden="true">{text}</span>
+      {photo && (
         <Image
-          src={src}
-          alt={label}
+          src={photo}
+          alt=""
           width={PIXEL_SIZES[size]}
           height={PIXEL_SIZES[size]}
-          className="size-full object-cover"
+          unoptimized={isOwnUpload(photo)}
+          className="absolute inset-0 size-full object-cover"
         />
-      ) : (
-        <span aria-hidden="true">{text}</span>
       )}
       <span className="sr-only">{label}</span>
     </span>

@@ -128,7 +128,7 @@ export async function grantCredit({
   const user = await User.findByIdAndUpdate(
     userId,
     { $inc: { creditBalanceCents: amountCents } },
-    { new: true, select: "creditBalanceCents firstName" },
+    { returnDocument: "after", select: "creditBalanceCents firstName" },
   );
 
   if (!user) {
@@ -233,7 +233,7 @@ export async function spendCredit({ userId, maxCents, paymentId, bookingId, note
   const user = await User.findOneAndUpdate(
     { _id: userId, creditBalanceCents: { $gte: amount } },
     { $inc: { creditBalanceCents: -amount } },
-    { new: true, select: "creditBalanceCents" },
+    { returnDocument: "after", select: "creditBalanceCents" },
   );
 
   if (!user) {
@@ -298,7 +298,7 @@ export async function clawBackCredit({ userId, amountCents, reason, referralId, 
     const user = await User.findOneAndUpdate(
       { _id: userId, creditBalanceCents: { $gte: recovered } },
       { $inc: { creditBalanceCents: -recovered } },
-      { new: true, select: "creditBalanceCents" },
+      { returnDocument: "after", select: "creditBalanceCents" },
     );
 
     if (user) {

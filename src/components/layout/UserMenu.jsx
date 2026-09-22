@@ -39,6 +39,12 @@ export function UserMenu({ user }) {
 
   const dashboard = homeForRole(user.role);
   const isTutor = user.role === ROLES.TUTOR;
+  const isAdmin = user.role === ROLES.ADMIN;
+
+  // Each role's account screen lives inside that role's shell, whose layout
+  // enforces the role. Pointing an administrator at the learner one — which is
+  // what this did — sent them through a redirect back to where they started.
+  const accountHref = isAdmin ? "/admin/account" : isTutor ? "/tutor/settings" : "/settings";
 
   return (
     <Dropdown
@@ -87,11 +93,8 @@ export function UserMenu({ user }) {
 
       <DropdownDivider />
 
-      <DropdownItem
-        href={isTutor ? "/tutor/settings" : "/settings"}
-        icon={<Settings className="size-4" />}
-      >
-        Settings
+      <DropdownItem href={accountHref} icon={<Settings className="size-4" />}>
+        {isAdmin ? "My account" : "Settings"}
       </DropdownItem>
       <DropdownItem onClick={signOut} disabled={signingOut} icon={<LogOut className="size-4" />}>
         {signingOut ? "Signing out…" : "Sign out"}

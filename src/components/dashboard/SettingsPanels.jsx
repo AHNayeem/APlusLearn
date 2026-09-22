@@ -11,8 +11,9 @@ import {
   Modal, FormErrorSummary, useToast,
 } from "@/components/ui";
 import { CANADIAN_TIMEZONES } from "@/lib/utils/time";
-import { NOTIFICATION_CHANNELS } from "@/constants";
+import { NOTIFICATION_CHANNELS, ROLES } from "@/constants";
 import { PhonePanel } from "./PhonePanel";
+import { ProfilePhotoPanel } from "./ProfilePhotoPanel";
 
 const VIEW_KEY = "aplus:settings-view";
 const VIEWS = [
@@ -60,10 +61,22 @@ function writeView(next) {
   for (const notify of viewListeners) notify();
 }
 
-/** Profile, notifications, password and account deletion (§24, §35). */
+/**
+ * Profile, photo, notifications, password and account deletion (§8, §24, §35).
+ *
+ * One component for every role, mounted by the learner, tutor and admin
+ * settings pages alike — an account is an account, and three copies of this
+ * screen would be three places for the same privacy wording to drift.
+ *
+ * Deleting your own account is the one part that is not universal. It is
+ * self-service for the people whose data it is; an administrator's account is
+ * removed by another administrator from user management, so that the last one
+ * cannot lock everybody out of the console by tidying up.
+ */
 export function SettingsPanels({ user }) {
   const view = useSyncExternalStore(subscribeView, readView, serverView);
   const grid = view === "grid";
+  const selfDelete = user.role !== ROLES.ADMIN;
 
   return (
     <div className={cn("space-y-4", grid ? "max-w-5xl" : "max-w-2xl")}>
@@ -74,13 +87,18 @@ export function SettingsPanels({ user }) {
       {/* Each card keeps its natural height (`items-start`) so a short panel
           never stretches to match a tall neighbour. */}
       <div className={cn("grid items-start gap-6", grid && "lg:grid-cols-2")}>
+        <div className={grid ? "lg:col-span-2" : undefined}>
+          <ProfilePhotoPanel user={user} />
+        </div>
         <ProfilePanel user={user} />
         <PhonePanel user={user} />
         <NotificationPanel user={user} />
         <PasswordPanel />
-        <div className={grid ? "lg:col-span-2" : undefined}>
-          <DangerPanel user={user} />
-        </div>
+        {selfDelete && (
+          <div className={grid ? "lg:col-span-2" : undefined}>
+            <DangerPanel user={user} />
+          </div>
+        )}
       </div>
     </div>
   );

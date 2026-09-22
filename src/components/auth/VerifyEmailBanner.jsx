@@ -25,7 +25,7 @@ export function VerifyEmailBanner({ email }) {
   return (
     <div
       role="status"
-      className="mb-6 flex flex-col gap-3 rounded-xl border border-warning-200 bg-warning-50 p-4 sm:flex-row sm:items-center sm:justify-between"
+      className="no-print mb-6 flex flex-col gap-3 rounded-xl border border-warning-200 bg-warning-50 p-4 sm:flex-row sm:items-center sm:justify-between"
     >
       <div className="flex gap-3">
         <MailWarning className="mt-0.5 size-5 shrink-0 text-warning-600" aria-hidden="true" />

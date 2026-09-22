@@ -2,11 +2,25 @@ import { z } from "zod";
 import { NOTIFICATION_CHANNELS } from "@/constants";
 import { personName, phone, postalCode, provinceCode, timeZone, objectId } from "./common";
 
+/**
+ * The editable half of an account (§8).
+ *
+ * What is *absent* is the contract. `role`, `status`, `emailVerifiedAt`,
+ * `tokenVersion`, `creditBalanceCents`, `phoneVerifiedAt` and `email` are all
+ * decided elsewhere — by an administrator, by a verification flow, by a
+ * payment — so a request that names one is not refused, it is simply not
+ * heard: the handler passes only the parsed result to the service.
+ *
+ * `avatarUrl` is absent for the same reason. It is a string this application
+ * renders into an `<img src>` for everyone the account deals with, and it is
+ * derived server-side — from an identity provider at sign-in, or from an
+ * upload this account actually made. `POST /api/users/me/avatar` is the only
+ * way to change it, which is what keeps it pointing at bytes we inspected.
+ */
 export const updateProfileSchema = z.object({
   firstName: personName.optional(),
   lastName: personName.optional(),
   phone: phone.optional().or(z.literal("").transform(() => undefined)),
-  avatarUrl: z.string().trim().max(500).optional(),
   city: z.string().trim().max(80).optional(),
   province: provinceCode.optional(),
   postalCode: postalCode.optional().or(z.literal("").transform(() => undefined)),
@@ -60,7 +74,9 @@ export const studentProfileSchema = z.object({
   notes: z.string().trim().max(1500).optional(),
   accessibilityNeeds: z.string().trim().max(1000).optional(),
   shareFullNameWithTutor: z.boolean().default(false),
-  avatarUrl: z.string().trim().max(500).optional(),
+  // No `avatarUrl`, for the reason given on `updateProfileSchema`: nothing in
+  // the product sets a child's photo, and an arbitrary URL accepted here would
+  // be rendered into an `<img src>` shown to that child's tutors.
 });
 
 export const updateStudentProfileSchema = studentProfileSchema.partial();

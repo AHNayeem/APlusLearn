@@ -433,7 +433,8 @@ async function materialiseProfile(user, application) {
         timeZone: d.PERSONAL?.timeZone,
         city: d.LOCATION?.city,
         province: d.LOCATION?.province,
-        avatarUrl: d.PROFILE?.avatarUrl,
+        // No `avatarUrl` — the photo is uploaded, not declared. `avatar` on
+        // the user record is written by `uploadAvatar` alone (§16).
       }),
     },
   );
@@ -573,7 +574,6 @@ export async function updateTutorProfile(userId, patch) {
 
   // Personal fields that live on the user record.
   const userPatch = compact({
-    avatarUrl: patch.avatarUrl,
     timeZone: patch.timeZone,
     city: patch.city,
     province: patch.province,

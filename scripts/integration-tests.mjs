@@ -169,7 +169,372 @@ async function runSections() {
   await promotionTests();
   await analyticsTests();
   await riskTests();
+  await avatarFallbackTests();
+  await avatarTests();
   await integrationModuleTests();
+}
+
+/**
+ * A structurally valid PNG header.
+ *
+ * `inspectImage` reads the signature and the IHDR's width and height, so this
+ * is exactly as much PNG as the code under test looks at — and, more to the
+ * point, it is a real container rather than a text blob with a label, which is
+ * the whole distinction these tests exist to prove.
+ */
+function fakePng(width, height, padToBytes = 0) {
+  const head = Buffer.alloc(33);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(head, 0);
+  head.writeUInt32BE(13, 8);
+  head.write("IHDR", 12, "ascii");
+  head.writeUInt32BE(width, 16);
+  head.writeUInt32BE(height, 20);
+  head[24] = 8;
+  head[25] = 2;
+  return padToBytes > head.length
+    ? Buffer.concat([head, Buffer.alloc(padToBytes - head.length, 0x41)])
+    : head;
+}
+
+// --- Profile photos ---------------------------------------------------------
+
+/**
+ * A person's own profile photo, through the service that owns it (§8, §16).
+ *
+ * The HTTP suite proves the endpoint refuses what it should; this proves the
+ * three things only a direct call can reach — that the bytes land in the
+ * avatars scope and nowhere else, that replacement really does delete the file
+ * it replaced, and that a failed upload leaves the previous photo exactly
+ * where it was.
+ */
+/**
+ * A photo the page cannot draw must degrade to the initials, not to a stack
+ * trace.
+ *
+ * `next/image` does not treat an unconfigured hostname as a broken image — it
+ * throws `Invalid src prop`, which fails the whole surrounding render. Both
+ * of the fields that reach it are free text on records users control
+ * (`User.avatarUrl` predates uploads and Google sign-in still writes to it;
+ * `TutorProfile.gallery` has never been more than strings), so an unusable
+ * value is ordinary data rather than an attack. `renderableImageSrc` is the
+ * one rule that decides, and it reads the optimizer's own host list so the
+ * two cannot drift apart.
+ */
+async function avatarFallbackTests() {
+  section("Profile photos — an unusable URL falls back instead of throwing");
+
+  const { renderableImageSrc } = await import("@/lib/images/remote");
+  const { REMOTE_IMAGE_HOSTS } = await import("@/constants/config");
+
+  check("a photo this application serves is kept",
+    renderableImageSrc("/api/avatars/9f3c.png") === "/api/avatars/9f3c.png");
+  check("as is a bundled asset path", renderableImageSrc("/images/x.png") === "/images/x.png");
+
+  const allowed = `https://${REMOTE_IMAGE_HOSTS[0]}/photo-1`;
+  check("a configured remote host is kept", renderableImageSrc(allowed) === allowed);
+  check("every configured host is accepted",
+    REMOTE_IMAGE_HOSTS.every((host) => renderableImageSrc(`https://${host}/x.jpg`) !== null));
+
+  check("an unconfigured host is dropped — this is the one that used to throw",
+    renderableImageSrc("https://evil.example.com/a.jpg") === null);
+  check("and so is a look-alike of a configured host",
+    renderableImageSrc("https://lh3.googleusercontent.com.evil.example/a.jpg") === null);
+  check("http is dropped even on a configured host",
+    renderableImageSrc(`http://${REMOTE_IMAGE_HOSTS[0]}/x.jpg`) === null);
+  check("a protocol-relative URL is not mistaken for a local path",
+    renderableImageSrc("//evil.example.com/a.jpg") === null);
+  check("free text that is not a URL at all is dropped",
+    renderableImageSrc("not a url") === null);
+  check("a javascript: URL is dropped", renderableImageSrc("javascript:alert(1)") === null);
+  check("a data: URL is dropped",
+    renderableImageSrc("data:image/svg+xml,<svg onload=alert(1)/>") === null);
+  check("a relative path is dropped", renderableImageSrc("../../etc/passwd") === null);
+
+  check("nothing at all is nothing", renderableImageSrc(null) === null);
+  check("undefined is nothing", renderableImageSrc(undefined) === null);
+  check("an empty string is nothing", renderableImageSrc("") === null);
+  check("whitespace is nothing", renderableImageSrc("   ") === null);
+  check("a non-string is nothing rather than a crash", renderableImageSrc({ toString: () => "/x.png" }) === null);
+  check("surrounding whitespace is trimmed rather than rejected",
+    renderableImageSrc("  /api/avatars/9f3c.png  ") === "/api/avatars/9f3c.png");
+
+  // The list next/image is configured with and the list the UI checks have to
+  // be the same object, or a photo passes one gate and throws at the other.
+  const config = await import("../next.config.mjs");
+  const configured = config.default.images.remotePatterns.map((pattern) => pattern.hostname).sort();
+  check("next.config.mjs allows exactly the hosts the UI will render",
+    JSON.stringify(configured) === JSON.stringify([...REMOTE_IMAGE_HOSTS].sort()),
+    configured.join(", "));
+  check("and every configured pattern is https-only",
+    config.default.images.remotePatterns.every((pattern) => pattern.protocol === "https"));
+}
+
+async function avatarTests() {
+  section("Profile photos — storage scope, replacement and fallback");
+
+  const uri = process.env.MONGODB_URI;
+  if (!uri) return skip("profile photos", "MONGODB_URI is not set");
+
+  if (mongoose.connection.readyState !== 1) {
+    try {
+      await mongoose.connect(uri, { serverSelectionTimeoutMS: 2500 });
+    } catch {
+      return skip("profile photos", "MongoDB is not reachable");
+    }
+  }
+
+  const { User } = await import("@/models");
+  const users = await import("@/services/user.service");
+  const { resetStorageProvider, STORAGE_SCOPES, buildStorageProvider } = await import(
+    "@/services/external/storage-provider"
+  );
+  const { ROLES, USER_STATUS, AVATAR_IMAGE } = await import("@/constants");
+
+  const root = await mkdtemp(path.join(tmpdir(), "aplus-avatars-"));
+  const storageEnv = {
+    APP_ENV: "development",
+    STORAGE_PROVIDER: undefined,
+    STORAGE_LOCAL_DIR: root,
+    STORAGE_ENDPOINT: undefined,
+    STORAGE_BUCKET: undefined,
+    STORAGE_ACCESS_KEY: undefined,
+    STORAGE_SECRET_KEY: undefined,
+    STORAGE_REQUIRE_EXTERNAL: undefined,
+  };
+  const saved = Object.fromEntries(Object.keys(storageEnv).map((k) => [k, process.env[k]]));
+  Object.assign(process.env, storageEnv);
+  for (const [k, v] of Object.entries(storageEnv)) if (v === undefined) delete process.env[k];
+  resetStorageProvider();
+
+  const made = [];
+  const makeUser = async (role) => {
+    const user = await User.create({
+      email: `avatar-${randomUUID()}@example.invalid`,
+      firstName: "Avatar",
+      lastName: "Testcase",
+      role,
+      status: USER_STATUS.ACTIVE,
+    });
+    made.push(user._id);
+    return user;
+  };
+
+  /** A `File`-shaped upload, the way a route hands one to the service. */
+  const asFile = (buffer, type = "image/png", name = "me.png") => ({
+    size: buffer.length,
+    type,
+    name,
+    arrayBuffer: async () => buffer,
+  });
+
+  try {
+    const learner = await makeUser(ROLES.PARENT);
+    const learnerActor = String(learner._id);
+
+    // --- the happy path
+    const first = await users.uploadAvatar(learnerActor, asFile(fakePng(256, 256)));
+    const firstKey = first.avatar?.storageKey;
+
+    check("an upload stores a key and points the account at it",
+      typeof firstKey === "string" && first.avatarUrl === `/api/avatars/${firstKey}`,
+      JSON.stringify({ key: firstKey, url: first.avatarUrl }));
+    check("the key is generated, not taken from the uploader's filename",
+      /^[0-9a-f-]{36}\.png$/.test(firstKey ?? ""), firstKey);
+    check("the recorded content type and dimensions come from the bytes",
+      first.avatar.contentType === "image/png" &&
+        first.avatar.width === 256 && first.avatar.height === 256,
+      JSON.stringify(first.avatar));
+
+    const inAvatars = await readdir(path.join(root, "avatars"));
+    check("the bytes land in the avatars scope, in their own directory",
+      inAvatars.includes(firstKey), inAvatars.join(", "));
+    check("and nowhere near the verification documents",
+      !(await readdir(path.join(root, "documents")).catch(() => [])).includes(firstKey));
+
+    check("no storage location reaches the caller of the service",
+      !JSON.stringify(first).includes(root) &&
+        !/bucket|endpoint|secretKey|accessKey/i.test(JSON.stringify(first)),
+      "the returned account mentions where the file is kept");
+
+    // --- reading it back
+    const read = await users.readAvatar(firstKey, { id: learnerActor });
+    check("the photo reads back through the storage abstraction",
+      Buffer.compare(read.body, fakePng(256, 256)) === 0 && read.contentType === "image/png");
+    check("a learner's photo is not public", read.isPublic === false);
+
+    const anonymous = await throws(
+      () => users.readAvatar(firstKey, null),
+      (e) => e.status === 401,
+    );
+    check("and a signed-out reader is refused it",
+      anonymous.threw && anonymous.matched, anonymous.error?.message);
+
+    const tutorAccount = await makeUser(ROLES.TUTOR);
+    const tutorPhoto = await users.uploadAvatar(String(tutorAccount._id), asFile(fakePng(400, 400)));
+    const tutorRead = await users.readAvatar(tutorPhoto.avatar.storageKey, null);
+    check("a tutor's photo IS public — anonymous visitors load the search results it is on",
+      tutorRead.isPublic === true && tutorRead.body.length > 0);
+
+    // --- only a key that is somebody's avatar right now resolves
+    const strayKey = `${randomUUID()}.png`;
+    await writeFile(path.join(root, "avatars", strayKey), fakePng(64, 64));
+    const stray = await throws(
+      () => users.readAvatar(strayKey, { id: learnerActor }),
+      (e) => e.status === 404,
+    );
+    check("a file in the avatars directory that no account points at is NOT servable",
+      stray.threw && stray.matched, stray.error?.message);
+
+    const documentKey = `${randomUUID()}.pdf`;
+    await mkdir(path.join(root, "documents"), { recursive: true });
+    await writeFile(path.join(root, "documents", documentKey), Buffer.from("%PDF-1.4 identity"));
+    const asDocument = await throws(
+      () => users.readAvatar(documentKey, { id: learnerActor }),
+      (e) => e.status === 404,
+    );
+    check("a verification document's key cannot be read through the avatar route",
+      asDocument.threw && asDocument.matched, asDocument.error?.message);
+
+    // --- what is refused, and what a refusal costs
+    const beforeRefusals = (await readdir(path.join(root, "avatars"))).length;
+    const refusals = [
+      ["a text file relabelled as an image", asFile(Buffer.from("<?php system($_GET['c']); ?>"))],
+      ["a script-capable SVG", asFile(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>'))],
+      ["a PDF", asFile(Buffer.from("%PDF-1.4\n%%EOF\n"))],
+      ["an image below the minimum dimensions", asFile(fakePng(16, 16))],
+      ["a file over the size limit", asFile(fakePng(128, 128, AVATAR_IMAGE.maxBytes + 1024))],
+    ];
+    for (const [what, file] of refusals) {
+      const refused = await throws(() => users.uploadAvatar(learnerActor, file));
+      check(`${what} is refused`, refused.threw, "it was accepted");
+    }
+
+    const afterRefusals = await User.findById(learnerActor).lean();
+    check("a refused upload leaves the existing photo exactly as it was",
+      afterRefusals.avatar?.storageKey === firstKey &&
+        afterRefusals.avatarUrl === `/api/avatars/${firstKey}`,
+      JSON.stringify(afterRefusals.avatar));
+    check("and writes nothing into the store for the file it refused",
+      (await readdir(path.join(root, "avatars"))).length === beforeRefusals,
+      (await readdir(path.join(root, "avatars"))).join(", "));
+
+    // --- replacement
+    const second = await users.uploadAvatar(learnerActor, asFile(fakePng(300, 300)));
+    const secondKey = second.avatar.storageKey;
+
+    check("a replacement gets a new key, so no cache can serve the photo it replaced",
+      secondKey !== firstKey && second.avatarUrl === `/api/avatars/${secondKey}`);
+    const afterReplace = await readdir(path.join(root, "avatars"));
+    check("the replaced file is deleted from the store",
+      !afterReplace.includes(firstKey) && afterReplace.includes(secondKey),
+      afterReplace.join(", "));
+    const staleRead = await throws(
+      () => users.readAvatar(firstKey, { id: learnerActor }),
+      (e) => e.status === 404,
+    );
+    check("and a stale reference to it resolves to nothing",
+      staleRead.threw && staleRead.matched);
+
+    // --- cleanup never reaches a file somebody else is using
+    //
+    // Two things keep that true and this checks both. One account cannot come
+    // to hold another's key at all, because `avatar.storageKey` is uniquely
+    // indexed — so "is this file exclusively theirs?" has an answer the
+    // database enforces rather than one the service assumes. And a replacement
+    // deletes only what the replacing account itself was pointing at.
+    const neighbour = await makeUser(ROLES.PARENT);
+    const neighbourPhoto = await users.uploadAvatar(String(neighbour._id), asFile(fakePng(220, 220)));
+    const neighbourKey = neighbourPhoto.avatar.storageKey;
+
+    const claimed = await throws(() =>
+      User.updateOne(
+        { _id: learner._id },
+        { $set: { avatar: { ...second.avatar, storageKey: neighbourKey } } },
+      ),
+    );
+    check("one account cannot come to point at another's stored photo",
+      claimed.threw && claimed.error?.code === 11000, claimed.error?.message);
+
+    await users.uploadAvatar(learnerActor, asFile(fakePng(200, 200)));
+    check("and replacing one account's photo leaves everybody else's file alone",
+      (await readdir(path.join(root, "avatars"))).includes(neighbourKey),
+      "somebody else's file was deleted");
+
+    // --- removal
+    const current = (await User.findById(learnerActor).lean()).avatar.storageKey;
+    const removed = await users.removeAvatar(learnerActor);
+    check("removing a photo clears both the reference and the pointer",
+      removed.avatar === undefined && !removed.avatarUrl, JSON.stringify(removed.avatar));
+    check("and takes the file out of the store",
+      !(await readdir(path.join(root, "avatars"))).includes(current));
+
+    // An account that arrived with a picture from an identity provider can
+    // take that down too — it is their face either way.
+    await User.updateOne(
+      { _id: learner._id },
+      { $set: { avatarUrl: "https://lh3.googleusercontent.com/a/example" } },
+    );
+    const clearedOauth = await users.removeAvatar(learnerActor);
+    check("a photo that came from an identity provider can be removed as well",
+      !clearedOauth.avatarUrl, clearedOauth.avatarUrl);
+
+    // --- which store the photo goes to is the one storage rule, not a second
+    const external = buildStorageProvider({
+      provider: "minio",
+      config: {
+        endpoint: "https://wfss001.example.invalid",
+        bucket: "aplus-learn",
+        accessKey: "minioadmin",
+        prefix: "prod",
+      },
+      secrets: { secretKey: "miniosecret" },
+    });
+    check("with object storage configured, a photo is addressed in the bucket, under its own scope",
+      external.objectKey(secondKey, STORAGE_SCOPES.AVATARS) === `prod/avatars/${secondKey}`,
+      external.objectKey(secondKey, STORAGE_SCOPES.AVATARS));
+    check("and with none configured it is the local filesystem, by the same rule",
+      (await import("@/services/external/storage-provider")).describeStorageMode({
+        config: {}, secrets: {},
+      }).mode === "LOCAL");
+  } finally {
+    await User.deleteMany({ _id: { $in: made } });
+    await rm(root, { recursive: true, force: true });
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    resetStorageProvider();
+  }
+
+  // --- the credentials stay in this process ---------------------------------
+  //
+  // Not a claim about intent: the modules that hold storage configuration are
+  // read here and asserted to be server-only, and the components that draw an
+  // avatar are asserted never to reach them. A bundler cannot put in a browser
+  // what no client module imports.
+  const serverOnly = [
+    "src/services/external/storage-provider.js",
+    "src/services/external/object-storage.js",
+    "src/services/user.service.js",
+  ];
+  for (const file of serverOnly) {
+    const source = await readFile(path.join(process.cwd(), file), "utf8");
+    check(`${file} refuses to be bundled for a browser`,
+      /^import "server-only";/m.test(source), "no server-only import");
+  }
+
+  const clientFiles = [
+    "src/components/dashboard/ProfilePhotoPanel.jsx",
+    "src/components/ui/Avatar.jsx",
+    "src/components/layout/UserMenu.jsx",
+  ];
+  for (const file of clientFiles) {
+    const source = await readFile(path.join(process.cwd(), file), "utf8");
+    check(`${file} holds no storage configuration and imports no storage module`,
+      !/STORAGE_[A-Z_]+/.test(source) &&
+        !/storage-provider|object-storage|secretKey|accessKey/.test(source),
+      "it references storage internals");
+  }
 }
 
 // --- 1. Configuration ------------------------------------------------------

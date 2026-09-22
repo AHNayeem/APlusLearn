@@ -455,7 +455,7 @@ export async function consumePackageSession({ purchaseId, actor, tutorProfileId,
       $expr: { $lt: ["$sessionsUsed", "$sessionsTotal"] },
     },
     { $inc: { sessionsUsed: 1 } },
-    { new: true },
+    { returnDocument: "after" },
   );
 
   if (!drawn) {
@@ -519,7 +519,7 @@ export async function returnPackageSession(purchaseId, bookingId) {
       $set: { status: PACKAGE_PURCHASE_STATUS.ACTIVE },
       $unset: { completedAt: "" },
     },
-    { new: true },
+    { returnDocument: "after" },
   );
 
   if (!returned) return { returned: false };

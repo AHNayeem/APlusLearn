@@ -173,6 +173,9 @@ export const ADMIN_NAV = [
   { href: "/admin/sms", label: "Text messages", icon: "Smartphone" },
   { href: "/admin/settings", label: "Settings", icon: "Settings" },
   { href: "/admin/settings/integrations", label: "External modules", icon: "Plug" },
+  // The administrator's *own* account, as distinct from the platform's
+  // settings above it.
+  { href: "/admin/account", label: "My account", icon: "UserCircle" },
 ];
 
 /**

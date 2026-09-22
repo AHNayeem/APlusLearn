@@ -64,6 +64,20 @@ export function failFromError(error) {
     });
   }
 
+  // The object store refused or could not be reached. Its own message names
+  // the bucket, the credentials or the endpoint — operator-actionable, and
+  // exactly what a browser must never be told — so it is logged and a plain
+  // one goes back. The upstream status travels with the error but is not
+  // reused: a 403 from the bucket is not the caller's 403, and returning it
+  // would tell somebody uploading a photo that *they* lack permission.
+  if (error?.code === "STORAGE_PROVIDER_ERROR") {
+    console.error("[api] file storage unavailable:", error.message, error.detail ?? "");
+    return fail("File storage is unavailable right now. Please try again in a moment.", {
+      status: 502,
+      code: "STORAGE_UNAVAILABLE",
+    });
+  }
+
   console.error("[api] unhandled error:", error);
   return fail("Something went wrong on our end. Please try again.", {
     status: 500,

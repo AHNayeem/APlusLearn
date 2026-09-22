@@ -1510,6 +1510,264 @@ async function main() {
     forgedInbound.status === 403 || forgedInbound.status === 404,
     `status ${forgedInbound.status}`);
 
+  // --- Profile management --------------------------------------------------
+  section("Profile management — details, photo upload and replacement (R8, R16)");
+
+  const myProfile = await parent("/api/users/me");
+  check("a signed-in account can read its own profile",
+    myProfile.ok && myProfile.payload.data.user.email === "jennifer.chen@example.com",
+    JSON.stringify(myProfile.payload?.error));
+  check("and it comes back without the password hash",
+    myProfile.payload?.data?.user?.passwordHash === undefined);
+
+  const anonProfileRead = await anon("/api/users/me");
+  check("an anonymous request cannot read a profile", anonProfileRead.status === 401);
+
+  const anonProfileWrite = await anon("/api/users/me", {
+    method: "PATCH",
+    body: { firstName: "Mallory" },
+  });
+  check("an anonymous request cannot update a profile", anonProfileWrite.status === 401);
+
+  const profileBefore = myProfile.payload.data.user;
+
+  // Everything privileged, in one request, alongside two fields that really
+  // are editable. The edit must land and the rest must not.
+  const profileInjection = await parent("/api/users/me", {
+    method: "PATCH",
+    body: {
+      firstName: "Jennifer",
+      city: "Mississauga",
+      // Privilege
+      role: "ADMIN",
+      status: "SUSPENDED",
+      permissions: ["ADMIN_SETTINGS_MANAGE"],
+      // Money
+      creditBalanceCents: 999_999,
+      // Identity claims this platform makes, not ones an account holder makes
+      email: "attacker@example.com",
+      emailVerifiedAt: "2020-01-01T00:00:00.000Z",
+      phoneVerifiedAt: "2020-01-01T00:00:00.000Z",
+      tokenVersion: 999,
+      deletedAt: null,
+      // The photo pointer, which is derived from an upload and nothing else
+      avatarUrl: "https://evil.example.com/tracker.gif",
+    },
+  });
+  check("an editable field on one's own profile is saved",
+    profileInjection.ok && profileInjection.payload.data.user.city === "Mississauga",
+    JSON.stringify(profileInjection.payload?.error));
+
+  const profileAfter = profileInjection.payload?.data?.user ?? {};
+  check("a role supplied in a profile update is IGNORED",
+    profileAfter.role === profileBefore.role, `${profileBefore.role} -> ${profileAfter.role}`);
+  check("an account status supplied in a profile update is IGNORED",
+    profileAfter.status === profileBefore.status, `${profileBefore.status} -> ${profileAfter.status}`);
+  check("a credit balance supplied in a profile update is IGNORED",
+    profileAfter.creditBalanceCents === profileBefore.creditBalanceCents,
+    `${profileBefore.creditBalanceCents} -> ${profileAfter.creditBalanceCents}`);
+  check("an email address supplied in a profile update is IGNORED",
+    profileAfter.email === profileBefore.email, `${profileBefore.email} -> ${profileAfter.email}`);
+  check("an email-verification timestamp cannot be granted to oneself",
+    String(profileAfter.emailVerifiedAt) === String(profileBefore.emailVerifiedAt));
+  check("a phone-verification timestamp cannot be granted to oneself",
+    String(profileAfter.phoneVerifiedAt) === String(profileBefore.phoneVerifiedAt));
+  check("a session-revocation counter supplied in a profile update is IGNORED",
+    profileAfter.tokenVersion === profileBefore.tokenVersion);
+  check("an avatar URL supplied in a profile update is IGNORED — the photo is an upload",
+    (profileAfter.avatarUrl ?? null) === (profileBefore.avatarUrl ?? null),
+    `${profileBefore.avatarUrl} -> ${profileAfter.avatarUrl}`);
+  check("no permissions array is written onto the account",
+    profileAfter.permissions === undefined);
+
+  // Server-side validation still applies to the fields that *are* editable.
+  const badProfileEdit = await parent("/api/users/me", {
+    method: "PATCH",
+    body: { firstName: "", postalCode: "NOT A POSTAL CODE" },
+  });
+  check("an invalid profile field is refused with per-field messages",
+    badProfileEdit.status === 422 &&
+      Object.keys(badProfileEdit.payload?.error?.details?.fieldErrors ?? {}).length > 0,
+    JSON.stringify(badProfileEdit.payload?.error));
+
+  // One account cannot reach another's. There is no "update user X" endpoint
+  // outside the admin console, and that one is permissioned.
+  const crossUserWrite = await tutor(`/api/admin/users/${profileBefore.id}`, {
+    method: "POST",
+    body: { action: "SUSPEND" },
+  });
+  check("one account cannot act on another through the admin user route",
+    crossUserWrite.status === 403, `status ${crossUserWrite.status}`);
+  const crossUserRead = await tutor(`/api/admin/users/${profileBefore.id}`);
+  check("nor read another account's record through it",
+    crossUserRead.status === 403, `status ${crossUserRead.status}`);
+
+  // --- the photo itself
+  const parentUpload = (path, form) => parent(path, { form });
+
+  const anonPhotoForm = new FormData();
+  anonPhotoForm.append("file", new Blob([pngBytes(128, 128)], { type: "image/png" }), "me.png");
+  const anonPhotoUpload = await anon("/api/users/me/avatar", { form: anonPhotoForm });
+  check("an anonymous request cannot upload a profile photo", anonPhotoUpload.status === 401);
+
+  const photoForm = new FormData();
+  photoForm.append(
+    "file",
+    new Blob([pngBytes(256, 256)], { type: "image/png" }),
+    // A filename carrying a path, a quote and a header break. None of it may
+    // survive anywhere — the stored name is a UUID we generate.
+    'me"\r\nX-Injected: yes/../../etc/passwd.png',
+  );
+  const photoUploaded = await parentUpload("/api/users/me/avatar", photoForm);
+  check("a signed-in account can upload its own profile photo",
+    photoUploaded.ok, JSON.stringify(photoUploaded.payload?.error));
+
+  const firstPhotoUrl = photoUploaded.payload?.data?.user?.avatarUrl ?? "";
+  check("the photo is stored as a pointer at this application, not at a third party",
+    firstPhotoUrl.startsWith("/api/avatars/"), firstPhotoUrl);
+  check("the stored key is a generated UUID — no part of the filename survives",
+    /^\/api\/avatars\/[0-9a-f-]{36}\.png$/.test(firstPhotoUrl), firstPhotoUrl);
+  check("the uploader's filename never becomes a path",
+    !firstPhotoUrl.includes("passwd") && !firstPhotoUrl.includes("..") &&
+      !firstPhotoUrl.includes("\r") && !firstPhotoUrl.includes('"'));
+  check("the upload reply discloses no storage location, bucket or credential",
+    !/bucket|endpoint|secretKey|accessKey|\.storage/i.test(JSON.stringify(photoUploaded.payload)),
+    "the response mentions storage internals");
+
+  const photoResponse = await parent(firstPhotoUrl, { raw: true });
+  check("the photo is served back through the application",
+    photoResponse.status === 200, `status ${photoResponse.status}`);
+  check("and the bytes come back through the storage abstraction",
+    (await photoResponse.clone().arrayBuffer()).byteLength > 0);
+  check("served as the type its bytes really are",
+    photoResponse.headers.get("content-type") === "image/png",
+    photoResponse.headers.get("content-type"));
+  check("no header was injected through the filename",
+    photoResponse.headers.get("x-injected") === null);
+  check("the browser is told not to sniff it into something executable",
+    photoResponse.headers.get("x-content-type-options") === "nosniff");
+  check("a learner's photo is not cached by shared proxies",
+    (photoResponse.headers.get("cache-control") ?? "").includes("private"),
+    photoResponse.headers.get("cache-control"));
+
+  const anonPhotoRead = await anon(firstPhotoUrl);
+  check("a learner's photo is NOT readable without a session",
+    anonPhotoRead.status === 401, `status ${anonPhotoRead.status}`);
+
+  const guessedPhoto = await parent("/api/avatars/00000000-0000-4000-8000-000000000000.png");
+  check("a guessed avatar key is a 404, not a file", guessedPhoto.status === 404);
+
+  // Next decodes the escape before the route sees it, so what arrives is a key
+  // with separators in it — refused by shape, before anything is looked up.
+  const traversalPhoto = await parent("/api/avatars/..%2F..%2Fdocuments%2Fx.pdf");
+  check("an avatar key cannot be made to address a verification document",
+    [400, 404, 422].includes(traversalPhoto.status), `status ${traversalPhoto.status}`);
+
+  // --- what must be refused
+  const scriptPhotoForm = new FormData();
+  scriptPhotoForm.append(
+    "file",
+    new Blob(["<?php system($_GET['c']); ?>"], { type: "image/png" }),
+    "shell.png",
+  );
+  const scriptPhotoRefused = await parentUpload("/api/users/me/avatar", scriptPhotoForm);
+  check("a script relabelled as a PNG is REFUSED on its bytes, not its label",
+    scriptPhotoRefused.status === 422 || scriptPhotoRefused.status === 400,
+    `status ${scriptPhotoRefused.status}`);
+
+  const svgPhotoForm = new FormData();
+  svgPhotoForm.append(
+    "file",
+    new Blob(['<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'], {
+      type: "image/png",
+    }),
+    "me.png",
+  );
+  const svgPhotoRefused = await parentUpload("/api/users/me/avatar", svgPhotoForm);
+  check("a script-capable SVG is REFUSED as a profile photo",
+    svgPhotoRefused.status === 422 || svgPhotoRefused.status === 400,
+    `status ${svgPhotoRefused.status}`);
+
+  const pdfPhotoForm = new FormData();
+  pdfPhotoForm.append(
+    "file",
+    new Blob([Buffer.from("%PDF-1.4\n%%EOF\n")], { type: "image/png" }),
+    "me.png",
+  );
+  const pdfPhotoRefused = await parentUpload("/api/users/me/avatar", pdfPhotoForm);
+  check("a PDF is REFUSED as a profile photo — only the image formats are accepted",
+    pdfPhotoRefused.status === 422 || pdfPhotoRefused.status === 400,
+    `status ${pdfPhotoRefused.status}`);
+
+  const tinyPhotoForm = new FormData();
+  tinyPhotoForm.append("file", new Blob([pngBytes(16, 16)], { type: "image/png" }), "tiny.png");
+  const tinyPhotoRefused = await parentUpload("/api/users/me/avatar", tinyPhotoForm);
+  check("an image below the minimum dimensions is refused",
+    tinyPhotoRefused.status === 422 || tinyPhotoRefused.status === 400,
+    `status ${tinyPhotoRefused.status}`);
+
+  const hugePhotoForm = new FormData();
+  hugePhotoForm.append(
+    "file",
+    // Genuinely over 3 MB, not merely claiming to be.
+    new Blob([pngBytes(128, 128, 3 * 1024 * 1024 + 4096)], { type: "image/png" }),
+    "huge.png",
+  );
+  const hugePhotoRefused = await parentUpload("/api/users/me/avatar", hugePhotoForm);
+  check("an oversized photo is refused",
+    hugePhotoRefused.status === 422 || hugePhotoRefused.status === 400,
+    `status ${hugePhotoRefused.status}`);
+
+  const photoStillThere = await parent("/api/users/me");
+  check("a refused upload leaves the existing photo exactly as it was",
+    photoStillThere.payload?.data?.user?.avatarUrl === firstPhotoUrl,
+    `${firstPhotoUrl} -> ${photoStillThere.payload?.data?.user?.avatarUrl}`);
+
+  // --- replacement
+  const replacementForm = new FormData();
+  replacementForm.append("file", new Blob([pngBytes(300, 300)], { type: "image/png" }), "new.png");
+  const photoReplaced = await parentUpload("/api/users/me/avatar", replacementForm);
+  const secondPhotoUrl = photoReplaced.payload?.data?.user?.avatarUrl ?? "";
+  check("a replacement photo is accepted",
+    photoReplaced.ok, JSON.stringify(photoReplaced.payload?.error));
+  check("replacing a photo mints a NEW key, so no cache can serve the old one",
+    secondPhotoUrl.startsWith("/api/avatars/") && secondPhotoUrl !== firstPhotoUrl,
+    `${firstPhotoUrl} -> ${secondPhotoUrl}`);
+  check("the replacement is readable", (await parent(secondPhotoUrl)).status === 200);
+
+  const stalePhotoRead = await parent(firstPhotoUrl);
+  check("the replaced photo is gone — a stale reference resolves to nothing",
+    stalePhotoRead.status === 404, `status ${stalePhotoRead.status}`);
+
+  // --- a tutor's photo is marketplace content
+  const tutorPhotoForm = new FormData();
+  tutorPhotoForm.append("file", new Blob([pngBytes(400, 400)], { type: "image/png" }), "tutor.png");
+  const tutorPhotoUploaded = await tutor("/api/users/me/avatar", { form: tutorPhotoForm });
+  const tutorPhotoUrl = tutorPhotoUploaded.payload?.data?.user?.avatarUrl ?? "";
+  check("a tutor can upload a profile photo",
+    tutorPhotoUploaded.ok, JSON.stringify(tutorPhotoUploaded.payload?.error));
+
+  if (tutorPhotoUrl) {
+    const publicPhotoRead = await anon(tutorPhotoUrl, { raw: true });
+    check("a tutor's photo IS public — it is on the search results anonymous visitors load",
+      publicPhotoRead.status === 200, `status ${publicPhotoRead.status}`);
+    check("and it may be cached, because it is public marketplace content",
+      (publicPhotoRead.headers.get("cache-control") ?? "").includes("public"),
+      publicPhotoRead.headers.get("cache-control"));
+  }
+
+  // --- removal
+  const photoRemoved = await parent("/api/users/me/avatar", { method: "DELETE" });
+  check("an account can take its own photo down",
+    photoRemoved.ok && !photoRemoved.payload.data.user.avatarUrl,
+    JSON.stringify(photoRemoved.payload?.data?.user?.avatarUrl));
+  check("and the file stops being readable the moment it does",
+    (await parent(secondPhotoUrl)).status === 404);
+
+  const anonPhotoRemove = await anon("/api/users/me/avatar", { method: "DELETE" });
+  check("an anonymous request cannot remove a photo", anonPhotoRemove.status === 401);
+
+
   // --- Business rules ------------------------------------------------------
   section("Business rules");
 

@@ -376,7 +376,7 @@ export async function joinGroupSession(id, input, actor) {
       $expr: { $lt: ["$seatsTaken", "$maxParticipants"] },
     },
     { $inc: { seatsTaken: 1 } },
-    { new: true },
+    { returnDocument: "after" },
   );
 
   if (!claimed) {
@@ -469,7 +469,7 @@ async function joinWaitlist(session, student, actor, settings) {
   const updated = await GroupSession.findOneAndUpdate(
     { _id: session._id, waitlistCount: { $lt: cap } },
     { $inc: { waitlistCount: 1 } },
-    { new: true },
+    { returnDocument: "after" },
   );
   if (!updated) throw new ConflictError("This session is full and the waiting list is closed.");
 
@@ -593,7 +593,7 @@ export async function releaseGroupSeat(bookingId, { refundedCents = 0 } = {}) {
   const session = await GroupSession.findOneAndUpdate(
     { _id: enrolment.sessionId, seatsTaken: { $gt: 0 } },
     { $inc: { seatsTaken: -1 } },
-    { new: true },
+    { returnDocument: "after" },
   );
 
   if (session) await offerSeatToWaitlist(session);

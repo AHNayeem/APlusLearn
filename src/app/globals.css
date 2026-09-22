@@ -405,8 +405,74 @@
   }
 }
 
-/* Print — receipts and booking confirmations should print cleanly */
+/* --------------------------------------------------------------------------
+   Print — a receipt or confirmation prints as a standalone document, not as a
+   screenshot of the dashboard.
+
+   Two layers, because the second one is newer than some print engines:
+
+   1. `.no-print` on the chrome (sidebar, headers, page actions, banners) —
+      explicit, and works everywhere.
+   2. `.print-document` on the one element that *is* the printed paper. Anything
+      that is neither that element, inside it, nor an ancestor of it is dropped,
+      so a page never has to remember to mark a new widget `no-print`. The
+      ancestors are flattened to plain full-width blocks so the document starts
+      at the top-left of the sheet with no dashboard padding around it.
+   -------------------------------------------------------------------------- */
 @media print {
+  @page { margin: 16mm; }
+
   .no-print { display: none !important; }
-  body { background: #fff; }
+
+  html,
+  body {
+    margin: 0 !important;
+    padding: 0 !important;
+    background: #fff !important;
+    min-height: 0 !important;
+  }
+
+  /* Everything off the path to the printed document. */
+  body:has(.print-document)
+    *:not(:has(.print-document)):not(.print-document):not(.print-document *) {
+    display: none !important;
+  }
+
+  /* The path itself: layout wrappers become transparent full-width blocks. */
+  body:has(.print-document) :has(.print-document) {
+    display: block !important;
+    position: static !important;
+    width: auto !important;
+    max-width: none !important;
+    min-height: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: 0 !important;
+    background: none !important;
+    box-shadow: none !important;
+    overflow: visible !important;
+  }
+
+  .print-document {
+    display: block !important;
+    width: 100% !important;
+    max-width: none !important;
+    margin: 0 auto !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    background: #fff !important;
+    box-shadow: none !important;
+  }
+
+  /* Colours print as designed rather than being dropped to save ink. */
+  .print-document,
+  .print-document * {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  .print-document a[href] {
+    text-decoration: none;
+    color: inherit;
+  }
 }

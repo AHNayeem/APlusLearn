@@ -369,7 +369,7 @@ export async function confirmPhoneVerification(userId, { code }, actor) {
         [`notificationPreferences.${NOTIFICATION_CHANNELS.SMS}`]: true,
       },
     },
-    { new: true },
+    { returnDocument: "after" },
   ).select("phone phoneE164 phoneVerifiedAt notificationPreferences smsOptOutAt");
 
   await recordAudit({
@@ -395,7 +395,7 @@ export async function removePhone(userId, actor) {
         [`notificationPreferences.${NOTIFICATION_CHANNELS.SMS}`]: false,
       },
     },
-    { new: true },
+    { returnDocument: "after" },
   ).select("phone phoneE164 phoneVerifiedAt notificationPreferences");
 
   if (!user) throw new NotFoundError("We couldn't find your account.");

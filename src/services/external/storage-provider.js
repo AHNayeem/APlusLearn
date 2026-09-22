@@ -13,7 +13,7 @@ import { ObjectStoreClient, storageError } from "./object-storage";
 /**
  * Private file storage (§16, §35, §26).
  *
- * Two scopes, with different audiences and the same handling:
+ * Three scopes, with different audiences and the same handling:
  *
  *   documents — verification paperwork. Private: written outside `public/`,
  *               streamed back only through an admin-authorised route, and the
@@ -24,6 +24,13 @@ import { ObjectStoreClient, storageError } from "./object-storage";
  *               that names them from the settings document, so a raw key can
  *               never be guessed at, enumerated, or used to host something
  *               that was never meant to be on this domain.
+ *   avatars   — profile photos people uploaded of themselves. Served through
+ *               a route that resolves the key back to the account currently
+ *               holding it, so only a key that *is* somebody's avatar right
+ *               now can be read, and a document key can never be one (§8).
+ *
+ * The separation is what makes that last sentence true: the scope decides the
+ * folder, so a key lifted from one scope addresses nothing in another.
  *
  * Nothing is written into `public/`. A writable directory inside the served
  * web root is how an upload feature becomes a remote-code-execution feature.
@@ -53,7 +60,30 @@ import { ObjectStoreClient, storageError } from "./object-storage";
  * back sets `STORAGE_REQUIRE_EXTERNAL=true`.
  */
 
-export const STORAGE_SCOPES = { DOCUMENTS: "documents", BRANDING: "branding" };
+export const STORAGE_SCOPES = {
+  DOCUMENTS: "documents",
+  BRANDING: "branding",
+  AVATARS: "avatars",
+};
+
+/**
+ * Scope -> folder, in one place.
+ *
+ * A scope is always chosen by this application, never by a caller, and an
+ * unrecognised one falls back to `documents` — the most restricted of the
+ * three — so a typo can only ever be *more* private, never less. The mapping
+ * is a table rather than a ternary because there are now three of them and a
+ * fourth must not be able to silently land in somebody else's folder.
+ */
+const SCOPE_FOLDERS = {
+  [STORAGE_SCOPES.BRANDING]: "branding",
+  [STORAGE_SCOPES.AVATARS]: "avatars",
+  [STORAGE_SCOPES.DOCUMENTS]: "documents",
+};
+
+function folderFor(scope) {
+  return SCOPE_FOLDERS[scope] ?? SCOPE_FOLDERS[STORAGE_SCOPES.DOCUMENTS];
+}
 
 /**
  * Where local mode writes.
@@ -72,9 +102,9 @@ export function localStorageRoot() {
     : path.join(process.cwd(), UPLOAD.localStorageDir);
 }
 
-/** The two scope directories. The scope is ours; it is never caller-supplied. */
+/** The scope directories. The scope is ours; it is never caller-supplied. */
 function scopedDir(scope) {
-  return path.join(localStorageRoot(), scope === STORAGE_SCOPES.BRANDING ? "branding" : "documents");
+  return path.join(localStorageRoot(), folderFor(scope));
 }
 
 /**
@@ -248,8 +278,9 @@ export class LocalStorageProvider extends StorageProvider {
   }
 
   async verify() {
-    await mkdir(scopedDir(STORAGE_SCOPES.DOCUMENTS), { recursive: true });
-    await mkdir(scopedDir(STORAGE_SCOPES.BRANDING), { recursive: true });
+    for (const scope of Object.values(STORAGE_SCOPES)) {
+      await mkdir(scopedDir(scope), { recursive: true });
+    }
     return {
       ok: true,
       provider: this.name,
@@ -296,7 +327,7 @@ export class ObjectStorageProvider extends StorageProvider {
 
   /** `<prefix>/<scope>/<uuid>.<ext>` — the scope is ours, never the caller's. */
   objectKey(storageKey, scope) {
-    const folder = scope === STORAGE_SCOPES.BRANDING ? "branding" : "documents";
+    const folder = folderFor(scope);
     // `safeKey` strips any path the caller managed to get into the key, so a
     // stored value of "../../etc/passwd" addresses an object called
     // "passwd" inside our own prefix and nothing else.

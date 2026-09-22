@@ -29,11 +29,14 @@ export default async function ReceiptPage({ params }) {
 
   return (
     <DashboardPage>
+      {/* Screen chrome only — the printed sheet carries its own heading, so the
+          whole block (breadcrumb, title and the Print action) is dropped. */}
       <PageHeader
+        className="no-print"
         breadcrumb={
           <Link
             href="/payments"
-            className="no-print mb-2 inline-flex items-center gap-1.5 text-sm font-semibold text-ink-500 hover:text-ink-800"
+            className="mb-2 inline-flex items-center gap-1.5 text-sm font-semibold text-ink-500 hover:text-ink-800"
           >
             <ArrowLeft className="size-3.5" />
             All payments
@@ -43,7 +46,8 @@ export default async function ReceiptPage({ params }) {
         action={<PrintButton />}
       />
 
-      <Card className="mx-auto max-w-2xl">
+      {/* `print-document` scopes @media print in globals.css to this card. */}
+      <Card className="print-document mx-auto max-w-2xl">
         <CardHeader
           title={branding.appName}
           description={`Receipt ${receiptNumber}`}

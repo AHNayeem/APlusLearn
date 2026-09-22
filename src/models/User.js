@@ -21,6 +21,22 @@ const NotificationPreferenceSchema = new mongoose.Schema(
   { _id: false },
 );
 
+/**
+ * A stored profile photo. The bytes live in the `avatars` storage scope; this
+ * is everything needed to serve them, replace them and clean them up.
+ */
+const AvatarSchema = new mongoose.Schema(
+  {
+    storageKey: { type: String, required: true },
+    contentType: { type: String, required: true },
+    sizeBytes: Number,
+    width: Number,
+    height: Number,
+    uploadedAt: { type: Date, default: Date.now },
+  },
+  { _id: false },
+);
+
 const UserSchema = new mongoose.Schema(
   {
     email: {
@@ -54,7 +70,26 @@ const UserSchema = new mongoose.Schema(
      * is a legal duty rather than a setting.
      */
     smsOptOutAt: { type: Date, default: null },
+    /**
+     * Where this account's profile photo is drawn from (§8, §16).
+     *
+     * `avatarUrl` is the *pointer* every other read path already uses — some
+     * forty `.populate("… avatarUrl")` selects, every `<Avatar src>`. It holds
+     * either an identity provider's picture URL (Google hands one over at
+     * sign-in) or, for an uploaded photo, this application's own
+     * `/api/avatars/<key>` path. Nothing else is ever accepted into it: it is
+     * derived server-side from one of those two events and is not a field any
+     * request may set, because a string rendered into an `<img src>` for the
+     * people this person tutors is not a preference.
+     *
+     * `avatar` is the *reference* — what was stored, where, and how big. It
+     * exists because a pointer alone cannot answer the two questions
+     * replacement asks: which object does this account own, and is it still
+     * the one anybody is pointing at. Only a key held here can be served, so
+     * the serve route reads back a record rather than a file.
+     */
     avatarUrl: { type: String, trim: true },
+    avatar: { type: AvatarSchema, default: undefined },
 
     role: { type: String, enum: Object.values(ROLES), required: true, index: true },
     status: {
@@ -119,6 +154,12 @@ const UserSchema = new mongoose.Schema(
 
 UserSchema.index({ location: "2dsphere" }, { sparse: true });
 UserSchema.index({ role: 1, status: 1, createdAt: -1 });
+/**
+ * The lookup `/api/avatars/<key>` performs on every avatar request, and the
+ * guarantee that one stored object belongs to exactly one account — which is
+ * what makes deleting a replaced photo safe rather than a guess about sharing.
+ */
+UserSchema.index({ "avatar.storageKey": 1 }, { unique: true, sparse: true });
 UserSchema.index({ "oauthAccounts.provider": 1, "oauthAccounts.providerAccountId": 1 });
 
 UserSchema.virtual("fullName").get(function fullName() {

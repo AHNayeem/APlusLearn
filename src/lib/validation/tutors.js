@@ -69,7 +69,10 @@ export const onboardingStepSchemas = {
       .min(120, "Write at least 120 characters so parents can get to know you.")
       .max(4000),
     languages: z.array(z.string().trim().min(2).max(40)).min(1, "Add at least one language."),
-    avatarUrl: z.string().trim().max(500).optional(),
+    // The photo is not a field of this form. It is uploaded through
+    // `POST /api/users/me/avatar`, inspected byte by byte, and stored — so
+    // what reaches a family's screen is a file this platform holds rather than
+    // a URL an application could be talked into pointing anywhere (§16).
     introVideoUrl: z.string().trim().max(500).optional(),
     /** Teaching-environment photos shown on the search card gallery. */
     gallery: z.array(z.string().trim().min(1).max(500)).max(6, "Up to six photos.").optional(),
@@ -177,7 +180,7 @@ export const updateTutorProfileSchema = z.object({
   headline: z.string().trim().min(10).max(120).optional(),
   bio: z.string().trim().min(120).max(4000).optional(),
   languages: z.array(z.string().trim().min(2).max(40)).min(1).optional(),
-  avatarUrl: z.string().trim().max(500).optional(),
+  // See the onboarding PROFILE step: the photo is an upload, not a URL.
   introVideoUrl: z.string().trim().max(500).optional(),
   /** Teaching-environment photos shown on the search card gallery. */
   gallery: z.array(z.string().trim().min(1).max(500)).max(6, "Up to six photos.").optional(),
