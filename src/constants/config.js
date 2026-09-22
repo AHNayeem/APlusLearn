@@ -19,6 +19,16 @@ export const SITE = {
   supportEmail: "support@apluslearn.ca",
   contactEmail: "hello@apluslearn.ca",
   supportPhone: "1-888-555-0142",
+  /**
+   * WhatsApp business number, digits only with the country code (§26b).
+   *
+   * Blank by design, and it is the switch as well as the value: the floating
+   * support launcher renders no WhatsApp button until an operator sets one, so
+   * a fresh deployment cannot send a family to a `wa.me` link that belongs to
+   * a stranger. `supportPhone` is deliberately not reused for it — a landline
+   * is not a WhatsApp account.
+   */
+  whatsappNumber: "",
   supportHours: "Mon to Sun, 9am – 9pm ET",
   city: "Toronto, Ontario",
   /** Public profiles linked from the footer. Blank entries are not rendered. */
@@ -527,6 +537,7 @@ export const DEFAULT_SETTINGS = {
     supportEmail: SITE.supportEmail,
     contactEmail: SITE.contactEmail,
     supportPhone: SITE.supportPhone,
+    whatsappNumber: SITE.whatsappNumber,
     addressLine: "",
     city: "Toronto",
     province: "ON",

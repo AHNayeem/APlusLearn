@@ -2,6 +2,7 @@ import { SiteHeader } from "@/components/layout/SiteHeader";
 import { SiteFooter } from "@/components/layout/SiteFooter";
 import { getCurrentUser } from "@/lib/auth/current-user";
 import { getAppConfig } from "@/services/settings.service";
+import { SupportWidget } from "@/components/support/SupportWidget";
 
 /**
  * Public marketplace shell. The header needs the signed-in user, which is why
@@ -33,6 +34,8 @@ export default async function PublicLayout({ children }) {
         {children}
       </main>
       <SiteFooter config={config} />
+      {/* Floating help launcher. It resolves the visitor itself. */}
+      <SupportWidget />
     </>
   );
 }

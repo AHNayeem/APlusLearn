@@ -409,6 +409,33 @@ export function emailTemplatesFor(brand = DEFAULT_EMAIL_BRAND) {
         cta: { label: "View your earnings", href: `${baseUrl()}/tutor/payouts` },
         footnote: "Bank transfers usually settle within 2–3 business days.",
       }),
+
+    // --- Support -------------------------------------------------------------
+
+    /**
+     * An enquiry from the floating help launcher, addressed to the support
+     * inbox rather than to a member (§35).
+     *
+     * It is the one template whose body is written by a member of the public,
+     * which is why it goes through `body` like any other paragraph: every
+     * paragraph is HTML-escaped by the layout, so a message containing markup
+     * arrives as text. The sender's address is carried in `Reply-To` by the
+     * caller and repeated in the detail rows, so replying is one keystroke and
+     * the record survives a forward.
+     */
+    supportEnquiry: ({ name, fromEmail, topicLabel, accountLabel, pageLabel, message }) =>
+      email(`Support enquiry — ${topicLabel}`, {
+        preheader: `${name} · ${topicLabel}`,
+        heading: "New support enquiry",
+        details: [
+          ["From", `${name} <${fromEmail}>`],
+          ["Topic", topicLabel],
+          ["Account", accountLabel],
+          ["Page", pageLabel],
+        ],
+        body: [message],
+        footnote: `Reply to this email to answer ${name} directly.`,
+      }),
   };
 }
 

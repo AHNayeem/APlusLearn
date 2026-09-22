@@ -160,6 +160,14 @@ export default async function RootLayout({ children }) {
             {themeCss}
           </style>
         )}
+        {/*
+          The floating support launcher is *not* mounted here, deliberately.
+          It resolves the signed-in visitor, and reading cookies in the root
+          layout would make every route in the application dynamic — including
+          `/offline` and the global 404, the two documents that are prerendered
+          precisely because they have to render with nothing behind them. Each
+          shell that already knows who is looking mounts it instead.
+        */}
         <ToastProvider>{children}</ToastProvider>
         {/* Renders nothing; registers the service worker after load (§18). */}
         <ServiceWorkerManager />

@@ -140,6 +140,24 @@ export function ContactSettings({ settings }) {
               />
             </Field>
             <Field
+              label="WhatsApp number"
+              htmlFor="set-whatsapp"
+              hint="Optional. With the country code. Leave blank to hide the WhatsApp button from the support launcher."
+              error={s.errorFor("whatsappNumber")}
+            >
+              <Input
+                id="set-whatsapp"
+                type="tel"
+                placeholder="+1 416 555 0142"
+                value={s.form.whatsappNumber}
+                onChange={s.set("whatsappNumber")}
+                error={s.errorFor("whatsappNumber")}
+              />
+            </Field>
+          </div>
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field
               label="Website"
               htmlFor="set-website"
               hint="Optional. A marketing site outside the platform."

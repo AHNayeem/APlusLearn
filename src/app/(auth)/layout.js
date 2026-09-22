@@ -8,6 +8,7 @@ import { marketplaceStats } from "@/services/search.service";
 import { connectToDatabase } from "@/lib/db/connect";
 import { formatNumber } from "@/lib/utils/format";
 import { getAppConfig } from "@/services/settings.service";
+import { SupportWidget } from "@/components/support/SupportWidget";
 import asideImage from "../../../public/hero/study-hall.jpg";
 
 /**
@@ -141,6 +142,15 @@ export default async function AuthLayout({ children }) {
           </Reveal>
         </div>
       </aside>
+
+      {/*
+        Somebody who cannot get through the sign-in door is the visitor least
+        able to reach us any other way, so the launcher is here too — always in
+        its guest form, since this layout redirects anyone already signed in.
+        It positions itself against the viewport, so it sits inside this flex
+        row without joining it.
+      */}
+      <SupportWidget />
     </div>
   );
 }

@@ -228,6 +228,24 @@ exercise upload, retrieval and replacement end to end on this machine.
 | Reports reach a moderator | `/admin/moderation` queue and `/admin/moderation/[id]`, behind `ADMIN_MESSAGE_MODERATE`: reporter, participants, reason, timestamp, booking context, status and history. Opening a thread writes a `CONVERSATION_REPORT_VIEWED` audit entry; a decision writes `CONVERSATION_MODERATED` | Implemented |
 | Ready for attachments & realtime | `Message.attachments` schema present, unused in MVP | Phase 2 |
 
+### Floating support launcher
+
+Present on the public site, the dashboards, the tutor workspace and the auth
+pages; absent from the admin console (an operator does not raise a ticket with
+themselves) and from `/offline`, which has no network behind it.
+
+| Requirement | Implementation | Status |
+|---|---|---|
+| Reach a human from any page | `components/support/` — a collapsed button that expands to WhatsApp and a support panel, bottom-right, clear of the iOS home indicator | Implemented |
+| WhatsApp for everyone | `wa.me` deep link built from `contact.whatsappNumber`; offered to signed-in and signed-out visitors alike, and to neither when no number is configured | Implemented |
+| Signed in → their own conversations | The panel leads with a link to `/messages` or `/tutor/messages`, chosen server-side from the session role; hidden when the `messaging` flag is off | Implemented |
+| Signed out → a way to be answered | Name, email, topic and message, sent to the configured support inbox with the sender in `Reply-To`, plus a link back to sign-in | Implemented |
+| Identity is never taken from the payload | `support.service.js` reads name and address from the session whenever one exists, and ignores whatever the body claims | Implemented |
+| Not an open relay | Nothing is ever sent *to* the address in the form; only the support inbox is written to | Implemented |
+| Abuse control | 4 enquiries per IP per 15 minutes (`enforceRateLimit`) plus a hidden honeypot field, which is answered with the same success the real path returns | Implemented |
+| A lost message is reported | The email *is* the record here, so a delivery failure returns 503 naming the support address rather than thanking the sender for nothing | Implemented |
+| Not persisted | Enquiries are relayed, not stored. There is no support inbox inside the admin console, and adding one would need a model, a queue and a moderator view | Not added, by design |
+
 ## 22. Tutor requests & matching
 
 | Requirement | Implementation | Status |
@@ -308,7 +326,8 @@ taking a page down.
 | Page-specific SEO still wins | Next merges each route's own `generateMetadata` over the root; QA asserts a tutor page keeps its own title and takes only the configured suffix | Implemented |
 | Indexing switch | `seo.allowIndexing` drives both the page `robots` metadata and `robots.txt` | Implemented |
 | Contact / platform information | `contact.*` — support and general email, phone, address, city, province, postal code, website, business and support hours | Implemented |
-| Contact details reused | Footer, `/support`, `/about`, `/safety`, legal pages, payment receipts | Implemented |
+| Contact details reused | Footer, `/support`, `/about`, `/safety`, legal pages, payment receipts, the floating support launcher | Implemented |
+| WhatsApp number | `contact.whatsappNumber` — stored digits-only with the country code. Blank by default and blank is the switch: no number, no WhatsApp button | Implemented |
 | Social links | `social.*`; only configured profiles render — no dead icons | Implemented |
 | Footer configuration | `footer.*` — description, copyright (with `{year}` substitution), social/newsletter/app-badge visibility | Implemented |
 | Marketplace configuration | Commission, cancellation policy, no-show refunds, abuse thresholds, booking notice and horizon, rate guard rails, payout hold, search radius, review moderation | Implemented |

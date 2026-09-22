@@ -53,7 +53,14 @@ export function ToastProvider({ children }) {
       <div
         aria-live="polite"
         aria-atomic="false"
-        className="pointer-events-none fixed inset-x-0 bottom-0 z-[60] flex flex-col items-center gap-2 p-4 sm:inset-x-auto sm:right-0 sm:items-end"
+        /*
+          Toasts share this corner with the floating support launcher, which
+          sits below them in the stacking order and would be covered by one.
+          The launcher publishes its own height as `--support-launcher-clearance`
+          while it is mounted, so the padding lifts only on the pages that
+          actually have one.
+        */
+        className="pointer-events-none fixed inset-x-0 bottom-0 z-[60] flex flex-col items-center gap-2 p-4 pb-[calc(1rem+var(--support-launcher-clearance,0px))] sm:inset-x-auto sm:right-0 sm:items-end"
       >
         <AnimatePresence initial={false}>
           {toasts.map((t) => (

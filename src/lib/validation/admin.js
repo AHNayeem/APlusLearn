@@ -139,6 +139,18 @@ const contactSchema = z.object({
   supportEmail: optionalEmail,
   contactEmail: optionalEmail,
   supportPhone: z.string().trim().max(30).optional(),
+  /**
+   * Stored digits-only with the country code, because `wa.me` accepts nothing
+   * else — the operator may type it however they like.
+   */
+  whatsappNumber: z
+    .string()
+    .trim()
+    .transform((v) => v.replace(/\D/g, ""))
+    .refine((v) => v === "" || (v.length >= 8 && v.length <= 15), {
+      message: "Enter the number with its country code, e.g. +1 416 555 0142.",
+    })
+    .optional(),
   addressLine: z.string().trim().max(160).optional(),
   city: z.string().trim().max(80).optional(),
   province: blankable(provinceCode),

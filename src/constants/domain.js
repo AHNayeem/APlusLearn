@@ -1127,3 +1127,30 @@ export const AUDIT_ACTIONS = {
   INTEGRATION_TESTED: "INTEGRATION_TESTED",
   INTEGRATION_IMPORTED_FROM_ENV: "INTEGRATION_IMPORTED_FROM_ENV",
 };
+
+/**
+ * What a support enquiry from the floating help launcher is about.
+ *
+ * The list mirrors the sections of the support page so a visitor who read one
+ * and then opened the launcher sees the same vocabulary, and so the subject
+ * line the support inbox receives is already triaged. `OTHER` is last and
+ * always present — a fixed list that forces a wrong choice collects worse
+ * information than one that admits it does not know.
+ */
+export const SUPPORT_TOPICS = {
+  BOOKINGS: "BOOKINGS",
+  PAYMENTS: "PAYMENTS",
+  SAFETY: "SAFETY",
+  TUTORING: "TUTORING",
+  ACCOUNT: "ACCOUNT",
+  OTHER: "OTHER",
+};
+
+export const SUPPORT_TOPIC_LABELS = {
+  [SUPPORT_TOPICS.BOOKINGS]: "Bookings and lessons",
+  [SUPPORT_TOPICS.PAYMENTS]: "Payments and refunds",
+  [SUPPORT_TOPICS.SAFETY]: "Safety and conduct",
+  [SUPPORT_TOPICS.TUTORING]: "Tutoring on the platform",
+  [SUPPORT_TOPICS.ACCOUNT]: "My account",
+  [SUPPORT_TOPICS.OTHER]: "Something else",
+};

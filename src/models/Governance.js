@@ -155,6 +155,8 @@ const ContactSchema = new mongoose.Schema(
     supportEmail: { type: String, trim: true, lowercase: true, maxlength: 254, default: defaults.contact.supportEmail },
     contactEmail: { type: String, trim: true, lowercase: true, maxlength: 254, default: defaults.contact.contactEmail },
     supportPhone: { type: String, trim: true, maxlength: 30, default: defaults.contact.supportPhone },
+    /** Digits only, country code included — stored ready for a `wa.me` link. */
+    whatsappNumber: { type: String, trim: true, maxlength: 20, default: defaults.contact.whatsappNumber },
     addressLine: { type: String, trim: true, maxlength: 160, default: "" },
     city: { type: String, trim: true, maxlength: 80, default: defaults.contact.city },
     province: { type: String, trim: true, uppercase: true, maxlength: 2, default: defaults.contact.province },
