@@ -37,6 +37,35 @@ const nextConfig = {
           },
         ],
       },
+      {
+        /**
+         * The service worker script must never be served from a cache (§18).
+         *
+         * `updateViaCache: "none"` on the registration already asks the
+         * browser to bypass its HTTP cache for this file, but a CDN in front
+         * of the deployment was never told that. Without this header a proxy
+         * can hold the previous build's worker — and its cache rules — long
+         * after the code it caches for has been replaced.
+         */
+        source: "/sw.js",
+        headers: [
+          { key: "Cache-Control", value: "no-cache, no-store, must-revalidate" },
+          // The worker lives at the origin root and claims the root scope. The
+          // header is what permits that if the file is ever moved or proxied
+          // from a subdirectory.
+          { key: "Service-Worker-Allowed", value: "/" },
+        ],
+      },
+      {
+        /**
+         * Generated from `public/icon.svg` and changed only by a rebrand, but
+         * referenced by the manifest, by iOS and by the installed copy's
+         * launcher — a day is long enough to be worth caching and short
+         * enough that a rebrand lands the same day.
+         */
+        source: "/icons/:file*",
+        headers: [{ key: "Cache-Control", value: "public, max-age=86400" }],
+      },
     ];
   },
 };

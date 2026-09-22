@@ -342,6 +342,9 @@ page, so no Stripe code runs in the browser.
 - [`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md) — production integrations:
   providers, environment variables, webhook endpoints, OAuth callback
   configuration and deployment requirements
+- [`docs/PWA.md`](docs/PWA.md) — installability, the service worker's caching
+  allowlist, offline behaviour, the update strategy, and what is deliberately
+  never cached
 
 ---
 

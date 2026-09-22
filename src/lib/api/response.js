@@ -7,8 +7,31 @@ import { AppError } from "./errors";
  *   failure -> { ok: false, error: { code, message, details? } }
  */
 
+/**
+ * No response carrying this envelope may be stored by anything.
+ *
+ * Route handlers are dynamic, so nothing on *our* side was ever caching them.
+ * What this closes is everything downstream: a response with no `Cache-Control`
+ * at all is eligible for heuristic caching by a browser, a corporate proxy or
+ * a CDN that has been pointed at the origin, and a JSON body here is a booking,
+ * a payment, a conversation or an admin listing rendered for one signed-in
+ * person. Saying so explicitly also means the service worker's last-gate check
+ * (`public/sw.js`, `isStorable`) would refuse these even if a future routing
+ * rule mistakenly offered them to it.
+ *
+ * Binary routes that serve their own bytes — `/api/branding/[asset]`,
+ * `/api/avatars/[key]` — build a `Response` directly rather than going through
+ * here, and keep the `public, immutable` / `private, immutable` headers they
+ * reason about individually (§16, §18). A caller may still override by passing
+ * `headers`, which is what makes this a default rather than a rule.
+ */
+const NO_STORE = { "Cache-Control": "no-store" };
+
 export function ok(data, { status = 200, meta, headers } = {}) {
-  return NextResponse.json({ ok: true, data, ...(meta ? { meta } : {}) }, { status, headers });
+  return NextResponse.json(
+    { ok: true, data, ...(meta ? { meta } : {}) },
+    { status, headers: { ...NO_STORE, ...headers } },
+  );
 }
 
 export function created(data, meta) {
@@ -16,13 +39,13 @@ export function created(data, meta) {
 }
 
 export function noContent() {
-  return new NextResponse(null, { status: 204 });
+  return new NextResponse(null, { status: 204, headers: { ...NO_STORE } });
 }
 
 export function fail(message, { status = 400, code = "BAD_REQUEST", details } = {}) {
   return NextResponse.json(
     { ok: false, error: { code, message, ...(details ? { details } : {}) } },
-    { status },
+    { status, headers: { ...NO_STORE } },
   );
 }
 

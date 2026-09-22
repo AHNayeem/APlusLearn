@@ -11,17 +11,14 @@ Every numbered section of `docs/Project.md`, mapped to what implements it.
 - **Phase 2/3** — deliberately deferred, with the architecture in place
 
 Verified on a seeded database: `bun run lint` (clean) → `bun run build`
-(clean) → `bun run test:integrations` (1202 passed, 1 failed) → `bun run qa`
-(814 passed, 0 failed).
+(clean) → `bun run test:integrations` (1222 passed, 0 failed, 1 skipped) →
+`bun run qa` (813 passed, 0 failed).
 
-The one remaining failure is an environment problem, not a code one.
-`STORAGE_ACCESS_KEY`, `STORAGE_SECRET_KEY` and `STORAGE_BUCKET` in this
-machine's `.env.local` are still the literal placeholder `...`; the endpoint is
-reachable and is a real S3-compatible store, and it answers a signed request
-with HTTP 403 `InvalidAccessKeyId` for *any* bucket name, including one that
-does not exist — which is authentication being refused before a bucket is ever
-looked up. Filling those three variables in is the whole fix; no application
-code is involved.
+`qa`'s assertion count varies by one or two between runs: several sections
+assert conditionally on the fixtures still in the database, and the suite
+consumes one seeded `COMPLETED` lesson per run for the no-show happy path. Zero
+failures is the signal, not the total. Run `bun run seed` when the pool runs
+down — the suite says so when it does.
 
 `qa` was run against a server using the local storage fallback
 (`STORAGE_PROVIDER=development`), which is what let the profile-photo section
@@ -665,6 +662,32 @@ no queue or worker process.
 | Independent | One job failing is reported, not propagated — `/api/cron/all` still runs the rest | Implemented |
 | Deployment-agnostic | `vercel.json` declares the Vercel entries; crontab, Kubernetes CronJob or a CI workflow reach the same endpoint | Implemented |
 | Audited | A run that changed something, or failed, writes `SCHEDULED_JOB_RUN`; a quiet sweep does not, so the trail stays readable | Implemented |
+
+## 49. Progressive Web App
+
+Not a numbered requirement of `docs/Project.md` — added so the marketplace
+installs to a home screen and degrades honestly when the network goes. Full
+design notes in [`docs/PWA.md`](PWA.md).
+
+| Requirement | Implementation | Status |
+|---|---|---|
+| Web app manifest | `src/app/manifest.js` → `/manifest.webmanifest`. Name, description and theme colour come from `getAppConfig()`, so rebranding reaches an installed copy; revalidates hourly like `robots.js` | Implemented |
+| Icons | `public/icons/*` — 192 and 512 in both `any` and `maskable`, plus a 180 opaque Apple touch icon. Generated from `public/icon.svg` by `scripts/pwa-icons.mjs`, which measures the mark's ink and centres it in the maskable safe zone | Implemented |
+| Service worker | `public/sw.js` — hand-written allowlist, no package and no generated precache manifest. Registered by `src/components/pwa/ServiceWorkerManager.jsx` in production only | Implemented |
+| Installability | Manifest, icons, `fetch` handler, scope `/`, `display: standalone`. HTTPS is already enforced for production by `lib/config/env.js` | Implemented |
+| Offline fallback | `/offline`, pre-cached at install with `credentials: "omit"` so the stored copy was rendered for nobody. Works with no JavaScript; the worker also pre-caches the stylesheet the page names | Implemented |
+| Static caching | Cache-first for `/_next/static/**`, `public/` files matched by extension, and `/_next/image` **only** when its `url=` is a local path. Capped at 160 entries, trimmed oldest-first | Implemented |
+| Private-data protection | `/api/**` is refused unconditionally and first; navigations are network-only and never stored; RSC payloads fall through unhandled. A second gate inspects the *response* and refuses anything `no-store`, `private`, or varying on `Cookie` | Implemented |
+| API cacheability | `ok`/`fail`/`noContent` now send `Cache-Control: no-store`, closing heuristic caching by a browser, proxy or CDN. The binary routes keep the headers they reason about individually (§16, §18) | Implemented |
+| Update strategy | New workers wait; nothing calls `skipWaiting()` and nothing reloads. `activate` drops older `aplus-` caches and claims uncontrolled pages. The registrar re-checks hourly and on tab focus. Navigations are network-first, so a stale worker is a stale *policy*, never stale code | Implemented |
+| Offline mutations | Deliberately absent. No offline database, no queued bookings or payments — a payment a person believes succeeded because it was queued locally is worse than one that plainly failed | Not applicable |
+| iOS support | Apple touch icon, legacy `apple-mobile-web-app-capable` alongside Next's standardised tag, `status-bar-style: default` so no sticky header slides under the clock | Partial — see below |
+
+**iOS limitations, not worked around because they cannot be:** no
+`beforeinstallprompt`, so no custom install button on Safari; Web Push only for
+a copy already on the home screen (iOS 16.4+); and Safari evicts all storage,
+service-worker caches included, after roughly seven days without use, so an
+installed copy re-downloads its shell after a quiet week.
 
 ---
 

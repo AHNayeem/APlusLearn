@@ -17,6 +17,7 @@ Package manager is **bun** (`bun.lock`, `packageManager: bun@1.3.12`); npm works
 | `bun run seed:keep` | Add only missing seed data |
 | `bun run qa` | End-to-end API suite over real HTTP — **requires `bun run dev` running in another terminal** |
 | `bun run test:integrations` | Provider adapters and DB-backed service rules, with `fetch` stubbed — no third-party service is contacted |
+| `node scripts/pwa-icons.mjs` | Regenerate `public/icons/*` from `public/icon.svg` after a rebrand. Outputs are committed; no build step runs this |
 
 Two suites, no unit-test runner. Both are single sequential scripts with no filter flag —
 to run one area, comment out `section(...)` blocks.
@@ -183,3 +184,14 @@ its implementation and status — update it when behaviour changes.
 [APLUS_LEARN_PHASE2_IMPLEMENTATION_AUDIT.md](APLUS_LEARN_PHASE2_IMPLEMENTATION_AUDIT.md) audits all
 twelve §41 Phase 2 features, and is where the specification gaps and their
 configurable defaults are listed.
+[docs/PWA.md](docs/PWA.md) covers the service worker: its caching allowlist,
+what is deliberately never cached, offline behaviour and the update strategy.
+
+**The service worker is an allowlist, and `/api/**` is refused first and
+unconditionally.** A request matching no rule is never passed to `respondWith`
+at all. Navigations are network-only and never stored; `/offline` is the single
+HTML document in any cache, and it is fetched with `credentials: "omit"`.
+Anything that would cache a new kind of response has to answer why it is not
+somebody's booking, payment, message or verification document. The API envelope
+(`ok`/`fail`/`noContent`) sends `Cache-Control: no-store` for the same reason;
+the binary routes that build a `Response` directly keep their own headers.
