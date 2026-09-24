@@ -35,7 +35,7 @@ export const POST = routeHandler(
 
     // Twelve looks a minute is more than the page's backoff ever needs and
     // far less than a loop could do damage with.
-    enforceRateLimit(`payment-reconcile:${params.id}`, { limit: 12, windowMs: 60_000 });
+    await enforceRateLimit(`payment-reconcile:${params.id}`, { limit: 12, windowMs: 60_000 });
 
     const result = await settlePaymentFromProvider(params.id, { source: "return-page" });
 

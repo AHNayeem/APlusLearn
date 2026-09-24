@@ -106,6 +106,36 @@ export function invalidateSettingsCache() {
   cache.expiresAt = 0;
 }
 
+/**
+ * The settings document, shaped for the admin console's own client bundle.
+ *
+ * Everything in the console's panels is operator-facing and belongs there —
+ * except the stored `BrandAsset` records, of which the branding screen needs
+ * only the dimensions, the size and when it was uploaded to draw its
+ * "Current: 512×128 px, 20 KB" line. The storage key and the uploader's user
+ * id are internal identifiers with no job on a screen, so they stay on the
+ * server even behind `ADMIN_SETTINGS_MANAGE`: the narrowest thing that works
+ * is the right thing to hand a browser (§16, §36).
+ */
+export function adminSettingsView(settings) {
+  const branding = { ...settings.branding };
+
+  for (const key of BRANDING_ASSET_KEYS) {
+    const asset = branding[key];
+    branding[key] = asset
+      ? {
+          contentType: asset.contentType,
+          width: asset.width,
+          height: asset.height,
+          sizeBytes: asset.sizeBytes,
+          uploadedAt: asset.uploadedAt,
+        }
+      : null;
+  }
+
+  return { ...settings, branding };
+}
+
 /* --- Presentation view ------------------------------------------------------ */
 
 /**
@@ -125,6 +155,19 @@ function assetUrl(key, asset) {
  * Blank optional fields are resolved here — once — so no component has to
  * remember that "the OG title falls back to the meta title, which falls back
  * to the app name and tagline" (§19).
+ *
+ * What this deliberately does *not* carry is the stored `BrandAsset` record
+ * behind each logo. This object is handed to `SiteHeader` and `SiteFooter`,
+ * which are client components, so everything in it is serialised into the
+ * HTML of every page — including unauthenticated ones. A `storageKey`, the
+ * original `fileName`, the byte size and the `uploadedBy` administrator's id
+ * are internal identifiers with no public purpose, and publishing them on the
+ * homepage is a disclosure rather than a feature. Each asset is exposed as
+ * exactly what the public UI needs: a URL (§16, §36).
+ *
+ * The admin branding screen reads the settings document itself, server-side
+ * and behind `ADMIN_SETTINGS_MANAGE`, which is where those file details
+ * belong and where they still are.
  */
 export function resolveAppConfig(settings) {
   const s = withDefaults(settings ?? {});
@@ -147,8 +190,6 @@ export function resolveAppConfig(settings) {
       tagline,
       description,
       ...assets,
-      /** The raw records, for the admin panel's preview and file details. */
-      files: Object.fromEntries(BRANDING_ASSET_KEYS.map((key) => [key, branding[key] ?? null])),
     },
     theme,
     seo: {

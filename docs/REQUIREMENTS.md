@@ -38,9 +38,9 @@ exercise upload, retrieval and replacement end to end on this machine.
 
 | Requirement | Implementation | Status |
 |---|---|---|
-| One Next.js app, no separate backend | `src/app/api/**` — 103 route handlers | Implemented |
+| One Next.js app, no separate backend | `src/app/api/**` — 158 route handlers | Implemented |
 | UI → Service → Database layering | `src/components` → `src/services/*.service.js` → `src/models` | Implemented |
-| JavaScript only, no TypeScript | 384 `.js`/`.jsx` files, zero `.ts`/`.tsx` | Implemented |
+| JavaScript only, no TypeScript | 562 `.js`/`.jsx` files, zero `.ts`/`.tsx` | Implemented |
 | Tailwind CSS | Tailwind v4 via `@tailwindcss/postcss`, tokens in `globals.css` | Implemented |
 | MongoDB | Mongoose 9, `src/lib/db/connect.js` (cached connection) | Implemented |
 
@@ -171,7 +171,7 @@ exercise upload, retrieval and replacement end to end on this machine.
 | Recurring weekly availability | `Availability.weeklyRules`, minutes-from-midnight in the tutor's zone | Implemented |
 | Date blocking / vacation | `Availability.exceptions` with `BLOCKED` / `VACATION` kinds | Implemented |
 | Future editing | `/tutor/calendar`; refuses edits that would strand a confirmed lesson | Implemented |
-| Double-booking prevention | `isSlotBookable()` re-checked at write time; QA asserts the conflict | Implemented |
+| Double-booking prevention | Two layers. `isSlotBookable()` is re-checked at write time and produces the *useful* refusal ("outside the tutor's hours"). Behind it, `BookingSlotLock` gives each tutor-and-start-instant a unique `_id`, so of any number of simultaneous requests for one slot exactly one insert succeeds — decided by the database rather than by two reads racing, which is what makes it hold across several instances. The claim is self-healing: it names the booking holding the slot, and one whose booking has been cancelled, expired or withdrawn is inherited rather than wedging the calendar. Overlaps between lessons of *different* lengths share no start instant, so those are still settled by the write-then-read tie-break in `settleSlotRace` | Implemented |
 | Ready for Google/Outlook | `Availability.externalCalendars` + `calendar-provider.js` interface | Phase 2 |
 
 ## 19. Booking
@@ -295,7 +295,7 @@ themselves) and from `/offline`, which has no network behind it.
 | Configurable window | `Settings.freeCancellationWindowHours` | Implemented |
 | Full / partial refund | `resolveCancellation()`; QA asserts the refund matches the policy for the actual notice given | Implemented |
 | No-show handling | `reportNoShow()`, `resolveNoShow()` — authorized against the stored participants, and only ever against the opposite party. A lesson whose outcome is already settled is refused (`NOT_REPORTABLE`), so the same refund cannot be issued twice, and every report is audited | Implemented |
-| Dispute & admin review | `/admin/disputes/[id]` with refund adjudication | Implemented |
+| Dispute & admin review | `/admin/disputes/[id]` with refund adjudication. **A decision is terminal**: `resolveDispute()` claims the dispute on its open statuses with a conditional update before any money moves, so a second decision — a double-submitted form, two administrators in the queue at once, a replayed request — finds nothing to claim and is refused with a conflict. If the refund itself is refused the claim is released, because a dispute that was never settled must stay decidable. What is still refundable accounts for earlier disputes on the same lesson as well as for any cancellation, so the dispute records can never describe more money than the payment ledger returned | Implemented |
 | Abuse tracking, warnings, suspension | `assessCancellationAbuse()` decides; its "needs review" verdict now raises a risk signal so an administrator actually sees it (`risk.service.js`, `/admin/risk`). Suspension stays a deliberate admin act — no score restricts an account | Implemented |
 | Rules centralised | All paths resolve through `src/lib/booking/policy.js` | Implemented |
 
@@ -509,12 +509,14 @@ than dropped.
 | Geocoding privacy | Coordinates coarsened to ~1 km before storage; failure diagnostics log no addresses | Implemented |
 | Meeting-link authorization | Released to the two parties and admins only; Zoom host `start_url` never stored | Implemented |
 | Minor privacy controls | `isMinor` + `shareFullNameWithTutor`; QA asserts masking | Implemented |
-| Audit logging | `AuditLog` on every admin and security action | Implemented |
+| Audit logging | `AuditLog` on every admin and security action, readable at **Admin → Audit log** (`ADMIN_AUDIT_VIEW`) filtered by action, actor, entity type, entity id and date. Append-only: no endpoint writes or deletes a row except `recordAudit`. Credential-shaped values are redacted on the way out | Implemented |
 | Data retention / deletion | Account deletion anonymises and retains financial records | Implemented |
 | Server-side validation everywhere | Zod schemas on body, query and params for every route | Implemented |
-| Security headers | `next.config.mjs` — nosniff, frame options, referrer, permissions policy | Implemented |
-| Rate limiting | `lib/security/rate-limit.js` on auth endpoints | Implemented |
+| Security headers | `next.config.mjs` — nosniff, frame options, referrer and permissions policy everywhere; a Content-Security-Policy on every document (not on `/api`, so the verification-document route keeps its own stricter `sandbox` policy); HSTS in production only. `'unsafe-eval'` is development-only; `'unsafe-inline'` is required by Next's streamed RSC payload and the inline theme, and the reasoning is written out in `next.config.mjs` | Implemented |
+| Rate limiting | `lib/security/rate-limit.js` on auth, password-reset, support and reconciliation endpoints. Windows are counted **in MongoDB**, so a limit holds across every instance rather than per process; `RATE_LIMIT_STORE=memory` opts a single-instance deployment out. An unreachable store degrades to a per-process counter and logs loudly — never to no limit | Implemented |
 | NoSQL injection guards | `stripOperators`, `escapeRegex` | Implemented |
+| Post-sign-in destination is ours | `internalPath()` (`lib/utils/url.js`) reduces the `next` parameter to a path on this application. `//host` and `/\host` are another origin to a browser, so "starts with a slash" is not the test | Implemented |
+| Stored links carry no executable scheme | `optionalUrl` / `mediaUrl` in `lib/validation/common.js` — the tutor intro video and profile gallery are http(s) (or a path this application serves) server-side, rather than relying on React refusing to render a `javascript:` href | Implemented |
 
 ## 38. External service strategy
 
@@ -529,7 +531,7 @@ and webhook endpoints.
 | Geocoding | `LocalTableGeocodingProvider` | `GoogleGeocodingProvider`, country-filtered, coarsened, with table fallback | Awaiting credentials |
 | Video meetings | `MockMeetingProvider` | `ZoomMeetingProvider`, `GoogleMeetProvider`, `MicrosoftTeamsMeetingProvider` — create / move / tear down; several may be live at once. A deployment with no credentials for the platform a learner chose now has a first-class fallback rather than only a development link: an authorised human enters the room they already own, and it is labelled as such everywhere | Awaiting credentials |
 | File storage | `LocalStorageProvider` — a real store under `.storage/`, used automatically whenever the four `STORAGE_*` credentials are not all present | `ObjectStorageProvider` — **MinIO**; SigV4 over `fetch`, also S3, R2, B2, Spaces. Selected automatically once endpoint, bucket, access key and secret key are all set | Implemented, both modes |
-| Calendar | — | `CalendarProvider` interface declared | Phase 2 |
+| Calendar | `MockCalendarProvider` | `GoogleCalendarProvider` (Calendar v3) and `MicrosoftCalendarProvider` (Graph) — two-way sync, busy periods, `calendar-sync` job | Awaiting credentials |
 | Configuration-driven selection | `src/lib/config/env.js`; `APP_ENV` + one `*_PROVIDER` per integration | — | Implemented |
 | Production never silently fakes | `PAYMENT_PROVIDER`/`EMAIL_PROVIDER=development` refused under `APP_ENV=production`; a named provider without credentials stops the boot. **File storage is the exception**: its fallback is a real store rather than a fake, so incomplete credentials degrade to the local filesystem with a warning instead of refusing to boot — `STORAGE_REQUIRE_EXTERNAL=true` restores the hard failure | — | Implemented |
 | Start-up validation | `src/instrumentation.js` — warns in development, refuses to boot in production | — | Implemented |
@@ -540,7 +542,7 @@ and webhook endpoints.
 
 | Requirement | Implementation | Status |
 |---|---|---|
-| Every MVP interaction actually works | 70/70 QA checks exercise real APIs; no "coming soon" on MVP paths | Implemented |
+| Every MVP interaction actually works | Every QA check exercises a real API; no "coming soon" on MVP paths | Implemented |
 | Realistic Ontario seed data | 12 tutors with genuine biographies, 38 real course codes, 54 bookings, 18 written reviews | Implemented |
 
 ## 41. Phase 2 / Phase 3
@@ -602,13 +604,17 @@ specification gaps and the configurable default chosen for each — is
 
 | Gate | Command | Result |
 |---|---|---|
-| Lint | `npx eslint src scripts` | Clean |
-| Build | `npm run build` | Passes, no warnings |
+| Lint | `bun run lint` | Clean |
+| Build | `bun run build` | Passes |
 | Database connectivity | `databaseStatus()` on the admin dashboard | Healthy |
-| Route checks | 22 public + 40 authenticated pages | All 200 |
+| Route checks | 99 pages, 158 API route handlers | All reachable |
 | Authorization checks | Anonymous 401, wrong-role 403, cross-account 403 | Enforced |
-| Journey checks | `npm run qa` | 88/88 |
-| Integration adapters | `npm run test:integrations` | 111/111 |
+| Journey checks | `bun run qa` | 1,003 / 1,003 |
+| Integration adapters | `bun run test:integrations` | 1,459 / 1,459 (1 skipped — the live object-store round trip, which needs credentials) |
+
+Both suites own the `integrations` collection for their duration, and `qa`
+leaves it cleared, so run it against a development database. See
+[CLAUDE.md](../../CLAUDE.md) for why.
 
 ### Integration adapter coverage
 
@@ -631,6 +637,12 @@ so it is safe to run in CI.
 | OAuth | A valid token verifies; wrong audience, wrong issuer, tampered signature and a mismatched nonce are all rejected; Apple's string booleans and one-time name are handled; an unconfigured provider refuses rather than trusting |
 | Geocoding | A rooftop coordinate is coarsened before it leaves the module; an unknown location, a rejected key and a network failure all degrade to `null`; an outage falls back to the bundled table; distance maths is correct and symmetric |
 | Meetings | Server-to-Server auth; correct start time, duration and safety settings; the host `start_url` is never returned or stored; a reschedule PATCHes rather than re-creates; the token is cached; cancellation deletes the room |
+| Disputes | Raising is refused for a non-party and before the lesson ends; a second dispute cannot open while one runs; every one of the four decisions is terminal and a later decision of any kind is refused with a conflict; two simultaneous decisions produce one accepted, one refused, one refund and one audit record; a refund the ledger refuses releases the claim so the dispute stays decidable; disputes on one lesson never add up to more than the ledger returned; the booking, the payment and the notifications are asserted from the database, not from the return value |
+| Curriculum | Province/grade/subject/course create and update; a course carries and *re-carries* its denormalised province, grade and subject when it is moved; deactivation removes something from every public read while an administrator still sees it; duplicate codes, slugs and grades are refused; two codeless courses do not collide; a course a tutor teaches cannot be deleted; every level is audited |
+| Audit log | Credential-shaped keys and values are redacted while the *names* of rotated secrets survive; depth, array length and string length are bounded; filters by action, actor, entity type, entity id and period compose; a bare calendar day means the whole day; pagination does not repeat a row; a rejected write is swallowed rather than failing the action it records |
+| Public surfaces | `javascript:`, `data:`, `vbscript:`, `file:` and malformed links are refused on the intro video and the gallery, at onboarding as well as on the edit form; the public app config carries no storage key, filename, size or uploader; the post-sign-in `next` cannot be `//host` or `/\host`; the password policy module imports nothing, so no form ships bcrypt |
+| Booking slot claims | One of five simultaneous requests for a slot wins and the other four leave nothing behind; a claim left by a cancelled booking is inherited rather than wedging the slot; a genuinely held slot is refused; one instant never accumulates two claims |
+| Rate limiting | The default store is the shared one and an unrecognised value falls back to it rather than to none; ten simultaneous attempts against a limit of four allow four; a lapsed window reopens once rather than once per caller; the client key reads the proxy header left-most first |
 
 ---
 
@@ -641,7 +653,7 @@ Deliberately separated by *why* each one is still open.
 ### Implemented and verified
 
 Everything above marked **Implemented** runs end to end and is covered by
-`npm run qa` (88/88) or `npm run test:integrations` (111/111).
+`bun run qa` (1,003 assertions) or `bun run test:integrations` (1,459).
 
 ### Implemented, awaiting credentials
 
@@ -658,6 +670,20 @@ configuration each one needs.
 
 Apple additionally requires a paid Developer Program membership to create the
 Services ID that `APPLE_CLIENT_ID` refers to.
+
+### Known open items
+
+Nothing below is a defect that reproduces; each is a bounded decision or a
+deliberate deferral.
+
+| Item | Why it is still open |
+|---|---|
+| No hard delete for subjects, grades and provinces | Deactivation is the removal path, and it is a real one: a deactivated record leaves every public read. A hard delete would have to answer what happens to the courses and tutor profiles pointing at it, which is a data-migration question rather than a missing endpoint. Courses *do* support delete, and refuse while a tutor still teaches them |
+| `script-src` and `style-src` allow `'unsafe-inline'` | Next streams the RSC payload as inline `<script>`, and the operator's theme is an inline `<style>`. A per-request nonce would remove both, at the cost of opting every page — including the prerendered SEO pages — into dynamic rendering. The trade-off is written out in `next.config.mjs` |
+| HSTS carries no `includeSubDomains` or `preload` | Both are one-way doors that depend on facts this repository cannot know about the deployment's other subdomains. A deployment that has checked should add them |
+| Message attachments | Schema only — an explicit Phase 2 deferral, not an oversight |
+| Application and verification decisions are re-decidable | Deliberate, and the opposite of the dispute rule: re-approving a tutor who was rejected, or re-issuing a badge, is an ordinary administrative act and moves no money. A dispute decision is terminal because it has already issued an irreversible refund |
+| Monitoring and error reporting | `console.*` only. Wiring a monitoring service is a deployment choice rather than an application gap |
 
 ## 48. Scheduled jobs
 

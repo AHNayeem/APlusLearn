@@ -2,6 +2,9 @@ import "server-only";
 import { Dispute, Booking, User } from "@/models";
 import {
   DISPUTE_STATUS,
+  DISPUTE_STATUS_LABELS,
+  OPEN_DISPUTE_STATUSES,
+  RESOLVED_DISPUTE_STATUSES,
   BOOKING_STATUS,
   NOTIFICATION_TYPES,
   AUDIT_ACTIONS,
@@ -30,7 +33,7 @@ export async function createDispute(input, actor) {
 
   const existing = await Dispute.findOne({
     bookingId: booking._id,
-    status: { $in: [DISPUTE_STATUS.OPEN, DISPUTE_STATUS.UNDER_REVIEW] },
+    status: { $in: OPEN_DISPUTE_STATUSES },
   }).lean();
   if (existing) throw new ConflictError("A dispute for this lesson is already open.");
 
@@ -38,8 +41,7 @@ export async function createDispute(input, actor) {
     throw new BusinessRuleError("You can open a dispute once the lesson has finished.");
   }
 
-  const alreadyRefunded = booking.cancellation?.refundCents ?? 0;
-  const maxRefundable = booking.price.totalCents - alreadyRefunded;
+  const maxRefundable = await refundableOn(booking);
   if (input.requestedRefundCents && input.requestedRefundCents > maxRefundable) {
     throw new BusinessRuleError(
       `The most that can be refunded on this lesson is ${formatMoney(maxRefundable)}.`,
@@ -139,51 +141,128 @@ export async function addDisputeNote(id, note, admin) {
   return toPlain(dispute);
 }
 
+/**
+ * What is still refundable on the lesson behind a dispute.
+ *
+ * Both halves matter. `cancellation.refundCents` is what a cancellation or a
+ * no-show already sent back, and the disputes settled against the same
+ * booking are the other way money leaves it — an earlier partial refund has
+ * to narrow what a later decision may award, or two disputes can between them
+ * refund more than was ever collected. The payment ledger refuses that
+ * outright (`REFUND_EXCEEDS_BALANCE`), which protects the money; this is what
+ * keeps the dispute records agreeing with it.
+ */
+async function refundableOn(booking, excludeDisputeId = null) {
+  const settled = await Dispute.find({
+    bookingId: booking._id,
+    ...(excludeDisputeId ? { _id: { $ne: excludeDisputeId } } : {}),
+    refundIssuedCents: { $gt: 0 },
+  })
+    .select("refundIssuedCents")
+    .lean();
+
+  const byDispute = settled.reduce((total, d) => total + (d.refundIssuedCents ?? 0), 0);
+  const byCancellation = booking.cancellation?.refundCents ?? 0;
+
+  return Math.max(0, booking.price.totalCents - byCancellation - byDispute);
+}
+
+/**
+ * Decide a dispute (§26).
+ *
+ * A decision is terminal. The dispute is claimed on its *open* statuses with
+ * a conditional update before any money moves, so a second decision — a
+ * double-submitted form, two administrators in the queue at once, a replayed
+ * request — finds nothing to claim and is refused. That ordering is the whole
+ * guard: checking the status and then saving would let two concurrent calls
+ * both read `UNDER_REVIEW` and both go on to refund.
+ *
+ * If the refund itself fails the claim is released, because a dispute that
+ * was never actually settled must stay decidable. Nothing else is touched
+ * before the refund succeeds, so a refusal leaves the booking, the ledger and
+ * the dispute exactly as they were.
+ */
 export async function resolveDispute(id, { resolution, refundCents, note }, admin) {
   const dispute = await Dispute.findById(id);
   if (!dispute) throw new NotFoundError("That dispute no longer exists.");
 
+  if (RESOLVED_DISPUTE_STATUSES.includes(dispute.status)) {
+    throw alreadyDecided(dispute);
+  }
+
   const booking = await Booking.findById(dispute.bookingId);
   if (!booking) throw new NotFoundError("That lesson no longer exists.");
 
-  let issued = 0;
-  const alreadyRefunded = booking.cancellation?.refundCents ?? 0;
-  const refundable = booking.price.totalCents - alreadyRefunded;
+  const status = DISPUTE_STATUS[resolution] ?? DISPUTE_STATUS.REJECTED;
+  const refundable = await refundableOn(booking, dispute._id);
 
+  let issued = 0;
   if (resolution === "RESOLVED_REFUND") issued = refundable;
   else if (resolution === "RESOLVED_PARTIAL_REFUND") issued = Math.min(refundCents ?? 0, refundable);
 
-  if (issued > 0 && booking.paymentId) {
-    await refundPayment(booking.paymentId, {
-      amountCents: issued,
-      reason: `Dispute ${dispute.reference} — ${note}`,
-      issuedBy: admin.id,
-    });
+  // The claim, not the check above, is what makes this safe to run twice at
+  // once. Whichever request changes the status is the one that decides; the
+  // other gets nothing back and is refused below.
+  const claimed = await Dispute.findOneAndUpdate(
+    { _id: dispute._id, status: { $in: OPEN_DISPUTE_STATUSES } },
+    {
+      $set: {
+        status,
+        resolvedAt: new Date(),
+        resolvedBy: admin.id,
+        resolutionNote: note,
+        refundIssuedCents: 0,
+      },
+    },
+    { returnDocument: "after" },
+  );
+
+  if (!claimed) {
+    throw alreadyDecided(await Dispute.findById(id).select("status").lean());
   }
 
-  dispute.status = DISPUTE_STATUS[resolution] ?? DISPUTE_STATUS.REJECTED;
-  dispute.resolvedAt = new Date();
-  dispute.resolvedBy = admin.id;
-  dispute.resolutionNote = note;
-  dispute.refundIssuedCents = issued;
-  await dispute.save();
+  if (issued > 0 && booking.paymentId) {
+    try {
+      await refundPayment(booking.paymentId, {
+        amountCents: issued,
+        reason: `Dispute ${dispute.reference} — ${note}`,
+        issuedBy: admin.id,
+      });
+    } catch (error) {
+      // Nothing was sent back, so the decision never happened. Put the
+      // dispute where it was and let the administrator try again.
+      await Dispute.updateOne(
+        { _id: dispute._id, status },
+        {
+          $set: { status: dispute.status, refundIssuedCents: dispute.refundIssuedCents ?? 0 },
+          $unset: { resolvedAt: "", resolvedBy: "", resolutionNote: "" },
+        },
+      );
+      throw error;
+    }
+
+    await Dispute.updateOne({ _id: dispute._id }, { $set: { refundIssuedCents: issued } });
+    claimed.refundIssuedCents = issued;
+  }
 
   // Return the booking to a settled state so it leaves the disputed queue.
+  // `issued >= refundable` is "everything that was still collectable has now
+  // gone back" — which is the same test as "fully refunded" but stated
+  // against what was actually left, so a second dispute awarding the
+  // remainder still settles the lesson as cancelled.
   booking.status =
-    issued >= booking.price.totalCents
-      ? BOOKING_STATUS.CANCELLED_BY_ADMIN
-      : BOOKING_STATUS.COMPLETED;
+    issued >= refundable ? BOOKING_STATUS.CANCELLED_BY_ADMIN : BOOKING_STATUS.COMPLETED;
   await booking.save();
 
-  for (const userId of [dispute.raisedBy, dispute.againstUserId]) {
+  for (const userId of [claimed.raisedBy, claimed.againstUserId]) {
     await notify({
       userId,
       type: NOTIFICATION_TYPES.DISPUTE_UPDATED,
-      title: `Dispute ${dispute.reference} resolved`,
+      title: `Dispute ${claimed.reference} resolved`,
       body: issued > 0 ? `${formatMoney(issued)} has been refunded. ${note}` : note,
       href: String(userId) === String(booking.tutorUserId) ? "/tutor/bookings" : "/bookings",
       entityType: "Dispute",
-      entityId: dispute._id,
+      entityId: claimed._id,
     });
   }
 
@@ -191,9 +270,17 @@ export async function resolveDispute(id, { resolution, refundCents, note }, admi
     actor: admin,
     action: AUDIT_ACTIONS.DISPUTE_RESOLVED,
     entityType: "Dispute",
-    entityId: dispute._id,
+    entityId: claimed._id,
     metadata: { resolution, refundCents: issued, note },
   });
 
-  return toPlain(dispute);
+  return toPlain(claimed);
+}
+
+/** One refusal, so both the pre-check and the lost claim read the same. */
+function alreadyDecided(dispute) {
+  return new ConflictError(
+    `This dispute was already decided (${DISPUTE_STATUS_LABELS[dispute?.status] ?? "resolved"}). ` +
+      "A decision is final — open a new dispute if something else needs looking at.",
+  );
 }

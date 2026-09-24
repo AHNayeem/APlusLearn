@@ -1,5 +1,5 @@
 import "server-only";
-import { StudentProfile, Booking, Grade, Favourite } from "@/models";
+import { StudentProfile, Booking, Grade, Favourite, TutorProfile } from "@/models";
 import { ROLES, BOOKING_STATUS } from "@/constants";
 import { NotFoundError, AuthorizationError, BusinessRuleError } from "@/lib/api/errors";
 import { toPlain, compact } from "@/lib/utils/serialize";
@@ -155,6 +155,14 @@ export async function listFavourites(actor) {
 }
 
 export async function addFavourite({ tutorProfileId, note }, actor) {
+  // The id is the client's to name, so it is checked against the database
+  // rather than trusted. Without this a favourite can be stored pointing at
+  // nothing: the write answers 201, `listFavourites` drops the dangling row
+  // on the way out, and the saved tutor never appears — which reads as the
+  // feature being broken rather than as the request having been wrong.
+  const exists = await TutorProfile.exists({ _id: tutorProfileId });
+  if (!exists) throw new NotFoundError("That tutor is no longer available.");
+
   const favourite = await Favourite.findOneAndUpdate(
     { userId: actor.id, tutorProfileId },
     { $setOnInsert: { userId: actor.id, tutorProfileId }, $set: compact({ note }) },

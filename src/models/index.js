@@ -10,7 +10,7 @@ export { TutorApplication, ONBOARDING_STEPS, ONBOARDING_STEP_META } from "./Tuto
 export { VerificationRecord, VerificationDocument } from "./Verification.js";
 export { StudentProfile } from "./StudentProfile.js";
 export { Availability } from "./Availability.js";
-export { Booking } from "./Booking.js";
+export { Booking, BookingSlotLock } from "./Booking.js";
 export { Payment, Payout, PayoutAccount } from "./Payment.js";
 export { WebhookEvent } from "./WebhookEvent.js";
 export { Conversation, Message } from "./Messaging.js";
@@ -26,3 +26,4 @@ export { TutorPackage, PackagePurchase } from "./Package.js";
 export { GroupSession, GroupEnrolment } from "./GroupSession.js";
 export { TutorPromotion } from "./Promotion.js";
 export { RiskCase } from "./Risk.js";
+export { RateLimitWindow } from "./RateLimit.js";

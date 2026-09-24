@@ -5500,6 +5500,894 @@ async function main() {
   check("a high-risk threshold below the review threshold is refused",
     riskDisabled.status === 422);
 
+
+  // --- Curriculum management -----------------------------------------------
+  //
+  // The whole of discovery reads this hierarchy, and every write to it is
+  // behind one permission. Four things are asserted: that the read side is
+  // genuinely public, that the write side is genuinely not, that deactivation
+  // is a real removal from every public surface (it is the only removal path
+  // provinces, grades and subjects have), and that the shapes are bounded
+  // server-side rather than by the admin form.
+  //
+  // Subjects and grades have no delete endpoint by design, so the fixtures
+  // this section creates are deactivated rather than removed — invisible
+  // everywhere public, and cleared by the next `bun run seed`. Courses do
+  // support delete, and this section deletes the one it makes.
+  section("Curriculum management");
+
+  const qaTag = Date.now().toString(36).toUpperCase();
+
+  const publicProvinces = await anon("/api/curriculum/provinces");
+  check("provinces are readable without an account",
+    publicProvinces.ok && publicProvinces.payload.data.provinces.length > 0);
+  check("and every one offered to a visitor is active",
+    publicProvinces.payload.data.provinces.every((p) => p.isActive !== false));
+
+  const allProvinces = await anon("/api/curriculum/provinces?all=true");
+  check("the 'coming soon' list can include inactive provinces",
+    allProvinces.ok &&
+      allProvinces.payload.data.provinces.length >= publicProvinces.payload.data.provinces.length);
+
+  const ontario = publicProvinces.payload.data.provinces.find((p) => p.code === "ON");
+  const publicGrades = await anon("/api/curriculum/grades?province=ON");
+  check("grades are readable without an account",
+    publicGrades.ok && publicGrades.payload.data.grades.length > 0);
+
+  const publicSubjects = await anon("/api/curriculum/subjects");
+  check("subjects are readable without an account",
+    publicSubjects.ok && publicSubjects.payload.data.subjects.length > 0);
+
+  const tree = await anon("/api/curriculum/tree?province=ON");
+  check("the whole curriculum tree comes back in one call",
+    tree.ok && tree.payload.data.province?.code === "ON" &&
+      tree.payload.data.grades.length > 0 && tree.payload.data.subjects.length > 0);
+
+  const badProvinceTree = await anon("/api/curriculum/tree?province=ZZ");
+  check("a province code that is not Canadian is refused, not guessed at",
+    badProvinceTree.status === 422, `status ${badProvinceTree.status}`);
+
+  // --- the write side is closed --------------------------------------------
+  const anonSubject = await anon("/api/admin/curriculum/subjects", {
+    method: "POST",
+    body: { name: `QA anonymous ${qaTag}` },
+  });
+  check("an anonymous request cannot create a subject", anonSubject.status === 401);
+
+  const parentSubject = await parent("/api/admin/curriculum/subjects", {
+    method: "POST",
+    body: { name: `QA parent ${qaTag}` },
+  });
+  check("a parent cannot create a subject", parentSubject.status === 403);
+
+  const tutorSubject = await tutor("/api/admin/curriculum/subjects", {
+    method: "POST",
+    body: { name: `QA tutor ${qaTag}` },
+  });
+  check("a tutor cannot create a subject", tutorSubject.status === 403);
+
+  const tutorCourse = await tutor("/api/admin/curriculum/courses", {
+    method: "POST",
+    body: {
+      provinceId: ontario.id,
+      gradeId: publicGrades.payload.data.grades[0].id,
+      subjectId: publicSubjects.payload.data.subjects[0].id,
+      name: `QA tutor course ${qaTag}`,
+    },
+  });
+  check("a tutor cannot create a course", tutorCourse.status === 403);
+
+  const tutorProvincePatch = await tutor(`/api/admin/curriculum/provinces/${ontario.id}`, {
+    method: "PATCH",
+    body: { isActive: false },
+  });
+  check("a tutor cannot deactivate a province", tutorProvincePatch.status === 403);
+
+  const parentCourseList = await parent("/api/admin/curriculum/courses");
+  check("the admin course table is closed to a parent", parentCourseList.status === 403);
+
+  // --- subjects -------------------------------------------------------------
+  const subjectName = `QA Fixture Subject ${qaTag}`;
+  const newSubject = await admin("/api/admin/curriculum/subjects", {
+    method: "POST",
+    body: { name: subjectName, description: "Created by the QA suite.", displayOrder: 190 },
+  });
+  check("an administrator can create a subject", newSubject.status === 201,
+    JSON.stringify(newSubject.payload?.error));
+  const subjectId = newSubject.payload?.data?.subject?.id;
+  check("it is given a slug derived from its name",
+    newSubject.payload?.data?.subject?.slug?.startsWith("qa-fixture-subject"));
+
+  const subjectsAfter = await anon("/api/curriculum/subjects");
+  check("and it is on the public list immediately, not after a cache expires",
+    subjectsAfter.payload.data.subjects.some((s) => s.id === subjectId));
+
+  const duplicateSubject = await admin("/api/admin/curriculum/subjects", {
+    method: "POST",
+    body: { name: subjectName },
+  });
+  check("a second subject with the same name is refused as a conflict",
+    duplicateSubject.status === 409, `status ${duplicateSubject.status}`);
+  check("and the refusal is the standard envelope, not a driver error",
+    duplicateSubject.payload?.error?.code === "CONFLICT" &&
+      !/E11000|MongoServerError/i.test(JSON.stringify(duplicateSubject.payload)));
+
+  const shortSubject = await admin("/api/admin/curriculum/subjects", {
+    method: "POST",
+    body: { name: "X" },
+  });
+  check("a subject name below the minimum length is refused", shortSubject.status === 422);
+  check("with a per-field error the form can render",
+    Object.keys(shortSubject.payload?.error?.details?.fieldErrors ?? {}).includes("name"));
+
+  const subjectPatched = await admin(`/api/admin/curriculum/subjects/${subjectId}`, {
+    method: "PATCH",
+    body: { isPopular: true },
+  });
+  check("an administrator can update a subject", subjectPatched.ok);
+  check("and the change is persisted",
+    subjectPatched.payload?.data?.subject?.isPopular === true);
+
+  const parentSubjectPatch = await parent(`/api/admin/curriculum/subjects/${subjectId}`, {
+    method: "PATCH",
+    body: { isPopular: false },
+  });
+  check("a parent cannot update a subject", parentSubjectPatch.status === 403);
+
+  const missingSubject = await admin(
+    "/api/admin/curriculum/subjects/000000000000000000000000",
+    { method: "PATCH", body: { isPopular: true } },
+  );
+  check("updating a subject that does not exist is a 404", missingSubject.status === 404);
+
+  const malformedSubjectId = await admin("/api/admin/curriculum/subjects/not-an-id", {
+    method: "PATCH",
+    body: { isPopular: true },
+  });
+  check("and a malformed id is refused before anything is looked up",
+    malformedSubjectId.status === 422);
+
+  // --- grades ---------------------------------------------------------------
+  const newGrade = await admin("/api/admin/curriculum/grades", {
+    method: "POST",
+    body: { provinceId: ontario.id, name: `QA Grade ${qaTag}`, level: 13, stage: "SECONDARY" },
+  });
+  check("an administrator can create a grade", newGrade.status === 201,
+    JSON.stringify(newGrade.payload?.error));
+  const gradeId = newGrade.payload?.data?.grade?.id;
+
+  const badStage = await admin("/api/admin/curriculum/grades", {
+    method: "POST",
+    body: { provinceId: ontario.id, name: `QA Bad ${qaTag}`, level: 9, stage: "UNIVERSITY" },
+  });
+  check("a grade stage outside the enumeration is refused", badStage.status === 422);
+
+  const outOfRangeLevel = await admin("/api/admin/curriculum/grades", {
+    method: "POST",
+    body: { provinceId: ontario.id, name: `QA High ${qaTag}`, level: 99, stage: "SECONDARY" },
+  });
+  check("a grade level above the boundary is refused", outOfRangeLevel.status === 422);
+
+  const gradeWithoutProvince = await admin("/api/admin/curriculum/grades", {
+    method: "POST",
+    body: { name: `QA Orphan ${qaTag}`, level: 5, stage: "ELEMENTARY" },
+  });
+  check("a grade with no province is refused", gradeWithoutProvince.status === 422);
+
+  const gradesWithFixture = await anon("/api/curriculum/grades?province=ON");
+  check("a new grade appears under its province",
+    gradesWithFixture.payload.data.grades.some((g) => g.id === gradeId));
+
+  await admin(`/api/admin/curriculum/grades/${gradeId}`, {
+    method: "PATCH",
+    body: { isActive: false },
+  });
+  const gradesAfterDeactivate = await anon("/api/curriculum/grades?province=ON");
+  check("deactivating a grade removes it from the public list",
+    !gradesAfterDeactivate.payload.data.grades.some((g) => g.id === gradeId));
+  check("and from the curriculum tree",
+    !(await anon("/api/curriculum/tree?province=ON")).payload.data.grades
+      .some((g) => g.id === gradeId));
+
+  // --- courses --------------------------------------------------------------
+  const activeGradeId = publicGrades.payload.data.grades[0].id;
+  const newCourse = await admin("/api/admin/curriculum/courses", {
+    method: "POST",
+    body: {
+      provinceId: ontario.id,
+      gradeId: activeGradeId,
+      subjectId: subjectId,
+      name: `QA Fixture Course ${qaTag}`,
+      code: `QAX${qaTag.slice(-2)}`,
+      stream: "University",
+      isActive: true,
+    },
+  });
+  check("an administrator can create a course", newCourse.status === 201,
+    JSON.stringify(newCourse.payload?.error));
+  const qaCourseId = newCourse.payload?.data?.course?.id;
+  check("a course copies the province, grade and subject it was filed under",
+    newCourse.payload?.data?.course?.provinceCode === "ON" &&
+      Boolean(newCourse.payload?.data?.course?.gradeSlug) &&
+      Boolean(newCourse.payload?.data?.course?.subjectSlug));
+
+  const duplicateCode = await admin("/api/admin/curriculum/courses", {
+    method: "POST",
+    body: {
+      provinceId: ontario.id,
+      gradeId: activeGradeId,
+      subjectId: subjectId,
+      name: `QA Different Name ${qaTag}`,
+      code: `QAX${qaTag.slice(-2)}`,
+    },
+  });
+  check("a course code cannot be reused inside a province",
+    duplicateCode.status === 409, `status ${duplicateCode.status}`);
+
+  const courseBadParents = await admin("/api/admin/curriculum/courses", {
+    method: "POST",
+    body: {
+      provinceId: "000000000000000000000000",
+      gradeId: activeGradeId,
+      subjectId: subjectId,
+      name: `QA Orphan Course ${qaTag}`,
+    },
+  });
+  check("a course cannot be filed under a province that does not exist",
+    courseBadParents.status === 404, `status ${courseBadParents.status}`);
+
+  const courseBadCode = await admin("/api/admin/curriculum/courses", {
+    method: "POST",
+    body: {
+      provinceId: ontario.id,
+      gradeId: activeGradeId,
+      subjectId: subjectId,
+      name: `QA Bad Code ${qaTag}`,
+      code: "nope!",
+    },
+  });
+  check("a malformed course code is refused", courseBadCode.status === 422);
+
+  const publicCourseSearch = await anon(`/api/curriculum/courses?q=QAX${qaTag.slice(-2)}`);
+  check("a new course is findable by code on the public API",
+    publicCourseSearch.payload?.data?.courses?.some((c) => c.id === qaCourseId));
+
+  await admin(`/api/admin/curriculum/courses/${qaCourseId}`, {
+    method: "PATCH",
+    body: { isActive: false },
+  });
+  const publicAfterDeactivate = await anon(`/api/curriculum/courses?q=QAX${qaTag.slice(-2)}`);
+  check("deactivating a course removes it from the public course list",
+    !(publicAfterDeactivate.payload?.data?.courses ?? []).some((c) => c.id === qaCourseId));
+
+  const adminSeesInactive = await admin(
+    `/api/admin/curriculum/courses?q=QAX${qaTag.slice(-2)}`,
+  );
+  check("but an administrator still sees it",
+    (adminSeesInactive.payload?.data?.courses ?? []).some((c) => c.id === qaCourseId));
+
+  const tutorDelete = await tutor(`/api/admin/curriculum/courses/${qaCourseId}`, {
+    method: "DELETE",
+  });
+  check("a tutor cannot delete a course", tutorDelete.status === 403);
+
+  const deleted = await admin(`/api/admin/curriculum/courses/${qaCourseId}`, {
+    method: "DELETE",
+  });
+  check("an administrator can delete a course nobody teaches", deleted.ok,
+    JSON.stringify(deleted.payload?.error));
+  check("and it is gone from the admin table",
+    !((await admin(`/api/admin/curriculum/courses?q=QAX${qaTag.slice(-2)}`))
+      .payload?.data?.courses ?? []).some((c) => c.id === qaCourseId));
+
+  const taughtCourse = await admin(`/api/admin/curriculum/courses/${courseId}`, {
+    method: "DELETE",
+  });
+  check("a course tutors still teach is refused rather than orphaning their profiles",
+    taughtCourse.status === 409, `status ${taughtCourse.status}`);
+
+  const deleteSubject = await admin(`/api/admin/curriculum/subjects/${subjectId}`, {
+    method: "DELETE",
+  });
+  check("subjects have no delete endpoint — deactivation is the documented path",
+    deleteSubject.status === 404 || deleteSubject.status === 405,
+    `status ${deleteSubject.status}`);
+
+  // Leave the fixture subject switched off rather than lingering in pickers.
+  const parkSubject = await admin(`/api/admin/curriculum/subjects/${subjectId}`, {
+    method: "PATCH",
+    body: { isActive: false, isPopular: false },
+  });
+  check("the fixture subject is deactivated at the end of the run", parkSubject.ok);
+  check("and it leaves the public subject list",
+    !(await anon("/api/curriculum/subjects")).payload.data.subjects.some((s) => s.id === subjectId));
+
+  // --- Global audit log ----------------------------------------------------
+  //
+  // Everything above this line wrote audit records. This section is the read
+  // side: who may look, what the filters actually narrow, and that nothing a
+  // call site stored can turn the viewer into a credential reader (§35, §36).
+  section("Global audit log");
+
+  const anonAudit = await anon("/api/admin/audit-logs");
+  check("an anonymous request cannot read the audit log", anonAudit.status === 401);
+
+  const parentAudit = await parent("/api/admin/audit-logs");
+  check("a parent cannot read the audit log", parentAudit.status === 403);
+
+  const tutorAudit = await tutor("/api/admin/audit-logs");
+  check("a tutor cannot read the audit log", tutorAudit.status === 403);
+
+  const adminAudit = await admin("/api/admin/audit-logs?pageSize=25");
+  check("an administrator can read the audit log", adminAudit.ok,
+    JSON.stringify(adminAudit.payload?.error));
+  check("it comes back paginated like every other list",
+    Number.isInteger(adminAudit.payload?.meta?.total) &&
+      Number.isInteger(adminAudit.payload?.meta?.totalPages));
+  check("and newest first",
+    adminAudit.payload.data.events.length < 2 ||
+      new Date(adminAudit.payload.data.events[0].createdAt) >=
+        new Date(adminAudit.payload.data.events[1].createdAt));
+  check("every event says what happened",
+    adminAudit.payload.data.events.every((e) => typeof e.action === "string" && e.action.length > 0));
+  check("and when",
+    adminAudit.payload.data.events.every((e) => Boolean(e.createdAt)));
+
+  check("the entity types actually in the log are offered as filters",
+    Array.isArray(adminAudit.payload.data.entityTypes) &&
+      adminAudit.payload.data.entityTypes.length > 0);
+
+  const curriculumTrail = await admin("/api/admin/audit-logs?action=CURRICULUM_UPDATED");
+  check("filtering by action narrows to that action",
+    curriculumTrail.ok &&
+      curriculumTrail.payload.data.events.every((e) => e.action === "CURRICULUM_UPDATED"));
+  check("and the curriculum writes this run just made are in it",
+    curriculumTrail.payload.data.events.length > 0);
+
+  const auditActor = adminAudit.payload.data.events.find((e) => e.actorId?.id)?.actorId?.id;
+  if (auditActor) {
+    const byActor = await admin(`/api/admin/audit-logs?actorId=${auditActor}`);
+    check("filtering by actor narrows to what that person did",
+      byActor.ok && byActor.payload.data.events.every((e) => e.actorId?.id === auditActor));
+    check("and says who they are, not just an id",
+      byActor.payload.data.events.every((e) => typeof e.actorId?.firstName === "string"));
+  }
+
+  const byEntityType = await admin("/api/admin/audit-logs?entityType=Subject");
+  check("filtering by entity type narrows to that type",
+    byEntityType.ok && byEntityType.payload.data.events.every((e) => e.entityType === "Subject"));
+  check("and the subject created above is among them",
+    byEntityType.payload.data.events.some((e) => e.entityId === subjectId));
+
+  const byEntity = await admin(`/api/admin/audit-logs?entityId=${subjectId}`);
+  check("filtering by one record's id gives that record's own history",
+    byEntity.ok && (byEntity.payload?.data?.events ?? []).every((e) => e.entityId === subjectId),
+    JSON.stringify(byEntity.payload?.error));
+  check("which is every write this run made to it",
+    (byEntity.payload?.data?.events ?? []).length >= 2,
+    String((byEntity.payload?.data?.events ?? []).length));
+
+  const futureWindow = await admin("/api/admin/audit-logs?from=2099-01-01&to=2099-01-02");
+  check("a period with nothing in it returns nothing rather than everything",
+    futureWindow.ok && futureWindow.payload.data.events.length === 0);
+
+  const badAction = await admin("/api/admin/audit-logs?action=NOT_A_REAL_ACTION");
+  check("an action the platform does not record is refused, not silently ignored",
+    badAction.status === 422, `status ${badAction.status}`);
+
+  const badActor = await admin("/api/admin/audit-logs?actorId=not-an-id");
+  check("a malformed actor id is refused", badActor.status === 422);
+
+  const hugePage = await admin("/api/admin/audit-logs?pageSize=100000");
+  check("an unbounded page size is refused", hugePage.status === 422);
+
+  const integrationTrail = await admin("/api/admin/audit-logs?entityType=Integration");
+  const integrationBody = JSON.stringify(integrationTrail.payload ?? {});
+  check("credential rotations are readable as events",
+    integrationTrail.ok);
+  check("but no credential value is ever in the payload",
+    !/sk_live_|sk_test_[A-Za-z0-9]{8,}|whsec_[A-Za-z0-9]{8,}/.test(integrationBody));
+  check("nor any encrypted ciphertext",
+    !/"v1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\./.test(integrationBody));
+
+  const wholeLog = JSON.stringify(adminAudit.payload ?? {});
+  check("and the log never carries a password hash",
+    !/\$2[aby]\$\d\d\$/.test(wholeLog));
+
+  const auditWrite = await admin("/api/admin/audit-logs", {
+    method: "POST",
+    body: { action: "USER_LOGIN" },
+  });
+  check("there is no way to write an audit record over the API",
+    auditWrite.status === 404 || auditWrite.status === 405,
+    `status ${auditWrite.status}`);
+
+  const auditDelete = await admin("/api/admin/audit-logs", { method: "DELETE" });
+  check("nor to delete one",
+    auditDelete.status === 404 || auditDelete.status === 405,
+    `status ${auditDelete.status}`);
+
+  // --- Dispute resolution --------------------------------------------------
+  //
+  // A decision is terminal. This is the HTTP half of that rule: the guard has
+  // to be in the service, not in the admin screen's disabled button, so it is
+  // asserted here by submitting a second decision directly to the endpoint.
+  //
+  // Every dispute this section opens is closed as REJECTED, which returns its
+  // lesson to COMPLETED — so the section re-runs without consuming a fixture.
+  section("Dispute resolution");
+
+  const disputablePool = (
+    await parent("/api/bookings?scope=PAST&status=COMPLETED&pageSize=50")
+  ).payload?.data?.bookings?.filter((b) => b.status === "COMPLETED") ?? [];
+  const disputable = disputablePool[0];
+
+  if (!disputable) {
+    check("a completed lesson is available to test dispute resolution", false,
+      "no COMPLETED past booking left — run `bun run seed`");
+  } else {
+    const openOne = async (description) => {
+      const res = await parent("/api/disputes", {
+        method: "POST",
+        body: { bookingId: disputable.id, reason: "LESSON_QUALITY", description },
+      });
+      return res;
+    };
+
+    const raised = await openOne(
+      "QA run — exercising the dispute resolution path and its terminal guard.",
+    );
+    check("a party can raise a dispute on a finished lesson", raised.status === 201,
+      JSON.stringify(raised.payload?.error));
+    const qaDisputeId = raised.payload?.data?.dispute?.id;
+    check("it starts open", raised.payload?.data?.dispute?.status === "OPEN");
+
+    const duplicateOpen = await openOne("QA run — a second dispute while one is still open.");
+    check("a second dispute cannot be opened while one is running",
+      duplicateOpen.status === 409, `status ${duplicateOpen.status}`);
+
+    const strangerReadsDispute = await stranger(`/api/disputes/${qaDisputeId}`);
+    check("somebody unrelated cannot read the dispute", strangerReadsDispute.status === 403);
+
+    const partyReads = await parent(`/api/disputes/${qaDisputeId}`);
+    check("the person who raised it can", partyReads.ok);
+    check("and sees no internal admin notes",
+      partyReads.payload?.data?.dispute?.adminNotes === undefined);
+
+    const parentResolves = await parent(`/api/admin/disputes/${qaDisputeId}`, {
+      method: "POST",
+      body: { resolution: "RESOLVED_REFUND", note: "Deciding my own dispute, which I may not do." },
+    });
+    check("a party cannot decide their own dispute", parentResolves.status === 403);
+
+    const tutorResolves = await tutor(`/api/admin/disputes/${qaDisputeId}`, {
+      method: "POST",
+      body: { resolution: "RESOLVED_NO_REFUND", note: "Nor can the tutor decide it themselves." },
+    });
+    check("nor can the other party", tutorResolves.status === 403);
+
+    const anonResolves = await anon(`/api/admin/disputes/${qaDisputeId}`, {
+      method: "POST",
+      body: { resolution: "REJECTED", note: "An anonymous attempt at an adjudication." },
+    });
+    check("and an anonymous request is refused before anything else",
+      anonResolves.status === 401);
+
+    const shortNote = await admin(`/api/admin/disputes/${qaDisputeId}`, {
+      method: "POST",
+      body: { resolution: "RESOLVED_NO_REFUND", note: "no" },
+    });
+    check("a decision without a recorded reason is refused", shortNote.status === 422);
+
+    const badResolution = await admin(`/api/admin/disputes/${qaDisputeId}`, {
+      method: "POST",
+      body: { resolution: "RESOLVED_SOMEHOW", note: "A resolution the platform does not define." },
+    });
+    check("a resolution outside the enumeration is refused", badResolution.status === 422);
+
+    const partialWithoutAmount = await admin(`/api/admin/disputes/${qaDisputeId}`, {
+      method: "POST",
+      body: { resolution: "RESOLVED_PARTIAL_REFUND", note: "A partial refund of nothing at all." },
+    });
+    check("a partial refund without an amount is refused", partialWithoutAmount.status === 422);
+
+    const stillOpen = await admin(`/api/disputes/${qaDisputeId}`);
+    check("none of those refusals decided it",
+      ["OPEN", "UNDER_REVIEW"].includes(stillOpen.payload?.data?.dispute?.status),
+      stillOpen.payload?.data?.dispute?.status);
+
+    const note = await admin(`/api/admin/disputes/${qaDisputeId}`, {
+      method: "PATCH",
+      body: { note: "QA run — recording an internal note before deciding." },
+    });
+    check("an administrator can add an internal note", note.ok);
+    check("which moves the dispute into review",
+      note.payload?.data?.dispute?.status === "UNDER_REVIEW");
+
+    const tutorNote = await tutor(`/api/admin/disputes/${qaDisputeId}`, {
+      method: "PATCH",
+      body: { note: "A tutor writing in the internal admin notes." },
+    });
+    check("a tutor cannot write an internal note", tutorNote.status === 403);
+
+    const decided = await admin(`/api/admin/disputes/${qaDisputeId}`, {
+      method: "POST",
+      body: { resolution: "REJECTED", note: "QA run — closing the fixture, not a real decision." },
+    });
+    check("an administrator can decide it", decided.ok, JSON.stringify(decided.payload?.error));
+    check("and the decision is recorded",
+      decided.payload?.data?.dispute?.status === "REJECTED" &&
+        Boolean(decided.payload?.data?.dispute?.resolvedAt));
+    check("with no refund on a rejected dispute",
+      decided.payload?.data?.dispute?.refundIssuedCents === 0);
+
+    // The defect this replaces: a closed dispute accepting a second decision.
+    for (const attempt of ["RESOLVED_REFUND", "RESOLVED_NO_REFUND", "REJECTED"]) {
+      const again = await admin(`/api/admin/disputes/${qaDisputeId}`, {
+        method: "POST",
+        body: { resolution: attempt, note: "QA run — deciding a closed dispute a second time." },
+      });
+      check(`a decided dispute refuses a later ${attempt}`,
+        again.status === 409, `status ${again.status}`);
+    }
+
+    const unchanged = await admin(`/api/disputes/${qaDisputeId}`);
+    check("and the stored decision is exactly the one that was made",
+      unchanged.payload?.data?.dispute?.status === "REJECTED" &&
+        unchanged.payload?.data?.dispute?.refundIssuedCents === 0);
+
+    const lessonBack = await admin(`/api/bookings/${disputable.id}`);
+    check("a rejected dispute returns the lesson to completed",
+      lessonBack.payload?.data?.booking?.status === "COMPLETED",
+      lessonBack.payload?.data?.booking?.status);
+
+    // --- two administrators, at the same moment ---
+    const raceRaised = await openOne("QA run — two administrators deciding at the same moment.");
+    const raceDisputeId = raceRaised.payload?.data?.dispute?.id;
+    check("a fresh dispute can be opened once the previous one is closed",
+      raceRaised.status === 201, JSON.stringify(raceRaised.payload?.error));
+
+    const simultaneous = await Promise.all([
+      admin(`/api/admin/disputes/${raceDisputeId}`, {
+        method: "POST",
+        body: { resolution: "REJECTED", note: "QA run — first of two simultaneous decisions." },
+      }),
+      admin(`/api/admin/disputes/${raceDisputeId}`, {
+        method: "POST",
+        body: { resolution: "RESOLVED_NO_REFUND", note: "QA run — second of two, at the same time." },
+      }),
+    ]);
+    check("exactly one of two simultaneous decisions is accepted",
+      simultaneous.filter((r) => r.ok).length === 1,
+      simultaneous.map((r) => r.status).join(","));
+    check("and the other is refused as a conflict",
+      simultaneous.filter((r) => r.status === 409).length === 1,
+      simultaneous.map((r) => r.status).join(","));
+
+    const raceStored = await admin(`/api/disputes/${raceDisputeId}`);
+    check("the stored status is the decision that won",
+      raceStored.payload?.data?.dispute?.status ===
+        simultaneous.find((r) => r.ok)?.payload?.data?.dispute?.status);
+    check("and no refund was issued by a race on a rejected/no-refund pair",
+      raceStored.payload?.data?.dispute?.refundIssuedCents === 0);
+
+    const raceAudit = await admin(`/api/admin/audit-logs?entityId=${raceDisputeId}&action=DISPUTE_RESOLVED`);
+    check("the race produced one audit record, not two",
+      raceAudit.payload?.data?.events?.length === 1,
+      String(raceAudit.payload?.data?.events?.length));
+
+    const raceLesson = await admin(`/api/bookings/${disputable.id}`);
+    check("and the lesson fixture is restored for the next run",
+      raceLesson.payload?.data?.booking?.status === "COMPLETED",
+      raceLesson.payload?.data?.booking?.status);
+  }
+
+  // --- Tutor profile, availability and payouts -----------------------------
+  //
+  // The tutor journey section above proves a tutor can *read* their own
+  // records. This is the write side, where the server has to be the authority
+  // on what is acceptable — including the schemes a stored link may use, which
+  // used to rely entirely on React refusing to render a bad one.
+  section("Tutor profile and payouts");
+
+  const tutorProfileBefore = (await tutor("/api/tutor/profile")).payload?.data?.profile;
+
+  const headlineUpdate = await tutor("/api/tutor/profile", {
+    method: "PATCH",
+    body: { headline: `Experienced Ontario mathematics tutor ${qaTag}` },
+  });
+  check("a tutor can update their own headline", headlineUpdate.ok,
+    JSON.stringify(headlineUpdate.payload?.error));
+  check("and the change is persisted",
+    (await tutor("/api/tutor/profile")).payload?.data?.profile?.headline ===
+      `Experienced Ontario mathematics tutor ${qaTag}`);
+
+  const shortHeadline = await tutor("/api/tutor/profile", {
+    method: "PATCH",
+    body: { headline: "short" },
+  });
+  check("a headline below the minimum length is refused", shortHeadline.status === 422);
+
+  const shortBio = await tutor("/api/tutor/profile", {
+    method: "PATCH",
+    body: { bio: "Too short to tell a family anything useful." },
+  });
+  check("a bio below the minimum length is refused", shortBio.status === 422);
+
+  for (const scheme of [
+    "javascript:alert(document.domain)",
+    "JaVaScRiPt:alert(1)",
+    "data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==",
+    "vbscript:msgbox(1)",
+    "file:///etc/passwd",
+    "not a url at all",
+  ]) {
+    const attempt = await tutor("/api/tutor/profile", {
+      method: "PATCH",
+      body: { introVideoUrl: scheme },
+    });
+    check(`an intro video link using "${scheme.split(":")[0].slice(0, 12)}" is refused server-side`,
+      attempt.status === 422, `status ${attempt.status}`);
+  }
+
+  const goodVideo = await tutor("/api/tutor/profile", {
+    method: "PATCH",
+    body: { introVideoUrl: "https://www.youtube.com/watch?v=qa-fixture" },
+  });
+  check("an https intro video link is accepted", goodVideo.ok,
+    JSON.stringify(goodVideo.payload?.error));
+  check("and it is what is stored",
+    goodVideo.payload?.data?.profile?.introVideoUrl ===
+      "https://www.youtube.com/watch?v=qa-fixture");
+
+  const clearVideo = await tutor("/api/tutor/profile", {
+    method: "PATCH",
+    body: { introVideoUrl: "" },
+  });
+  check("and a blank one clears the field rather than failing", clearVideo.ok);
+
+  const badGallery = await tutor("/api/tutor/profile", {
+    method: "PATCH",
+    body: { gallery: ["javascript:alert(1)"] },
+  });
+  check("a gallery photo with an executable scheme is refused", badGallery.status === 422);
+
+  const relativeGallery = await tutor("/api/tutor/profile", {
+    method: "PATCH",
+    body: { gallery: ["//evil.example/x.png"] },
+  });
+  check("and a protocol-relative one is refused too", relativeGallery.status === 422);
+
+  const tooManyPhotos = await tutor("/api/tutor/profile", {
+    method: "PATCH",
+    body: { gallery: Array.from({ length: 7 }, (_, i) => `https://images.unsplash.com/p-${i}`) },
+  });
+  check("a gallery above the maximum is refused", tooManyPhotos.status === 422);
+
+  const clientSetsSearchable = await tutor("/api/tutor/profile", {
+    method: "PATCH",
+    body: { isSearchable: true, status: "APPROVED", ratingAverage: 5 },
+  });
+  check("a tutor cannot set their own searchability, status or rating",
+    !clientSetsSearchable.ok ||
+      (clientSetsSearchable.payload?.data?.profile?.ratingAverage ===
+        tutorProfileBefore?.ratingAverage),
+    JSON.stringify(clientSetsSearchable.payload?.data?.profile?.ratingAverage));
+
+  const parentEditsTutorProfile = await parent("/api/tutor/profile", {
+    method: "PATCH",
+    body: { headline: "A parent rewriting somebody else's shopfront." },
+  });
+  check("a parent cannot edit a tutor profile", parentEditsTutorProfile.status === 403);
+
+  // Put the headline back so re-runs start from where they found it.
+  if (tutorProfileBefore?.headline) {
+    await tutor("/api/tutor/profile", {
+      method: "PATCH",
+      body: { headline: tutorProfileBefore.headline },
+    });
+  }
+  if (tutorProfileBefore?.introVideoUrl) {
+    await tutor("/api/tutor/profile", {
+      method: "PATCH",
+      body: { introVideoUrl: tutorProfileBefore.introVideoUrl },
+    });
+  }
+
+  // --- availability ---
+  const availabilityNow = await tutor("/api/tutor/availability");
+  check("a tutor reads their own availability", availabilityNow.ok);
+
+  const badWindow = await tutor("/api/tutor/availability", {
+    method: "PATCH",
+    body: {
+      weeklyRules: [{ weekday: 1, startMinutes: 600, endMinutes: 500 }],
+      bufferMinutes: 0,
+      slotIncrementMinutes: 30,
+      minNoticeHours: 4,
+    },
+  });
+  check("an availability window that ends before it starts is refused",
+    badWindow.status === 422, `status ${badWindow.status}`);
+
+  const parentAvailability = await parent("/api/tutor/availability");
+  check("a parent cannot read a tutor's availability editor",
+    parentAvailability.status === 403);
+
+  // --- payout account ---
+  const payoutAccount = await tutor("/api/payouts/account");
+  check("a tutor can read their payout account", payoutAccount.ok,
+    JSON.stringify(payoutAccount.payload?.error));
+  check("and it never carries a raw bank detail",
+    !/"(accountNumber|iban|routingNumber|transitNumber)"/i.test(
+      JSON.stringify(payoutAccount.payload ?? {}),
+    ));
+
+  const parentPayoutAccount = await parent("/api/payouts/account");
+  check("a parent has no payout account to read", parentPayoutAccount.status === 403);
+
+  const onboard = await tutor("/api/payouts/account", {
+    method: "POST",
+    body: { action: "REFRESH" },
+  });
+  check("refreshing the payout account asks the provider rather than the client",
+    onboard.ok, JSON.stringify(onboard.payload?.error));
+  check("and the client cannot declare itself payable",
+    (await tutor("/api/payouts/account", {
+      method: "POST",
+      body: { action: "PAYOUTS_ENABLED" },
+    })).status === 422);
+
+  const tutorPayouts = await tutor("/api/payouts");
+  check("a tutor lists their own payouts", tutorPayouts.ok);
+  const parentPayouts = await parent("/api/payouts");
+  check("a parent cannot", parentPayouts.status === 403);
+
+  const badPayoutStatus = await tutor("/api/payouts?status=NOT_A_STATUS");
+  check("a payout status outside the enumeration is refused",
+    badPayoutStatus.status === 422);
+
+  // --- Notifications and favourites ----------------------------------------
+  section("Notifications and favourites");
+
+  const anonNotifications = await anon("/api/notifications");
+  check("notifications need an account", anonNotifications.status === 401);
+
+  const notifications = await parent("/api/notifications?pageSize=10");
+  check("a parent reads their own notifications", notifications.ok);
+  check("with an unread count beside them",
+    Number.isInteger(notifications.payload?.data?.unreadCount));
+  check("and paginated like every other list",
+    Number.isInteger(notifications.payload?.meta?.total));
+  const unreadOnly = await parent("/api/notifications?unreadOnly=true&pageSize=10");
+  check("the unread filter returns only unread notifications",
+    unreadOnly.ok && (unreadOnly.payload?.data?.notifications ?? []).every((n) => !n.readAt));
+
+  const markRead = await parent("/api/notifications/read", {
+    method: "POST",
+    body: { all: true },
+  });
+  check("marking every notification read is accepted", markRead.ok,
+    JSON.stringify(markRead.payload?.error));
+  check("and the unread count drops to nothing",
+    markRead.payload?.data?.unreadCount === 0, String(markRead.payload?.data?.unreadCount));
+
+  const badMarkRead = await parent("/api/notifications/read", {
+    method: "POST",
+    body: { ids: ["not-an-id"] },
+  });
+  check("marking a malformed id read is refused", badMarkRead.status === 422);
+
+  const badNotificationPage = await parent("/api/notifications?page=0");
+  check("a page below one is refused", badNotificationPage.status === 422);
+
+  const favouriteBad = await parent("/api/favourites", {
+    method: "POST",
+    body: { tutorProfileId: "not-an-id" },
+  });
+  check("a favourite with a malformed tutor id is refused", favouriteBad.status === 422);
+
+  const favouriteMissing = await parent("/api/favourites", {
+    method: "POST",
+    body: { tutorProfileId: "000000000000000000000000" },
+  });
+  check("and one naming a tutor that does not exist is refused rather than stored",
+    favouriteMissing.status === 404, `status ${favouriteMissing.status}`);
+
+  const favouriteOnce = await parent("/api/favourites", {
+    method: "POST",
+    body: { tutorProfileId: tutorId },
+  });
+  const favouriteTwice = await parent("/api/favourites", {
+    method: "POST",
+    body: { tutorProfileId: tutorId },
+  });
+  check("saving the same tutor twice is idempotent rather than a duplicate",
+    favouriteOnce.ok && favouriteTwice.ok,
+    `${favouriteOnce.status}/${favouriteTwice.status}`);
+  const favouriteList = await parent("/api/favourites");
+  check("and the tutor appears exactly once",
+    (favouriteList.payload?.data?.favourites ?? [])
+      .filter((f) => f.tutor?.id === tutorId).length === 1,
+    String((favouriteList.payload?.data?.favourites ?? []).length));
+
+  const tutorFavourites = await tutor("/api/favourites");
+  check("a tutor has no favourites list", tutorFavourites.status === 403);
+
+  await parent(`/api/favourites?tutorProfileId=${tutorId}`, { method: "DELETE" });
+
+  // --- Security headers ----------------------------------------------------
+  //
+  // Read off the running server rather than off the config file, because the
+  // config file is not what a browser obeys. Two of these headers differ
+  // between development and production by design — `'unsafe-eval'` for the
+  // hot-module client, and HSTS, which must never pin a developer's
+  // `http://localhost` to TLS — so the assertions below are the invariants
+  // that have to hold in *both* modes (§36).
+  section("Security headers");
+
+  const headerProbe = await anon("/", { raw: true });
+  const header = (name) => headerProbe.headers.get(name) ?? "";
+
+  check("every response carries a content security policy",
+    header("content-security-policy").length > 0);
+  check("X-Content-Type-Options is still nosniff",
+    header("x-content-type-options") === "nosniff");
+  check("the framing controls are still set",
+    header("x-frame-options") === "SAMEORIGIN" &&
+      /frame-ancestors 'self'/.test(header("content-security-policy")));
+  check("and the referrer policy",
+    header("referrer-policy") === "strict-origin-when-cross-origin");
+  check("and the permissions policy",
+    /camera=\(\)/.test(header("permissions-policy")));
+
+  const csp = header("content-security-policy");
+  check("the policy has a default of self", /default-src 'self'/.test(csp));
+  check("scripts may not be loaded from another origin",
+    /script-src 'self'/.test(csp) && !/script-src[^;]*\*/.test(csp) &&
+      !/script-src[^;]*https?:(?!\/\/)/.test(csp));
+  check("plugin content is refused outright", /object-src 'none'/.test(csp));
+  check("a <base> injection cannot retarget relative URLs",
+    /base-uri 'self'/.test(csp));
+  check("a form cannot be posted to somebody else's server",
+    /form-action 'self'/.test(csp));
+  check("nothing third-party may be framed", /frame-src 'self'/.test(csp));
+  check("images are restricted to this origin and the configured photo hosts",
+    /img-src 'self' data: blob: https:/.test(csp) && !/img-src[^;]*\s\*/.test(csp));
+  check("connections are restricted to this origin",
+    /connect-src 'self'/.test(csp));
+  check("no directive is opened with a bare wildcard",
+    !/(^|;)\s*[a-z-]+-src \*/.test(csp), csp);
+
+  const hsts = header("strict-transport-security");
+  const overTls = BASE.startsWith("https://");
+  check("HSTS is sent only where it is safe to pin",
+    overTls ? hsts.startsWith("max-age=") : hsts === "",
+    `origin ${BASE}, header "${hsts}"`);
+  if (hsts) {
+    const maxAge = Number(hsts.match(/max-age=(\d+)/)?.[1] ?? 0);
+    check("and its max-age is at least a year", maxAge >= 31536000, String(maxAge));
+  }
+
+  // The document policy must not be imposed on the API, because two binary
+  // routes set a deliberately *stricter* one of their own — a header declared
+  // in the config replaces a header a route handler set, and the verification
+  // document route's `sandbox` is not something to lose to a broader default.
+  const apiCsp = await anon("/api/curriculum/subjects", { raw: true });
+  check("the document policy is not imposed on API responses",
+    (apiCsp.headers.get("content-security-policy") ?? "") !== csp,
+    apiCsp.headers.get("content-security-policy"));
+  check("while the rest of the headers still reach them",
+    apiCsp.headers.get("x-content-type-options") === "nosniff");
+
+  const swHeaders = await anon("/sw.js", { raw: true });
+  check("the service worker is never served from a cache",
+    /no-store/.test(swHeaders.headers.get("cache-control") ?? ""));
+
+  const apiHeaders = await parent("/api/bookings", { raw: true });
+  check("and no API response may be stored by anything",
+    /no-store/.test(apiHeaders.headers.get("cache-control") ?? ""));
+
   // --- Validation ----------------------------------------------------------
   section("Validation");
 
@@ -5521,6 +6409,106 @@ async function main() {
 
   const badBookingId = await parent("/api/bookings/not-a-valid-id");
   check("malformed id rejected cleanly", badBookingId.status === 422 || badBookingId.status === 404);
+
+  // Four kinds of bad input, each refused by the pipeline rather than by a
+  // service that happened to check: a malformed id, a value outside an
+  // enumeration, a number outside its bounds, and a required field left out.
+  // Every one of them must come back as the standard envelope with per-field
+  // detail — never as a driver error and never as a 500 (§6, §37).
+  const malformed = [
+    ["a booking id that is not an id", await parent("/api/bookings/12345")],
+    ["a payment id that is not an id", await parent("/api/payments/not-an-id")],
+    ["a dispute id that is not an id", await parent("/api/disputes/xyz")],
+    ["an admin user id that is not an id", await admin("/api/admin/users/nope")],
+  ];
+  for (const [label, res] of malformed) {
+    check(`${label} is refused cleanly`,
+      res.status === 422 || res.status === 404, `status ${res.status}`);
+    check(`and ${label} never leaks a driver error`,
+      !/E11000|MongoServerError|CastError|ObjectId/i.test(JSON.stringify(res.payload ?? {})),
+      JSON.stringify(res.payload?.error?.message));
+  }
+
+  const badEnums = [
+    ["a booking scope", await parent("/api/bookings?scope=SIDEWAYS")],
+    ["a booking status", await parent("/api/bookings?status=NOT_A_STATUS")],
+    ["a dispute status", await parent("/api/disputes?status=NOT_A_STATUS")],
+    ["a search sort order", await anon("/api/search/tutors?sort=BY_VIBES")],
+    ["a lesson mode", await parent("/api/bookings", {
+      method: "POST",
+      body: {
+        tutorProfileId: tutorId,
+        studentProfileId: studentId,
+        courseId,
+        mode: "TELEPATHY",
+        startAt: new Date(Date.now() + 7 * 86400000).toISOString(),
+        durationMinutes: 60,
+      },
+    })],
+  ];
+  for (const [label, res] of badEnums) {
+    check(`${label} outside the enumeration is refused`, res.status === 422,
+      `status ${res.status}`);
+  }
+
+  const boundaries = [
+    ["a page below one", await parent("/api/bookings?page=0")],
+    ["a page size above the ceiling", await parent("/api/bookings?pageSize=10000")],
+    ["an analytics window beyond a year", await admin("/api/admin/analytics?days=9999")],
+    ["a search distance beyond the maximum", await anon("/api/search/tutors?distanceKm=99999")],
+    ["a review rating above five", await parent("/api/reviews", {
+      method: "POST",
+      body: {
+        bookingId,
+        rating: 6,
+        knowledge: 5,
+        communication: 5,
+        reliability: 5,
+        teaching: 5,
+        body: "A rating outside the scale the product defines.",
+      },
+    })],
+  ];
+  for (const [label, res] of boundaries) {
+    check(`${label} is refused`, res.status === 422, `status ${res.status}`);
+  }
+
+  const missingFields = await parent("/api/bookings", { method: "POST", body: {} });
+  check("a request with none of its required fields is refused",
+    missingFields.status === 422);
+  check("and says which fields, one entry each",
+    Object.keys(missingFields.payload?.error?.details?.fieldErrors ?? {}).length >= 3,
+    Object.keys(missingFields.payload?.error?.details?.fieldErrors ?? {}).join(","));
+
+  const notJson = await parent("/api/bookings", { method: "POST", rawBody: "{not json" });
+  check("a body that is not JSON is refused as a validation error, not a crash",
+    notJson.status === 422, `status ${notJson.status}`);
+
+  const unknownFieldsIgnored = await parent("/api/students", {
+    method: "POST",
+    body: {
+      firstName: `QA${qaTag}`,
+      role: "ADMIN",
+      creditBalanceCents: 100000,
+      isMinor: false,
+    },
+  });
+  if (unknownFieldsIgnored.ok) {
+    const created = unknownFieldsIgnored.payload?.data?.student;
+    check("fields the schema does not name are dropped rather than stored",
+      created?.role === undefined && created?.creditBalanceCents === undefined,
+      JSON.stringify({ role: created?.role, credit: created?.creditBalanceCents }));
+    const me = await parent("/api/users/me");
+    check("and the account that sent them is unchanged",
+      me.payload?.data?.user?.role === "PARENT" &&
+        me.payload?.data?.user?.creditBalanceCents !== 100000);
+    if (created?.id) {
+      await parent(`/api/students/${created.id}`, { method: "DELETE" });
+    }
+  } else {
+    check("a learner profile carrying privileged fields is refused",
+      unknownFieldsIgnored.status === 422, `status ${unknownFieldsIgnored.status}`);
+  }
 
   // --- Summary -------------------------------------------------------------
   console.log(`\n${"─".repeat(56)}`);

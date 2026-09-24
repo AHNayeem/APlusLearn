@@ -10,12 +10,12 @@ import {
   FormErrorSummary, useToast,
 } from "@/components/ui";
 import { formatMoney, formatRelative } from "@/lib/utils/format";
-import { DISPUTE_STATUS } from "@/constants";
+import { RESOLVED_DISPUTE_STATUSES } from "@/constants";
 
 /** Adjudicate a dispute and issue any refund it warrants (§26). */
 export function DisputeResolution({ dispute, booking }) {
   const [modal, setModal] = useState(null);
-  const resolved = ![DISPUTE_STATUS.OPEN, DISPUTE_STATUS.UNDER_REVIEW].includes(dispute.status);
+  const resolved = RESOLVED_DISPUTE_STATUSES.includes(dispute.status);
 
   return (
     <>

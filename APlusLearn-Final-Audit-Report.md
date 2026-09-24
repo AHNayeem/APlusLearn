@@ -7,6 +7,36 @@
 
 ---
 
+> ## Remediation status — 24 September 2026
+>
+> This report is left as it was written, because it is the evidence. What has
+> since been done about it is recorded here and, in detail, in
+> [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md).
+>
+> **Closed.** §11 issue 1 (a resolved dispute could be re-decided) — a
+> terminal-state guard now claims the dispute atomically before any money
+> moves. §11 issue 2 (branding file records published on every public page) —
+> `resolveAppConfig` no longer carries them, and even the admin console gets
+> only the dimensions its preview draws. §11 issue 3 (`introVideoUrl` and the
+> profile gallery accepted any string) — the scheme is decided server-side.
+> §11 issue 5 (`lib/db/connect.js` and `lib/auth/tokens.js` missing
+> `server-only`) — restored. §10 items 5 (no global audit-log viewer), 7
+> (curriculum had zero test coverage), 8 (dispute coverage), 9 (in-memory rate
+> limiter), 10 (single-instance booking-race resolution), 11 (no CSP or HSTS),
+> 12, 13, 15 and 16 are all closed.
+>
+> Three further defects were found and fixed during that work, none of which
+> appear above: an open redirect through the post-sign-in `next` parameter
+> (`//host` passes a `startsWith("/")` check), `bcryptjs` reaching the client
+> bundle through the password-policy helper, and a favourite naming a tutor
+> that does not exist being stored and then silently dropped on read.
+>
+> **Still open, and unchanged by any of it:** every external-provider item.
+> §11 issue 4 and §10 items 1–4 are credential and live-verification work,
+> and they remain exactly as described below.
+
+---
+
 ## 1. Executive Summary
 
 APlusLearn is a Canada-focused tutoring marketplace built as a single Next.js 16 application (JavaScript, MongoDB, Tailwind v4). It comprises **96 pages, 154 API endpoints, 34 services, 25 database models and 9 scheduled jobs**.

@@ -21,7 +21,7 @@ import { enforceRateLimit, clientKey } from "@/lib/security/rate-limit";
  */
 export const POST = routeHandler(
   async ({ user, body, request }) => {
-    enforceRateLimit(clientKey(request, "phone-verify"), { limit: 5, windowMs: 15 * 60_000 });
+    await enforceRateLimit(clientKey(request, "phone-verify"), { limit: 5, windowMs: 15 * 60_000 });
     return created(
       await startPhoneVerification(user.id, body, {
         ip: request.headers.get("x-forwarded-for")?.split(",")[0]?.trim(),
@@ -35,7 +35,7 @@ export const PATCH = routeHandler(
   async ({ user, body, request }) => {
     // Guessing a six-digit code is cheap without this; the service also burns
     // the code after a handful of wrong answers.
-    enforceRateLimit(clientKey(request, "phone-confirm"), { limit: 10, windowMs: 15 * 60_000 });
+    await enforceRateLimit(clientKey(request, "phone-confirm"), { limit: 10, windowMs: 15 * 60_000 });
     return ok({ user: await confirmPhoneVerification(user.id, body, user) });
   },
   { auth: true, bodySchema: confirmPhoneVerificationSchema },

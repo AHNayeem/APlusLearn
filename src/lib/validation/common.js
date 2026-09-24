@@ -68,6 +68,39 @@ export const url = z
   .max(500)
   .refine((v) => /^https?:\/\//i.test(v), "Links must start with http:// or https://");
 
+/**
+ * An optional link. Blank is how a form clears one; it is not an error.
+ *
+ * Present here rather than restated per schema so every optional link in the
+ * product is refused on the same grounds — a `javascript:`, `data:` or
+ * `vbscript:` value is a stored-XSS vector wherever it lands in an `href`,
+ * and which form it arrived through does not change that (§36).
+ */
+export const optionalUrl = url.optional().or(z.literal("").transform(() => undefined));
+
+/**
+ * A link to an image this application will render.
+ *
+ * Wider than `url` by exactly one case: a path this application serves itself
+ * (`/api/avatars/…`), which is what an uploaded photo looks like. Everything
+ * else must be an absolute http(s) URL, so no scheme that executes can reach
+ * an `<img src>` or the image optimizer. `//host/path` is protocol-relative
+ * rather than local and is judged as a remote URL, which it fails.
+ *
+ * Whether the host is one `next/image` will actually load is a separate
+ * question, answered at render time by `renderableImageSrc` — this is the
+ * trust boundary, that one is renderability.
+ */
+export const mediaUrl = z
+  .string()
+  .trim()
+  .min(1)
+  .max(500)
+  .refine(
+    (v) => (v.startsWith("/") && !v.startsWith("//")) || /^https?:\/\//i.test(v),
+    "Use a full https:// link to the image.",
+  );
+
 export const isoDate = z.iso.datetime({ offset: true }).or(
   z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use the format YYYY-MM-DD."),
 );

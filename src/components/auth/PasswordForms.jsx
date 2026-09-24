@@ -7,7 +7,7 @@ import { Mail, Lock, Check } from "lucide-react";
 import { cn } from "@/lib/utils/cn";
 import { api, ApiError } from "@/lib/api/client";
 import { useSubmit } from "@/hooks/useAsync";
-import { passwordIssues } from "@/lib/auth/password";
+import { passwordIssues } from "@/lib/auth/password-policy";
 import {
   Alert, Button, Field, Input, FormErrorSummary, Spinner, SuccessState, ErrorState,
 } from "@/components/ui";

@@ -13,7 +13,7 @@ import { enforceRateLimit, clientKey } from "@/lib/security/rate-limit";
  */
 export const GET = routeHandler(
   async ({ params, request }) => {
-    enforceRateLimit(clientKey(request, "referral-code"), { limit: 20, windowMs: 60_000 });
+    await enforceRateLimit(clientKey(request, "referral-code"), { limit: 20, windowMs: 60_000 });
     return ok(await lookupReferralCode(params.code));
   },
   {

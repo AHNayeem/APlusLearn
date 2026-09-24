@@ -271,4 +271,40 @@ BookingSchema.index({ tutorUserId: 1, status: 1, completedAt: -1 });
 BookingSchema.index({ tutorUserId: 1, startAt: 1 });
 
 export const Booking = mongoose.models.Booking || mongoose.model("Booking", BookingSchema);
+
+/**
+ * One exclusive claim on a tutor's start time (§18, §42).
+ *
+ * MongoDB cannot express "no overlapping time range" as a unique index, so
+ * overlapping lessons of *different* lengths are still settled by the
+ * write-then-read tie-break in `booking.service`. What this collection does
+ * is make the common case — two people taking the same offered slot at the
+ * same moment — decided by the database rather than by two reads racing each
+ * other: the `_id` index is unique, always present, and needs no migration or
+ * `autoIndex`, so the second insert is refused outright.
+ *
+ * The lock is **self-healing rather than lifecycle-managed**. Nothing in the
+ * cancellation, expiry, no-show or completion paths has to remember to
+ * release one: a claim naming a booking that no longer holds that slot is
+ * stale, and the next request for the slot takes it over atomically. That is
+ * deliberate — a lock somebody must remember to free is a lock that will one
+ * day wedge a tutor's calendar shut, which is a worse failure than the race
+ * it was added to close.
+ *
+ * Group sessions do not claim: several learners legitimately share one hour,
+ * and the session itself already reserved it once.
+ */
+const BookingSlotLockSchema = new mongoose.Schema(
+  {
+    /** `<tutorProfileId>:<startAt in epoch milliseconds>`. */
+    _id: { type: String },
+    bookingId: { type: mongoose.Schema.Types.ObjectId, ref: "Booking", required: true, index: true },
+    claimedAt: { type: Date, default: Date.now },
+  },
+  { versionKey: false },
+);
+
+export const BookingSlotLock =
+  mongoose.models.BookingSlotLock || mongoose.model("BookingSlotLock", BookingSlotLockSchema);
+
 export default Booking;

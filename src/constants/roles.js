@@ -92,6 +92,20 @@ export const PERMISSIONS = {
   ADMIN_RISK_MANAGE: "ADMIN_RISK_MANAGE",
   ADMIN_ANALYTICS_VIEW: "ADMIN_ANALYTICS_VIEW",
   ADMIN_SETTINGS_MANAGE: "ADMIN_SETTINGS_MANAGE",
+
+  /**
+   * Read the platform-wide audit trail (§35).
+   *
+   * Its own permission rather than a fold into ADMIN_SETTINGS_MANAGE, for the
+   * same reason ADMIN_INTEGRATION_MANAGE is separate: the audit log records
+   * what every administrator did, including credential rotations and refunds,
+   * so "may read the log" and "may change the platform" are different rights
+   * and a future limited-administrator role should be able to hold either
+   * without the other. It is a read: nothing in the product writes or deletes
+   * an audit row except `recordAudit`.
+   */
+  ADMIN_AUDIT_VIEW: "ADMIN_AUDIT_VIEW",
+
   /**
    * External modules — provider credentials, webhook secrets, connection
    * tests. Held apart from ADMIN_SETTINGS_MANAGE on purpose: editing the

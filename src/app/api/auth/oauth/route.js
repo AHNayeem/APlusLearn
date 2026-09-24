@@ -8,6 +8,7 @@ import { AppError } from "@/lib/api/errors";
 import { availableOAuthProviders } from "@/services/external/oauth-provider";
 import { isFeatureEnabled } from "@/services/settings.service";
 import { AUTH_PROVIDERS, FEATURES } from "@/constants";
+import { internalPath } from "@/lib/utils/url";
 
 /**
  * Social sign-in (§9, §36).
@@ -20,7 +21,7 @@ import { AUTH_PROVIDERS, FEATURES } from "@/constants";
  */
 export const POST = routeHandler(
   async ({ request, body }) => {
-    enforceRateLimit(clientKey(request, "oauth"), { limit: 10, windowMs: 10 * 60_000 });
+    await enforceRateLimit(clientKey(request, "oauth"), { limit: 10, windowMs: 10 * 60_000 });
 
     // The operator's switch is checked before anything is verified: a disabled
     // provider is not a sign-in path, whatever token the client produces (§26).
@@ -53,7 +54,9 @@ export const POST = routeHandler(
 
       return ok({
         user: { id: user.id, firstName: user.firstName, role: user.role },
-        redirectTo: body.next?.startsWith("/") ? body.next : homeForRole(user.role),
+        // `next` is already reduced to a path on this application by the
+        // schema; this is the fallback when there was not one.
+        redirectTo: internalPath(body.next) ?? homeForRole(user.role),
       });
     } finally {
       // One nonce, one attempt — successful or not.

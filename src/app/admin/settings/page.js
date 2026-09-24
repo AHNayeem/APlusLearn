@@ -2,7 +2,7 @@ import { Plug } from "lucide-react";
 import { connectToDatabase } from "@/lib/db/connect";
 import { enforceRole } from "@/lib/auth/guards";
 import { ROLES } from "@/constants";
-import { getSettings } from "@/services/settings.service";
+import { getSettings, adminSettingsView } from "@/services/settings.service";
 import { BRANDING_ASSET_RULES } from "@/services/branding.service";
 import { appEnv, integrationStatus } from "@/lib/config/env";
 import { recentWebhookEvents } from "@/services/webhook.service";
@@ -55,7 +55,7 @@ export default async function AdminSettingsPage() {
       />
 
       <SettingsWorkspace
-        settings={settings}
+        settings={adminSettingsView(settings)}
         assetRules={BRANDING_ASSET_RULES}
         smsProvider={smsProvider}
       />

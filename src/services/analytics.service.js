@@ -28,7 +28,7 @@ import {
   TUTOR_STATUS,
   BOOKING_STATUS,
   PAYMENT_STATUS,
-  DISPUTE_STATUS,
+  OPEN_DISPUTE_STATUSES,
   LESSON_MODES,
   CANCELLED_STATUSES,
   ACTIVE_REPORT_STATUSES,
@@ -269,7 +269,7 @@ export async function marketplaceOverview(options = {}) {
     User.countDocuments({ ...dateWindow("createdAt", range), deletedAt: null }),
     User.countDocuments({ ...dateWindow("createdAt", range.previous), deletedAt: null }),
     Dispute.countDocuments({
-      status: { $in: [DISPUTE_STATUS.OPEN, DISPUTE_STATUS.UNDER_REVIEW] },
+      status: { $in: OPEN_DISPUTE_STATUSES },
     }),
     Review.countDocuments({ reportStatus: { $in: ACTIVE_REPORT_STATUSES } }),
     TutorPromotion.countDocuments(livePromotionQuery()),
@@ -871,7 +871,7 @@ export async function adminQueueCounts() {
   ] = await Promise.all([
     TutorApplication.countDocuments({ status: TUTOR_STATUS.PENDING_REVIEW }),
     Dispute.countDocuments({
-      status: { $in: [DISPUTE_STATUS.OPEN, DISPUTE_STATUS.UNDER_REVIEW] },
+      status: { $in: OPEN_DISPUTE_STATUSES },
     }),
     Review.countDocuments({ reportStatus: { $in: ACTIVE_REPORT_STATUSES } }),
     VerificationRecord.countDocuments({ status: "PENDING" }),

@@ -71,6 +71,11 @@ const AuditLogSchema = new mongoose.Schema(
 
 AuditLogSchema.index({ createdAt: -1 });
 AuditLogSchema.index({ entityType: 1, entityId: 1, createdAt: -1 });
+// The global audit browser filters by action or by actor and always sorts
+// newest-first, so the sort key belongs in the index behind each filter —
+// otherwise every page of a filtered view is an in-memory sort (§35).
+AuditLogSchema.index({ action: 1, createdAt: -1 });
+AuditLogSchema.index({ actorId: 1, createdAt: -1 });
 
 export const AuditLog = mongoose.models.AuditLog || mongoose.model("AuditLog", AuditLogSchema);
 

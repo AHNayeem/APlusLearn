@@ -7,7 +7,7 @@ import { homeForRole } from "@/constants/navigation";
 
 export const POST = routeHandler(
   async ({ request, body }) => {
-    enforceRateLimit(clientKey(request, "register"), { limit: 5, windowMs: 15 * 60_000 });
+    await enforceRateLimit(clientKey(request, "register"), { limit: 5, windowMs: 15 * 60_000 });
 
     const user = await register(body, { request });
     await createSessionCookie(user);

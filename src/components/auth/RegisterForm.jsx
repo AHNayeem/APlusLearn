@@ -6,7 +6,8 @@ import { Mail, Lock, User, Check, Gift } from "lucide-react";
 import { cn } from "@/lib/utils/cn";
 import { api } from "@/lib/api/client";
 import { useSubmit } from "@/hooks/useAsync";
-import { passwordIssues } from "@/lib/auth/password";
+import { passwordIssues } from "@/lib/auth/password-policy";
+import { internalPath } from "@/lib/utils/url";
 import {
   Button, Field, Input, Checkbox, OptionCard, FormErrorSummary,
 } from "@/components/ui";
@@ -91,7 +92,7 @@ export function RegisterForm({ oauthProviders }) {
       ...form,
       referralCode: form.referralCode.trim() || undefined,
     });
-    router.push(next?.startsWith("/") ? next : result.redirectTo);
+    router.push(internalPath(next) ?? result.redirectTo);
     router.refresh();
     return result;
   });

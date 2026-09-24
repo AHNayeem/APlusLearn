@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { ROLES } from "@/constants";
 import { email, password, personName, phone, provinceCode } from "./common";
+import { internalPath } from "@/lib/utils/url";
 
 export const registerSchema = z
   .object({
@@ -35,10 +36,25 @@ export const registerSchema = z
     path: ["confirmPassword"],
   });
 
+/**
+ * Where to land after signing in.
+ *
+ * Sanitised here rather than at each call site, so every route that accepts a
+ * `next` gets the same answer: anything that is not a path on this
+ * application becomes `undefined`, and the caller falls back to the home the
+ * person's role gives them. Silently dropping it is deliberate — a refusal
+ * would turn a tampered link into a sign-in the person cannot complete.
+ */
+const nextPath = z
+  .string()
+  .max(300)
+  .optional()
+  .transform((value) => internalPath(value) ?? undefined);
+
 export const loginSchema = z.object({
   email,
   password: z.string().min(1, "Enter your password."),
-  next: z.string().max(300).optional(),
+  next: nextPath,
 });
 
 export const forgotPasswordSchema = z.object({ email });
@@ -93,5 +109,5 @@ export const oauthSignInSchema = z.object({
       lastName: z.string().trim().max(60).optional(),
     })
     .optional(),
-  next: z.string().max(300).optional(),
+  next: nextPath,
 });

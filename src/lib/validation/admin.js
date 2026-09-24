@@ -1,7 +1,7 @@
 import { z } from "zod";
 import {
   ROLES, USER_STATUS, TUTOR_STATUS, PAYOUT_STATUS,
-  BRANDING_ASSET_KEYS, FEATURES, SETTINGS_GROUPS,
+  BRANDING_ASSET_KEYS, FEATURES, SETTINGS_GROUPS, AUDIT_ACTIONS,
 } from "@/constants";
 import {
   isLegible, isUsableAsSolid, isUsableAsSurface, MIN_TEXT_CONTRAST, normalizeHex,
@@ -432,4 +432,31 @@ export const analyticsQuerySchema = z.object({
   to: z.iso.datetime({ offset: true }).optional(),
   timeZone: z.string().trim().max(64).optional(),
   limit: z.coerce.number().int().min(1).max(50).optional(),
+});
+
+/**
+ * The global audit-log browser's filters (§35).
+ *
+ * Shared between the API route and the page's own `searchParams` parsing, so
+ * a link somebody pastes into a browser is bounded by exactly the same rules
+ * as a request the admin UI makes. Every filter is optional and blank means
+ * "no filter" rather than "match the empty string" — the admin form submits
+ * unset selects as `""`.
+ *
+ * `action` is checked against the enumeration rather than taken as free text:
+ * the field is indexed and enumerated on the model, and an unrecognised value
+ * should be a refusal, not a query that silently matches nothing.
+ */
+const blankToUndefined = (schema) =>
+  schema.optional().or(z.literal("").transform(() => undefined));
+
+export const auditLogQuerySchema = z.object({
+  action: blankToUndefined(z.enum(Object.values(AUDIT_ACTIONS))),
+  entityType: blankToUndefined(z.string().trim().max(60)),
+  entityId: blankToUndefined(objectId),
+  actorId: blankToUndefined(objectId),
+  from: blankToUndefined(z.iso.datetime({ offset: true }).or(z.string().regex(/^\d{4}-\d{2}-\d{2}$/))),
+  to: blankToUndefined(z.iso.datetime({ offset: true }).or(z.string().regex(/^\d{4}-\d{2}-\d{2}$/))),
+  page: z.coerce.number().int().min(1).max(500).default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).optional(),
 });

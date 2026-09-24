@@ -8,7 +8,10 @@ import {
   TUTOR_STATUS,
 } from "@/constants";
 import { ONBOARDING_STEPS } from "@/constants/onboarding";
-import { objectId, personName, phone, postalCode, provinceCode, cents, timeZone } from "./common";
+import {
+  objectId, personName, phone, postalCode, provinceCode, cents, timeZone,
+  optionalUrl, mediaUrl,
+} from "./common";
 
 const year = z.coerce.number().int().min(1950).max(new Date().getFullYear() + 8);
 
@@ -73,9 +76,9 @@ export const onboardingStepSchemas = {
     // `POST /api/users/me/avatar`, inspected byte by byte, and stored — so
     // what reaches a family's screen is a file this platform holds rather than
     // a URL an application could be talked into pointing anywhere (§16).
-    introVideoUrl: z.string().trim().max(500).optional(),
+    introVideoUrl: optionalUrl,
     /** Teaching-environment photos shown on the search card gallery. */
-    gallery: z.array(z.string().trim().min(1).max(500)).max(6, "Up to six photos.").optional(),
+    gallery: z.array(mediaUrl).max(6, "Up to six photos.").optional(),
   }),
 
   EDUCATION: z.object({
@@ -181,9 +184,9 @@ export const updateTutorProfileSchema = z.object({
   bio: z.string().trim().min(120).max(4000).optional(),
   languages: z.array(z.string().trim().min(2).max(40)).min(1).optional(),
   // See the onboarding PROFILE step: the photo is an upload, not a URL.
-  introVideoUrl: z.string().trim().max(500).optional(),
+  introVideoUrl: optionalUrl,
   /** Teaching-environment photos shown on the search card gallery. */
-  gallery: z.array(z.string().trim().min(1).max(500)).max(6, "Up to six photos.").optional(),
+  gallery: z.array(mediaUrl).max(6, "Up to six photos.").optional(),
   education: z.array(educationEntrySchema).optional(),
   experience: z.array(experienceEntrySchema).optional(),
   qualifications: z.array(z.enum(Object.values(QUALIFICATION_TYPES))).optional(),

@@ -5,7 +5,7 @@ import { enforceRateLimit, clientKey } from "@/lib/security/rate-limit";
 
 export const POST = routeHandler(
   async ({ request, body }) => {
-    enforceRateLimit(clientKey(request, "resend"), { limit: 3, windowMs: 15 * 60_000 });
+    await enforceRateLimit(clientKey(request, "resend"), { limit: 3, windowMs: 15 * 60_000 });
     await resendVerification(body.email);
     return ok({ sent: true });
   },

@@ -377,6 +377,25 @@ export const DISPUTE_STATUS_LABELS = {
   REJECTED: "Rejected",
 };
 
+/**
+ * A dispute an administrator has already decided.
+ *
+ * Terminal by design: the decision issued any refund through the payment
+ * ledger, and a second decision on the same dispute would leave the stored
+ * record describing money that did not move that way. `resolveDispute`
+ * claims the dispute on the open statuses below, so the guard is the write
+ * itself rather than a check somebody could forget to run (§26).
+ */
+export const RESOLVED_DISPUTE_STATUSES = [
+  DISPUTE_STATUS.RESOLVED_REFUND,
+  DISPUTE_STATUS.RESOLVED_PARTIAL_REFUND,
+  DISPUTE_STATUS.RESOLVED_NO_REFUND,
+  DISPUTE_STATUS.REJECTED,
+];
+
+/** A dispute still awaiting a decision. The only states resolution accepts. */
+export const OPEN_DISPUTE_STATUSES = [DISPUTE_STATUS.OPEN, DISPUTE_STATUS.UNDER_REVIEW];
+
 export const DISPUTE_REASONS = {
   TUTOR_NO_SHOW: "TUTOR_NO_SHOW",
   STUDENT_NO_SHOW: "STUDENT_NO_SHOW",

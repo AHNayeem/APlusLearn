@@ -82,13 +82,44 @@ ad-hoc JSON responses, and never let a raw driver error reach the client.
 - **Scheduled work is one registry.** Jobs are registered in [src/services/scheduler.service.js](src/services/scheduler.service.js) and invoked through `/api/cron/<job>`; each claims its work atomically so overlapping runs are safe. Add to the registry and to `vercel.json`, not to a second scheduler. No read path may *depend* on a job having run — `promotion-expiry` is the clearest case: discovery derives whether a promotion is live from the clock on every request, and the job only settles the stored record.
 - **Promotion reorders discovery; it never widens it.** [src/lib/search/promotion.js](src/lib/search/promotion.js) is the whole rule. A promoted read applies the identical filter the visitor's search built, so an ineligible tutor can never be promoted into results. Promotion applies to the default `RELEVANCE` ordering only — an explicit sort is the visitor's instruction — and every promoted result is labelled. Neither of those two is a setting.
 - **Analytics are aggregated in MongoDB, from payments.** Money comes from `Payment` on `paidAt`, never from summing booking prices (which counts abandoned checkouts as revenue). Refunds are subtracted pro rata per payment, and referral credit is a platform cost, not a discount. Periods are half-open and time-zone aware via [src/lib/analytics/range.js](src/lib/analytics/range.js). Never reduce a figure from a paged array.
+- **A dispute decision is terminal.** [src/services/dispute.service.js](src/services/dispute.service.js)
+  claims the dispute on its *open* statuses with a conditional update before any money moves, so a
+  second decision — a double-submitted form, two administrators, a replayed request — finds nothing
+  to claim and is refused. A refund the ledger rejects releases the claim, because a dispute that
+  was never settled must stay decidable. `OPEN_DISPUTE_STATUSES` / `RESOLVED_DISPUTE_STATUSES` in
+  [src/constants/domain.js](src/constants/domain.js) are the single definition of which is which.
+  Application and verification decisions are deliberately *not* terminal: re-approving a tutor moves
+  no money.
+- **A slot is claimed, not merely checked.** `isSlotBookable()` produces the useful refusal;
+  `BookingSlotLock` (unique `_id` of `tutorProfileId:startAtMs`) is what makes exactly one of several
+  simultaneous requests win, on one instance or twenty. The claim is self-healing — it names the
+  booking holding the slot, and a stale one is inherited rather than released by some cancellation
+  path that has to remember to. Group bookings never claim: several learners share one hour by
+  design. Overlaps between *different-length* lessons share no start instant and are still settled
+  by the write-then-read tie-break in `settleSlotRace`.
+- **Rate-limit windows are shared.** [src/lib/security/rate-limit.js](src/lib/security/rate-limit.js)
+  counts in MongoDB so a limit means the same behind one server or four; `RATE_LIMIT_STORE=memory`
+  opts out. Both functions are `async`. An unreachable store degrades to a per-process counter and
+  says so loudly — never to no limit at all.
+- **Audit is append-only, and now readable.** `recordAudit` is the only writer; `/admin/audit`
+  (`ADMIN_AUDIT_VIEW`, held apart from `ADMIN_SETTINGS_MANAGE`) is the reader, filtered by action,
+  actor, entity type, entity id and period. `redactAuditMetadata` removes credential-shaped keys and
+  values *on the way out*, so a careless call site cannot turn the viewer into a credential reader.
+- **A stored link may not carry an executable scheme.** `optionalUrl` / `mediaUrl` in
+  [src/lib/validation/common.js](src/lib/validation/common.js) decide this server-side; React
+  refusing to render a `javascript:` href is a backstop, not the boundary. `internalPath()` in
+  [src/lib/utils/url.js](src/lib/utils/url.js) does the same job for the post-sign-in `next`
+  parameter — `//host` and `/\host` are another origin to a browser.
 - **Risk detects; it never punishes.** [src/services/risk.service.js](src/services/risk.service.js) is the only place fraud logic lives. Every signal carries a `dedupeKey` derived from the event, so replays record once, and every call site uses `safelyRecordRiskSignal` so detection can never break the action being taken. No score restricts an account — an administrator does, from user management.
 - **The client supplies intent, never state.** Amounts, commission and statuses are derived server-side from stored data. `bun run qa` asserts an injected `price` or `status` is ignored.
 - **Ownership is checked against the loaded DB record**, never a request field (`requireOwnership`, `requireParticipant`, `ownsOrAdmin`).
 - **`isSearchable` is derived**, not client-set — it gates every public tutor query, so an unapproved profile cannot surface in search.
 - **Privacy defaults:** public pages show first name + last initial (`publicName`), learner surnames are masked from tutors unless opted in, in-person addresses release only after confirmation, verification documents are served only through the audited admin route.
 - Roles and permissions live in [src/constants/roles.js](src/constants/roles.js) and are enforced server-side; frontend guards are UX only.
-- Services and anything under `lib/auth`, `lib/db` start with `import "server-only"`.
+- Services and anything under `lib/auth`, `lib/db` start with `import "server-only"`. Two
+  exceptions are deliberate and documented in the files themselves: `lib/auth/assert.js` is pure, and
+  the password *policy* lives in `lib/auth/password-policy.js` (no imports at all) so the
+  registration form can show the rules without pulling bcrypt into the browser.
 
 ### Data boundary
 
@@ -164,7 +195,8 @@ Two integrations are shaped slightly differently and it matters:
 Dev test cards: `4242 4242 4242 4242` succeeds, anything ending `0002` is declined.
 
 Run the dev server with `PAYMENT_PROVIDER=development` when working on Phase 2
-features — the repository's Stripe test credentials are not valid, and a real
+features. The repository's Stripe test key *does* authenticate, but the account
+behind it has `charges_enabled: false`, so no charge can be taken — and a real
 Stripe call failing mid-suite takes `bun run qa` down with it rather than
 failing one assertion.
 
@@ -186,6 +218,15 @@ twelve §41 Phase 2 features, and is where the specification gaps and their
 configurable defaults are listed.
 [docs/PWA.md](docs/PWA.md) covers the service worker: its caching allowlist,
 what is deliberately never cached, offline behaviour and the update strategy.
+
+**Security headers live in [next.config.mjs](next.config.mjs).** Content-Security-Policy is sent on
+every *document* and deliberately not on `/api` — a header declared in the config replaces one a
+route handler set, and the verification-document route serves identity paperwork under its own
+stricter `default-src 'none'; … sandbox` policy. `'unsafe-eval'` is development-only;
+`'unsafe-inline'` is what Next's streamed RSC payload and the inline theme require, and the
+reasoning (and the nonce alternative that was rejected, and why) is written out beside the policy.
+HSTS is production-only, one year, without `includeSubDomains` or `preload` — both are one-way
+doors that depend on facts the repository cannot know.
 
 **The service worker is an allowlist, and `/api/**` is refused first and
 unconditionally.** A request matching no rule is never passed to `respondWith`

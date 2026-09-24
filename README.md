@@ -56,8 +56,8 @@ sitting in the admin review queue.
 | `npm run seed:keep` | Add missing seed data without wiping |
 | `npm run storage:check` | Prove the MinIO credentials open the bucket (`--roundtrip` also writes, reads and deletes) |
 | `npm run storage:migrate` | Copy `.storage/**` into the MinIO bucket (`--dry-run` to preview) |
-| `npm run qa` | End-to-end API test suite against a running dev server (226 assertions) |
-| `npm run test:integrations` | Provider adapter tests — no network, no third party |
+| `npm run qa` | End-to-end API test suite against a running dev server (1,003 assertions) |
+| `npm run test:integrations` | Provider adapters and DB-backed service rules (1,459 assertions) — no network, no third party |
 
 `npm run qa` exercises the full parent, tutor and admin journeys over real
 HTTP — including the authorization checks that must *fail*. Run `npm run dev`
@@ -65,8 +65,13 @@ in one terminal and `npm run qa` in another.
 
 `npm run test:integrations` runs the Stripe, Resend, OAuth, geocoding and Zoom
 adapters with `fetch` stubbed, webhooks signed with the real signing scheme and
-OAuth tokens signed by a key pair generated in process. It contacts nothing
-external, so it is safe in CI.
+OAuth tokens signed by a key pair generated in process — plus the business
+rules only a direct call can reach: the dispute lifecycle, curriculum,
+booking slot claims, rate-limit windows and the audit log's redaction. It
+contacts nothing external, so it is safe in CI.
+
+Both suites take over the `integrations` collection for their duration, and
+`qa` leaves it cleared, so point them at a development database.
 
 ---
 
@@ -187,7 +192,9 @@ A few properties worth knowing:
 - **Uploads are checked by their bytes.** Format comes from the file's magic
   number rather than its declared type, with size and dimension bounds per
   asset. SVG is refused — it is a script-capable document, not a picture.
-- **Every change is audited**, field by field, old value beside new.
+- **Every change is audited**, field by field, old value beside new — and readable at
+  Admin → Audit log, filtered by action, actor, entity or date. Credential values are
+  redacted on the way out, so a rotation shows *which* key changed and who changed it.
 
 What is deliberately *not* configurable — provider credentials, tutor approval
 before appearing in search, security email, the rating scale, the legal text

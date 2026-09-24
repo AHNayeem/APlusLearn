@@ -2,6 +2,7 @@ import "server-only";
 import { Types } from "mongoose";
 import {
   Booking,
+  BookingSlotLock,
   TutorProfile,
   StudentProfile,
   Course,
@@ -338,8 +339,23 @@ export async function createBooking(input, actor) {
   }
 
   // The validation above is a read followed by a write, so two requests for
-  // the same slot can both pass it. This closes that window before any money
-  // is taken (§18, §42).
+  // the same slot can both pass it. Two things close that window before any
+  // money is taken, in this order (§18, §42):
+  //
+  //   1. an exclusive claim on each start instant, decided by a unique index,
+  //      which is what makes the common race safe across several instances;
+  //   2. the overlap tie-break, for lessons of different lengths that share
+  //      time without sharing a start.
+  const claim = await claimSlots(created, tutor._id);
+  if (!claim.claimed) {
+    await Booking.deleteMany({ _id: { $in: created.map((b) => b._id) } });
+    throw new ConflictError(
+      created.length > 1
+        ? "Someone booked one of those times while you were checking out. Please pick another slot."
+        : `${formatDate(claim.lesson.startAt, { weekday: "short" })} at ${formatTime(claim.lesson.startAt, tutor.timeZone)} was booked moments ago. Please pick another time.`,
+    );
+  }
+
   await settleSlotRace(created, tutor);
 
   // A package lesson has already been paid for, so there is no checkout: the
@@ -435,34 +451,162 @@ function overlapQuery(lessons, tutorProfileId, excludeIds = [], { groupSessionId
   };
 }
 
+/** The lock document id for one tutor's start instant. */
+function slotLockKey(tutorProfileId, startAt) {
+  return `${String(tutorProfileId)}:${new Date(startAt).getTime()}`;
+}
+
 /**
- * Decide a double-booking race, without a transaction.
+ * Is the booking currently named on a lock still holding that slot?
  *
- * MongoDB cannot express "no overlapping time range" as a unique index, and
- * the platform is expected to run against a standalone server as readily as a
- * replica set, so the guarantee is made by writing first and reading back:
- * whichever request inserts second is certain to see the first. When both see
- * each other, the same tie-break runs on both sides — the lowest booking id
- * wins — so exactly one survives and the other is withdrawn before a payment
- * exists for it. Reschedules settle against the same rule.
+ * A lock is stale the moment its booking stops blocking the calendar —
+ * cancelled, expired, rescheduled away, or deleted outright by the tie-break
+ * below. Asking the booking itself is what makes the lock self-healing: no
+ * cancellation path has to remember to release anything.
+ */
+async function lockIsLive(lock, tutorProfileId, startAt) {
+  if (!lock) return false;
+  const holder = await Booking.findById(lock.bookingId)
+    .select("status startAt tutorProfileId")
+    .lean();
+  return Boolean(
+    holder &&
+      BLOCKING_BOOKING_STATUSES.includes(holder.status) &&
+      String(holder.tutorProfileId) === String(tutorProfileId) &&
+      new Date(holder.startAt).getTime() === new Date(startAt).getTime(),
+  );
+}
+
+/**
+ * Claim each lesson's start instant exclusively, or claim none of them.
+ *
+ * This is the half of double-booking prevention the *database* decides. The
+ * `_id` index on `bookingslotlocks` is unique, so of any number of concurrent
+ * requests for the same tutor and the same start time exactly one insert
+ * succeeds — on one instance or on twenty, with no transaction, no replica
+ * set requirement and no index to migrate. The read-then-write check above it
+ * stays where it is: it is what produces a *useful* refusal ("that is outside
+ * the tutor's hours") rather than a bare conflict, and it is the only thing
+ * that can see overlaps between lessons of different lengths.
+ *
+ * A refused claim is not automatically a conflict. The lock may name a
+ * booking that has since been cancelled, expired or withdrawn, in which case
+ * it is taken over with a conditional update — conditional so that two
+ * requests finding the same stale lock cannot both inherit it.
+ *
+ * All-or-nothing across a series: a weekly booking that can claim three of
+ * its four occurrences has not been booked, so the three are released again.
+ */
+async function claimSlots(lessons, tutorProfileId) {
+  const claimed = [];
+
+  const releaseClaimed = async () => {
+    for (const { key, bookingId } of claimed) {
+      await BookingSlotLock.deleteOne({ _id: key, bookingId });
+    }
+  };
+
+  for (const lesson of lessons) {
+    const key = slotLockKey(tutorProfileId, lesson.startAt);
+
+    try {
+      await BookingSlotLock.create({ _id: key, bookingId: lesson._id });
+      claimed.push({ key, bookingId: lesson._id });
+      continue;
+    } catch (error) {
+      if (error?.code !== 11000) {
+        await releaseClaimed();
+        throw error;
+      }
+    }
+
+    const existing = await BookingSlotLock.findById(key).lean();
+    if (await lockIsLive(existing, tutorProfileId, lesson.startAt)) {
+      await releaseClaimed();
+      return { claimed: false, lesson };
+    }
+
+    // Stale, so it can be inherited — but only by whoever gets there first.
+    const taken = await BookingSlotLock.findOneAndUpdate(
+      { _id: key, bookingId: existing?.bookingId ?? null },
+      { $set: { bookingId: lesson._id, claimedAt: new Date() } },
+      { returnDocument: "after" },
+    );
+    if (!taken) {
+      await releaseClaimed();
+      return { claimed: false, lesson };
+    }
+    claimed.push({ key, bookingId: lesson._id });
+  }
+
+  return { claimed: true };
+}
+
+/** Give back the claims a set of bookings holds. Safe to call twice. */
+async function releaseSlots(bookings, tutorProfileId) {
+  for (const booking of bookings) {
+    await BookingSlotLock.deleteOne({
+      _id: slotLockKey(tutorProfileId, booking.startAt),
+      bookingId: booking._id,
+    });
+  }
+}
+
+/**
+ * Decide a double-booking race that the slot claim above could not.
+ *
+ * The claim settles the case two people actually hit — the same offered slot,
+ * at the same moment. What it cannot see is an *overlap* between lessons that
+ * start at different instants: a 60-minute lesson at 15:00 and a 30-minute
+ * one at 15:30 have different lock keys and both claim successfully, so that
+ * pair is still decided by writing first and reading back. Whichever request
+ * inserts second is certain to see the first; when both see each other the
+ * same tie-break runs on both sides — the lowest booking id wins — so exactly
+ * one survives and the other is withdrawn before a payment exists for it.
+ * Reschedules settle against the same rule.
  */
 async function settleSlotRace(created, tutor) {
   const ids = created.map((b) => b._id);
-  const conflicts = await Booking.find(overlapQuery(created, tutor._id, ids))
-    .select("_id startAt")
+  const found = await Booking.find(overlapQuery(created, tutor._id, ids))
+    .select("_id startAt groupSessionId")
     .lean();
+
+  const conflicts = withoutSettledClaims(found, created);
   if (!conflicts.length) return;
 
   const ourEarliest = ids.map(String).sort()[0];
   const lost = conflicts.filter((c) => String(c._id) < ourEarliest);
   if (!lost.length) return;
 
-  // We were second. Withdraw cleanly — nothing has been charged yet.
+  // We were second. Withdraw cleanly — nothing has been charged yet. The
+  // claims go back first, so the slot is free the moment the bookings are.
+  await releaseSlots(created, tutor._id);
   await Booking.deleteMany({ _id: { $in: ids } });
   throw new ConflictError(
     created.length > 1
       ? "Someone booked one of those times while you were checking out. Please pick another slot."
       : `${formatDate(lost[0].startAt, { weekday: "short" })} at ${formatTime(lost[0].startAt, tutor.timeZone)} was booked moments ago. Please pick another time.`,
+  );
+}
+
+/**
+ * Drop the conflicts the slot claim has already decided in our favour.
+ *
+ * Reaching here means we hold the claim on every instant we booked. Another
+ * booking sitting on one of those exact instants therefore lost the claim and
+ * is in the middle of withdrawing — counting it would make the winner stand
+ * down as well, and the slot would go to nobody.
+ *
+ * A booking that is part of a *group session* is the exception: several
+ * learners legitimately share one hour, so those never claim, and one sitting
+ * on our instant is a genuine conflict rather than a loser mid-withdrawal.
+ * Overlaps that start at a different instant are untouched — deciding those
+ * is the whole reason this function still exists.
+ */
+function withoutSettledClaims(conflicts, created) {
+  const ourInstants = new Set(created.map((b) => new Date(b.startAt).getTime()));
+  return conflicts.filter(
+    (c) => c.groupSessionId || !ourInstants.has(new Date(c.startAt).getTime()),
   );
 }
 
@@ -1746,22 +1890,40 @@ export async function rescheduleBooking(id, { startAt, durationMinutes, reason }
   booking.endAt = addMinutes(new Date(startAt), duration);
   booking.durationMinutes = duration;
 
-  // Claim the new slot before anything irreversible happens. Same rule as
-  // booking creation: write, read back, lowest id wins the contested slot.
+  // Claim the new slot before anything irreversible happens. Same two rules
+  // as booking creation: an exclusive claim on the new start instant, then
+  // the overlap tie-break for lessons that share time without sharing a start.
   await booking.save();
-  const raced = await Booking.findOne(
-    overlapQuery([booking], booking.tutorProfileId, [booking._id]),
-  )
-    .select("_id startAt")
-    .lean();
+
+  const movedClaim = await claimSlots([booking], booking.tutorProfileId);
+  if (!movedClaim.claimed) {
+    Object.assign(booking, previous);
+    await booking.save();
+    throw new ConflictError(
+      `${formatDate(startAt, { weekday: "short" })} at ${formatTime(startAt, booking.timeZone)} was booked moments ago. Please pick another time.`,
+    );
+  }
+
+  const [raced] = withoutSettledClaims(
+    await Booking.find(overlapQuery([booking], booking.tutorProfileId, [booking._id]))
+      .select("_id startAt groupSessionId")
+      .lean(),
+    [booking],
+  );
 
   if (raced && String(raced._id) < String(booking._id)) {
+    await releaseSlots([booking], booking.tutorProfileId);
     Object.assign(booking, previous);
     await booking.save();
     throw new ConflictError(
       `${formatDate(raced.startAt, { weekday: "short" })} at ${formatTime(raced.startAt, booking.timeZone)} was booked moments ago. Please pick another time.`,
     );
   }
+
+  // The instant it used to hold is free again. The claim would have healed on
+  // its own — the booking no longer starts there — but releasing it here means
+  // the next request for that slot takes it without a round trip.
+  await releaseSlots([{ _id: booking._id, startAt: previous.startAt }], booking.tutorProfileId);
 
   /**
    * Move the existing room rather than issuing a new link, so a join link

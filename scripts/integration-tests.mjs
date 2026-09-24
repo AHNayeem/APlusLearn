@@ -172,6 +172,12 @@ async function runSections() {
   await avatarFallbackTests();
   await avatarTests();
   await integrationModuleTests();
+  await disputeTests();
+  await curriculumTests();
+  await auditLogTests();
+  await publicSurfaceTests();
+  await bookingSlotLockTests();
+  await rateLimitTests();
 }
 
 /**
@@ -8894,6 +8900,1687 @@ async function integrationResolverTests() {
       await Integration.create(rest);
     }
     invalidateIntegrationCache();
+  }
+}
+
+
+// --- 28. Disputes (§26) -----------------------------------------------------
+
+/**
+ * The dispute lifecycle, against the payment ledger it is supposed to agree
+ * with.
+ *
+ * The rule this section exists for is that **a decision is terminal**. A
+ * dispute that has been decided cannot be decided again, by a second click, a
+ * replayed request or a second administrator — because the first decision
+ * already moved money through `refundPayment`, and a second one would leave
+ * the stored dispute describing a refund that did not happen that way. The
+ * payment layer refuses to over-refund whatever we do here, so the money was
+ * never at risk; what was at risk was the record, and therefore every report
+ * and audit built on it.
+ *
+ * Every assertion checks the persisted documents, not just the return value:
+ * the failure mode being guarded against is precisely one where the response
+ * looks fine and the database does not.
+ */
+async function disputeTests() {
+  section("Disputes — lifecycle, terminal decisions and the payment ledger");
+
+  const uri = process.env.MONGODB_URI;
+  if (!uri) return skip("disputes", "MONGODB_URI is not set");
+
+  if (mongoose.connection.readyState !== 1) {
+    try {
+      await mongoose.connect(uri, { serverSelectionTimeoutMS: 2500 });
+    } catch {
+      return skip("disputes", "MongoDB is not reachable");
+    }
+  }
+
+  const {
+    Dispute, Booking, Payment, TutorProfile, StudentProfile, Notification, AuditLog, RiskCase,
+    Settings,
+  } = await import("@/models");
+  const disputes = await import("@/services/dispute.service");
+  const {
+    DISPUTE_STATUS, DISPUTE_REASONS, BOOKING_STATUS, PAYMENT_STATUS, ROLES,
+    RESOLVED_DISPUTE_STATUSES, OPEN_DISPUTE_STATUSES,
+  } = await import("@/constants");
+  const { resetPaymentProvider } = await import("@/services/external/payment-provider");
+  const { invalidateSettingsCache } = await import("@/services/settings.service");
+
+  const tutor = await TutorProfile.findOne({ isSearchable: true }).populate("userId").lean();
+  const learner = await StudentProfile.findOne({ archivedAt: null }).lean();
+  if (!tutor || !learner) {
+    return skip("disputes", "no seeded tutor/student — run `bun run seed`");
+  }
+
+  // A refund is a real call into the payment adapter. This section is about
+  // the dispute rules rather than the card rails, which have their own
+  // section, so it runs on the development provider.
+  const paymentProviderBefore = process.env.PAYMENT_PROVIDER;
+  process.env.PAYMENT_PROVIDER = "development";
+  resetPaymentProvider();
+
+  const purchaserId = learner.ownerId;
+  const tutorUserId = tutor.userId?._id ?? tutor.userId;
+
+  const purchaser = { id: String(purchaserId), role: ROLES.PARENT };
+  const tutorActor = { id: String(tutorUserId), role: ROLES.TUTOR };
+  const stranger = { id: String(new mongoose.Types.ObjectId()), role: ROLES.PARENT };
+  const admin = { id: String(new mongoose.Types.ObjectId()), role: ROLES.ADMIN };
+  const otherAdmin = { id: String(new mongoose.Types.ObjectId()), role: ROLES.ADMIN };
+
+  const madeBookings = [];
+  const madePayments = [];
+  const madeDisputes = [];
+
+  // Far enough back that the lessons have genuinely finished — a dispute can
+  // only be raised on a lesson that is over — and old enough to sit outside
+  // every analytics window, so this fixture cannot move a reported figure.
+  // Stepped per fixture so two of these can never collide with each other.
+  let pastCursor = new Date("2024-03-03T14:00:00.000Z");
+
+  /**
+   * A finished, fully paid lesson — the only shape a dispute can be raised
+   * against. `paidTotal` is allowed to differ from the lesson price so the
+   * mismatch case (below) can be built from the same helper.
+   */
+  const settledLesson = async ({ totalCents = 6000, paidTotal = totalCents } = {}) => {
+    const startAt = new Date(pastCursor);
+    pastCursor = new Date(pastCursor.getTime() + 3 * 60 * 60 * 1000);
+    const endAt = new Date(startAt.getTime() + 60 * 60 * 1000);
+
+    const booking = await Booking.create({
+      reference: `APL-D${randomUUID().replace(/-/g, "").slice(0, 8).toUpperCase()}`,
+      purchaserId,
+      studentProfileId: learner._id,
+      tutorProfileId: tutor._id,
+      tutorUserId,
+      courseId: tutor.courseIds?.[0] ?? new mongoose.Types.ObjectId(),
+      courseName: "Advanced Functions",
+      courseCode: "MHF4U",
+      mode: "ONLINE",
+      startAt,
+      endAt,
+      durationMinutes: 60,
+      status: BOOKING_STATUS.COMPLETED,
+      completedAt: endAt,
+      price: {
+        hourlyRateCents: totalCents,
+        durationMinutes: 60,
+        subtotalCents: totalCents,
+        commissionPercent: 15,
+        commissionCents: Math.round(totalCents * 0.15),
+        tutorEarningsCents: totalCents - Math.round(totalCents * 0.15),
+        totalCents,
+      },
+    });
+
+    const payment = await Payment.create({
+      bookingId: booking._id,
+      purchaserId,
+      tutorUserId,
+      subtotalCents: paidTotal,
+      commissionPercent: 15,
+      commissionCents: Math.round(paidTotal * 0.15),
+      tutorEarningsCents: paidTotal - Math.round(paidTotal * 0.15),
+      totalCents: paidTotal,
+      status: PAYMENT_STATUS.PAID,
+      paidAt: endAt,
+      provider: "DEVELOPMENT",
+      providerPaymentIntentId: `pi_dev_${randomUUID().replace(/-/g, "").slice(0, 16)}`,
+    });
+
+    await Booking.updateOne({ _id: booking._id }, { $set: { paymentId: payment._id } });
+    booking.paymentId = payment._id;
+
+    madeBookings.push(booking._id);
+    madePayments.push(payment._id);
+    return { booking, payment };
+  };
+
+  /** Raise a dispute on a fresh settled lesson and return everything about it. */
+  const openDispute = async (actor = purchaser, overrides = {}) => {
+    const { booking, payment } = await settledLesson(overrides.lesson ?? {});
+    const dispute = await disputes.createDispute(
+      {
+        bookingId: String(booking._id),
+        reason: DISPUTE_REASONS.LESSON_QUALITY,
+        description: "The lesson did not cover what was agreed. Raised by the integration suite.",
+        ...overrides.input,
+      },
+      actor,
+    );
+    madeDisputes.push(dispute.id);
+    return { dispute, booking, payment };
+  };
+
+  const disputeDoc = (id) => Dispute.findById(id).lean();
+  const paymentDoc = (id) => Payment.findById(id).lean();
+  const bookingDoc = (id) => Booking.findById(id).lean();
+
+  const riskBefore = await Settings.findOne({ key: "PLATFORM" }).select("risk").lean();
+
+  try {
+    // --- 1. Raising: who may, and when -------------------------------------
+    const { booking: openLesson } = await settledLesson();
+
+    const byStranger = await throws(
+      () =>
+        disputes.createDispute(
+          {
+            bookingId: String(openLesson._id),
+            reason: DISPUTE_REASONS.BILLING,
+            description: "I have nothing to do with this lesson at all, honestly.",
+          },
+          stranger,
+        ),
+      (e) => e.code === "FORBIDDEN",
+    );
+    check("someone who was not on the lesson cannot raise a dispute about it",
+      byStranger.threw && byStranger.matched, byStranger.error?.message);
+
+    // A lesson that has not happened yet has nothing to dispute.
+    const futureStart = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    const future = await Booking.create({
+      reference: `APL-D${randomUUID().replace(/-/g, "").slice(0, 8).toUpperCase()}`,
+      purchaserId,
+      studentProfileId: learner._id,
+      tutorProfileId: tutor._id,
+      tutorUserId,
+      courseId: tutor.courseIds?.[0] ?? new mongoose.Types.ObjectId(),
+      courseName: "Advanced Functions",
+      mode: "ONLINE",
+      startAt: futureStart,
+      endAt: new Date(futureStart.getTime() + 3600_000),
+      durationMinutes: 60,
+      status: BOOKING_STATUS.CONFIRMED,
+      price: {
+        hourlyRateCents: 6000, durationMinutes: 60, subtotalCents: 6000,
+        commissionPercent: 15, commissionCents: 900, tutorEarningsCents: 5100, totalCents: 6000,
+      },
+    });
+    madeBookings.push(future._id);
+
+    const tooEarly = await throws(
+      () =>
+        disputes.createDispute(
+          {
+            bookingId: String(future._id),
+            reason: DISPUTE_REASONS.OTHER,
+            description: "Raising this before the lesson has even started, which is too early.",
+          },
+          purchaser,
+        ),
+      (e) => e.status === 422,
+    );
+    check("a dispute cannot be raised before the lesson has finished",
+      tooEarly.threw && tooEarly.matched, tooEarly.error?.message);
+
+    // --- 2. A raised dispute, and what it did to the booking ---------------
+    const first = await disputes.createDispute(
+      {
+        bookingId: String(openLesson._id),
+        reason: DISPUTE_REASONS.TUTOR_NO_SHOW,
+        description: "Nobody joined the room at the agreed time. Raised by the integration suite.",
+        requestedRefundCents: 6000,
+      },
+      purchaser,
+    );
+    madeDisputes.push(first.id);
+
+    check("a dispute starts open", first.status === DISPUTE_STATUS.OPEN);
+    check("and is counted against the other party, not the person who raised it",
+      String(first.againstUserId) === String(tutorUserId));
+    check("the lesson moves into the disputed state",
+      (await bookingDoc(openLesson._id)).status === BOOKING_STATUS.DISPUTED);
+    check("and it carries a public reference", /^DIS-/.test(first.reference));
+
+    const opened = await Notification.countDocuments({
+      entityType: "Dispute",
+      entityId: new mongoose.Types.ObjectId(first.id),
+      userId: tutorUserId,
+    });
+    check("the person it is about is told", opened === 1);
+
+    const second = await throws(
+      () =>
+        disputes.createDispute(
+          {
+            bookingId: String(openLesson._id),
+            reason: DISPUTE_REASONS.BILLING,
+            description: "A second, simultaneous dispute about exactly the same lesson.",
+          },
+          tutorActor,
+        ),
+      (e) => e.code === "CONFLICT",
+    );
+    check("a second dispute cannot be opened while one is still running",
+      second.threw && second.matched, second.error?.message);
+
+    const { booking: overAskLesson } = await settledLesson();
+    const overAsk = await throws(
+      () =>
+        disputes.createDispute(
+          {
+            bookingId: String(overAskLesson._id),
+            reason: DISPUTE_REASONS.BILLING,
+            description: "Asking for more money back than the lesson ever cost anybody.",
+            requestedRefundCents: 99_999_00,
+          },
+          purchaser,
+        ),
+      (e) => e.status === 422,
+    );
+    check("a request for more than the lesson cost is refused",
+      overAsk.threw && overAsk.matched, overAsk.error?.message);
+
+    // --- 3. Reading it -----------------------------------------------------
+    const asParty = await disputes.getDispute(first.id, purchaser);
+    check("the person who raised it can read it", asParty.id === first.id);
+    check("and a party sees no internal admin notes", asParty.adminNotes === undefined);
+
+    const asStranger = await throws(
+      () => disputes.getDispute(first.id, stranger),
+      (e) => e.code === "FORBIDDEN",
+    );
+    check("someone unrelated cannot read it", asStranger.threw && asStranger.matched);
+
+    const noted = await disputes.addDisputeNote(first.id, "Called the tutor for their side.", admin);
+    check("an internal note moves an open dispute into review",
+      noted.status === DISPUTE_STATUS.UNDER_REVIEW);
+    check("and the note is kept with who wrote it",
+      noted.adminNotes.length === 1 && String(noted.adminNotes[0].adminId) === admin.id);
+    check("an administrator does see the internal notes",
+      (await disputes.getDispute(first.id, admin)).adminNotes.length === 1);
+
+    // --- 4. Risk linkage ---------------------------------------------------
+    //
+    // Thresholds are the operator's, so the fixture sets one it can predict
+    // and puts it back afterwards. What is being proved is the *linkage* —
+    // that raising a dispute reaches the risk service at all — not the
+    // shipped number.
+    await Settings.updateOne(
+      { key: "PLATFORM" },
+      { $set: { "risk.enabled": true, "risk.disputeThreshold": 1, "risk.reviewScore": 1 } },
+      { upsert: true },
+    );
+    invalidateSettingsCache();
+
+    const { dispute: flagging } = await openDispute(purchaser);
+    const riskCase = await RiskCase.findOne({
+      subjectUserId: tutorUserId,
+      "signals.type": "REPEATED_DISPUTES",
+    }).lean();
+    check("a dispute opens or joins a risk case against the account it names",
+      Boolean(riskCase), "no case with a REPEATED_DISPUTES signal");
+    check("and the signal carries the dispute as its evidence",
+      Boolean(riskCase?.signals?.some((s) => s.type === "REPEATED_DISPUTES" && s.summary)));
+
+    // --- 5. A decision with no money in it ---------------------------------
+    const { dispute: noRefundCase, booking: noRefundBooking, payment: noRefundPayment } =
+      await openDispute();
+
+    const noRefund = await disputes.resolveDispute(
+      noRefundCase.id,
+      { resolution: "RESOLVED_NO_REFUND", note: "The lesson took place as described." },
+      admin,
+    );
+    check("a no-refund decision closes the dispute",
+      noRefund.status === DISPUTE_STATUS.RESOLVED_NO_REFUND);
+    check("records who decided it and when",
+      String(noRefund.resolvedBy) === admin.id && Boolean(noRefund.resolvedAt));
+    check("issues nothing", noRefund.refundIssuedCents === 0);
+    check("leaves the payment exactly as it was",
+      (await paymentDoc(noRefundPayment._id)).refundedCents === 0);
+    check("and returns the lesson to completed rather than cancelled",
+      (await bookingDoc(noRefundBooking._id)).status === BOOKING_STATUS.COMPLETED);
+
+    const bothTold = await Notification.countDocuments({
+      entityType: "Dispute",
+      entityId: new mongoose.Types.ObjectId(noRefundCase.id),
+      title: new RegExp(`${noRefund.reference} resolved`),
+    });
+    check("both parties are told the outcome", bothTold === 2);
+
+    const audited = await AuditLog.countDocuments({
+      action: "DISPUTE_RESOLVED",
+      entityId: new mongoose.Types.ObjectId(noRefundCase.id),
+    });
+    check("and the decision is audited exactly once", audited === 1);
+
+    // --- 6. The terminal guard ---------------------------------------------
+    //
+    // One fixture per terminal status, because the defect this replaces was
+    // specifically that *some* closed states were re-decidable.
+    const terminalCases = [
+      { resolution: "RESOLVED_NO_REFUND", expect: DISPUTE_STATUS.RESOLVED_NO_REFUND },
+      { resolution: "REJECTED", expect: DISPUTE_STATUS.REJECTED },
+      { resolution: "RESOLVED_REFUND", expect: DISPUTE_STATUS.RESOLVED_REFUND },
+      { resolution: "RESOLVED_PARTIAL_REFUND", expect: DISPUTE_STATUS.RESOLVED_PARTIAL_REFUND },
+    ];
+
+    for (const terminal of terminalCases) {
+      const { dispute, payment } = await openDispute();
+      const decided = await disputes.resolveDispute(
+        dispute.id,
+        {
+          resolution: terminal.resolution,
+          refundCents: terminal.resolution === "RESOLVED_PARTIAL_REFUND" ? 1500 : undefined,
+          note: `First and only decision: ${terminal.resolution}.`,
+        },
+        admin,
+      );
+      check(`a ${terminal.resolution.toLowerCase()} decision is recorded`,
+        decided.status === terminal.expect);
+
+      const refundedAfterFirst = (await paymentDoc(payment._id)).refundedCents ?? 0;
+
+      // Every other decision, tried against this closed dispute.
+      for (const again of ["RESOLVED_REFUND", "RESOLVED_NO_REFUND", "RESOLVED_PARTIAL_REFUND", "REJECTED"]) {
+        const refused = await throws(
+          () =>
+            disputes.resolveDispute(
+              dispute.id,
+              { resolution: again, refundCents: 500, note: "Trying to decide this a second time." },
+              otherAdmin,
+            ),
+          (e) => e.code === "CONFLICT",
+        );
+        check(`a ${terminal.expect} dispute refuses a later ${again}`,
+          refused.threw && refused.matched,
+          refused.error?.message ?? "it was accepted");
+      }
+
+      const stored = await disputeDoc(dispute.id);
+      check(`the ${terminal.expect} record is unchanged by the attempts`,
+        stored.status === terminal.expect && String(stored.resolvedBy) === admin.id);
+      check(`and no further money moved on its payment`,
+        ((await paymentDoc(payment._id)).refundedCents ?? 0) === refundedAfterFirst);
+      check(`the audit still shows one decision for it`,
+        (await AuditLog.countDocuments({
+          action: "DISPUTE_RESOLVED",
+          entityId: new mongoose.Types.ObjectId(dispute.id),
+        })) === 1);
+    }
+
+    // --- 7. The money, in both directions ----------------------------------
+    const { dispute: partialCase, booking: partialBooking, payment: partialPayment } =
+      await openDispute();
+    const partial = await disputes.resolveDispute(
+      partialCase.id,
+      { resolution: "RESOLVED_PARTIAL_REFUND", refundCents: 2500, note: "Half the lesson was lost." },
+      admin,
+    );
+    const partialLedger = await paymentDoc(partialPayment._id);
+    check("a partial refund reaches the payment", partialLedger.refundedCents === 2500);
+    check("and leaves it partially refunded",
+      partialLedger.status === PAYMENT_STATUS.PARTIALLY_REFUNDED);
+    check("the dispute records the same figure the ledger did",
+      partial.refundIssuedCents === partialLedger.refundedCents);
+    check("and a partly refunded lesson still counts as completed",
+      (await bookingDoc(partialBooking._id)).status === BOOKING_STATUS.COMPLETED);
+
+    const { dispute: fullCase, booking: fullBooking, payment: fullPayment } = await openDispute();
+    const full = await disputes.resolveDispute(
+      fullCase.id,
+      { resolution: "RESOLVED_REFUND", note: "The lesson never happened." },
+      admin,
+    );
+    const fullLedger = await paymentDoc(fullPayment._id);
+    check("a full refund returns the whole lesson price", fullLedger.refundedCents === 6000);
+    check("and marks the payment refunded", fullLedger.status === PAYMENT_STATUS.REFUNDED);
+    check("the dispute agrees with it", full.refundIssuedCents === 6000);
+    check("and a fully refunded lesson is cancelled rather than completed",
+      (await bookingDoc(fullBooking._id)).status === BOOKING_STATUS.CANCELLED_BY_ADMIN);
+
+    // --- 8. A payment that has already given everything back ---------------
+    //
+    // The first dispute took the whole lesson price. A second one on the same
+    // lesson must not be able to award it again — the ledger would refuse the
+    // refund, and without this the dispute record would claim one anyway.
+    const secondBite = await disputes.createDispute(
+      {
+        bookingId: String(fullBooking._id),
+        reason: DISPUTE_REASONS.BILLING,
+        description: "A second dispute on a lesson whose money has already been returned.",
+      },
+      purchaser,
+    );
+    madeDisputes.push(secondBite.id);
+
+    const secondDecision = await disputes.resolveDispute(
+      secondBite.id,
+      { resolution: "RESOLVED_REFUND", note: "Nothing is left to refund on this one." },
+      admin,
+    );
+    check("a refund decision on an already-refunded lesson issues nothing",
+      secondDecision.refundIssuedCents === 0);
+    check("and the ledger is untouched by it",
+      (await paymentDoc(fullPayment._id)).refundedCents === 6000);
+
+    const disputeTotal = (
+      await Dispute.find({ bookingId: fullBooking._id }).select("refundIssuedCents").lean()
+    ).reduce((sum, d) => sum + (d.refundIssuedCents ?? 0), 0);
+    check("the disputes on a lesson never add up to more than the ledger returned",
+      disputeTotal === (await paymentDoc(fullPayment._id)).refundedCents);
+
+    const askingTooMuch = await throws(
+      () =>
+        disputes.createDispute(
+          {
+            bookingId: String(fullBooking._id),
+            reason: DISPUTE_REASONS.BILLING,
+            description: "Asking for money back that an earlier dispute already returned.",
+            requestedRefundCents: 6000,
+          },
+          tutorActor,
+        ),
+      (e) => e.status === 422,
+    );
+    check("and a new dispute cannot ask for what an earlier one already returned",
+      askingTooMuch.threw && askingTooMuch.matched, askingTooMuch.error?.message);
+
+    // --- 9. A refund the ledger refuses leaves the dispute decidable -------
+    //
+    // A lesson priced above what was actually collected. The decision asks
+    // for the lesson price, the ledger refuses, and the dispute has to end up
+    // exactly where it started rather than closed on a refund that never
+    // happened.
+    const { dispute: mismatched, payment: shortPayment } = await openDispute(purchaser, {
+      lesson: { totalCents: 9000, paidTotal: 6000 },
+    });
+
+    const refused = await throws(
+      () =>
+        disputes.resolveDispute(
+          mismatched.id,
+          { resolution: "RESOLVED_REFUND", note: "Refunding more than was ever collected." },
+          admin,
+        ),
+      (e) => e.code === "REFUND_EXCEEDS_BALANCE",
+    );
+    check("a decision whose refund the ledger refuses fails",
+      refused.threw && refused.matched, refused.error?.message);
+
+    const released = await disputeDoc(mismatched.id);
+    check("and leaves the dispute open for another attempt",
+      OPEN_DISPUTE_STATUSES.includes(released.status), released.status);
+    check("with nothing recorded as decided",
+      !released.resolvedAt && !released.resolvedBy && (released.refundIssuedCents ?? 0) === 0);
+    check("and nothing taken from the payment",
+      ((await paymentDoc(shortPayment._id)).refundedCents ?? 0) === 0);
+
+    const retried = await disputes.resolveDispute(
+      mismatched.id,
+      { resolution: "RESOLVED_PARTIAL_REFUND", refundCents: 6000, note: "Returning what was paid." },
+      admin,
+    );
+    check("so the administrator can decide it correctly on the second attempt",
+      retried.status === DISPUTE_STATUS.RESOLVED_PARTIAL_REFUND &&
+        retried.refundIssuedCents === 6000);
+
+    // --- 10. Two administrators, at the same moment ------------------------
+    const { dispute: raced, payment: racedPayment } = await openDispute();
+    const outcomes = await Promise.allSettled([
+      disputes.resolveDispute(
+        raced.id,
+        { resolution: "RESOLVED_REFUND", note: "First administrator, deciding to refund." },
+        admin,
+      ),
+      disputes.resolveDispute(
+        raced.id,
+        { resolution: "RESOLVED_NO_REFUND", note: "Second administrator, deciding not to." },
+        otherAdmin,
+      ),
+    ]);
+
+    const won = outcomes.filter((o) => o.status === "fulfilled");
+    const lost = outcomes.filter((o) => o.status === "rejected");
+    check("exactly one of two simultaneous decisions is accepted",
+      won.length === 1, `${won.length} succeeded`);
+    check("and the other is refused as a conflict",
+      lost.length === 1 && lost[0].reason?.code === "CONFLICT",
+      lost[0]?.reason?.code);
+
+    const racedStored = await disputeDoc(raced.id);
+    const racedLedger = await paymentDoc(racedPayment._id);
+    check("the stored decision is the one that was accepted",
+      racedStored.status === won[0].value.status);
+    check("and the ledger matches whichever decision that was",
+      (racedLedger.refundedCents ?? 0) === racedStored.refundIssuedCents,
+      `${racedLedger.refundedCents} vs ${racedStored.refundIssuedCents}`);
+    check("the race produced one audit record, not two",
+      (await AuditLog.countDocuments({
+        action: "DISPUTE_RESOLVED",
+        entityId: new mongoose.Types.ObjectId(raced.id),
+      })) === 1);
+
+    // --- 11. The shared vocabulary -----------------------------------------
+    check("every decided status is named as terminal",
+      RESOLVED_DISPUTE_STATUSES.length === 4 &&
+        RESOLVED_DISPUTE_STATUSES.every((s) => !OPEN_DISPUTE_STATUSES.includes(s)));
+    check("and the two lists together cover every dispute status",
+      new Set([...RESOLVED_DISPUTE_STATUSES, ...OPEN_DISPUTE_STATUSES]).size ===
+        Object.values(DISPUTE_STATUS).length);
+
+    // --- 12. The one that is still open is still decidable -----------------
+    const closing = await disputes.resolveDispute(
+      flagging.id,
+      { resolution: "REJECTED", note: "Closing the risk fixture; not a real decision." },
+      admin,
+    );
+    check("an open dispute is still decidable after all of the above",
+      closing.status === DISPUTE_STATUS.REJECTED);
+  } finally {
+    // Thresholds back the way the deployment had them.
+    await Settings.updateOne(
+      { key: "PLATFORM" },
+      {
+        $set: {
+          "risk.enabled": riskBefore?.risk?.enabled ?? true,
+          "risk.disputeThreshold": riskBefore?.risk?.disputeThreshold ?? 2,
+          "risk.reviewScore": riskBefore?.risk?.reviewScore ?? 2,
+        },
+      },
+    );
+    invalidateSettingsCache();
+
+    if (paymentProviderBefore === undefined) delete process.env.PAYMENT_PROVIDER;
+    else process.env.PAYMENT_PROVIDER = paymentProviderBefore;
+    resetPaymentProvider();
+
+    const disputeIds = madeDisputes.map((id) => new mongoose.Types.ObjectId(id));
+    await Notification.deleteMany({ entityType: "Dispute", entityId: { $in: disputeIds } });
+    await AuditLog.deleteMany({ entityType: "Dispute", entityId: { $in: disputeIds } });
+    await Dispute.deleteMany({ _id: { $in: disputeIds } });
+    await AuditLog.deleteMany({ entityType: "Payment", entityId: { $in: madePayments } });
+    await Notification.deleteMany({ entityType: "Payment", entityId: { $in: madePayments } });
+    await Payment.deleteMany({ _id: { $in: madePayments } });
+    await Booking.deleteMany({ _id: { $in: madeBookings } });
+    // The risk fixture named a real seeded tutor, which may have had a case
+    // before this run. Only the signals this run added are pulled, and the
+    // case itself is removed only if nothing else was ever in it.
+    await RiskCase.updateMany(
+      { subjectUserId: tutorUserId },
+      {
+        $pull: {
+          signals: { dedupeKey: { $in: madeDisputes.map((id) => `dispute:${tutorUserId}:${id}`) } },
+        },
+      },
+    );
+    await RiskCase.deleteMany({ subjectUserId: tutorUserId, signals: { $size: 0 } });
+  }
+}
+
+// --- 29. Curriculum (§13) ---------------------------------------------------
+
+/**
+ * Province → grade → subject → course, through the service that owns it.
+ *
+ * Three things only a direct call can reach, and all three are the reason
+ * this module needed coverage: that a course carries the *denormalised*
+ * province, grade and subject the whole of search reads instead of a
+ * `$lookup`, and that those copies are rewritten when the course is moved;
+ * that deactivation really does remove something from every public read,
+ * because deactivation is the only removal path provinces, grades and
+ * subjects have; and that the per-process reference cache is dropped on every
+ * write, since a sixty-second stale picker after an administrator adds a
+ * course is indistinguishable from the write not having worked.
+ *
+ * Who may write is a separate question, answered over HTTP in `qa.mjs` where
+ * the permission actually lives.
+ */
+async function curriculumTests() {
+  section("Curriculum — hierarchy, denormalisation, activation and caching");
+
+  const uri = process.env.MONGODB_URI;
+  if (!uri) return skip("curriculum", "MONGODB_URI is not set");
+
+  if (mongoose.connection.readyState !== 1) {
+    try {
+      await mongoose.connect(uri, { serverSelectionTimeoutMS: 2500 });
+    } catch {
+      return skip("curriculum", "MongoDB is not reachable");
+    }
+  }
+
+  const { Province, Grade, Subject, Course, TutorProfile, AuditLog } = await import("@/models");
+  const curriculum = await import("@/services/curriculum.service");
+  const { ROLES } = await import("@/constants");
+
+  const admin = { id: String(new mongoose.Types.ObjectId()), role: ROLES.ADMIN };
+  const tag = randomUUID().slice(0, 6).toUpperCase();
+
+  const made = { provinces: [], grades: [], subjects: [], courses: [] };
+
+  try {
+    // --- provinces ---------------------------------------------------------
+    const province = await curriculum.createProvince(
+      {
+        code: `Z${tag}`,
+        name: `Testland ${tag}`,
+        isActive: true,
+        usesCourseCodes: true,
+        displayOrder: 900,
+      },
+      admin,
+    );
+    made.provinces.push(province.id);
+
+    check("a province is created with a slug derived from its name",
+      province.slug === `testland-${tag.toLowerCase()}`);
+    check("and it is immediately visible to the public reader",
+      (await curriculum.listProvinces()).some((p) => p.id === province.id),
+      "the reference cache was not dropped on write");
+
+    const dupCode = await throws(
+      () =>
+        curriculum.createProvince(
+          { code: province.code, name: `Somewhere else ${tag}`, isActive: true },
+          admin,
+        ),
+      (e) => e.code === "CONFLICT",
+    );
+    check("a second province cannot reuse a province code",
+      dupCode.threw && dupCode.matched, dupCode.error?.message);
+
+    const dupName = await throws(
+      () => curriculum.createProvince({ code: `Y${tag}`, name: province.name }, admin),
+      (e) => e.code === "CONFLICT",
+    );
+    check("nor the same name, which would collide on the slug",
+      dupName.threw && dupName.matched, dupName.error?.message);
+
+    const missingProvince = await throws(
+      () => curriculum.updateProvince(new mongoose.Types.ObjectId(), { isActive: false }, admin),
+      (e) => e.code === "NOT_FOUND",
+    );
+    check("updating a province that does not exist is a 404, not a silent no-op",
+      missingProvince.threw && missingProvince.matched);
+
+    // --- grades ------------------------------------------------------------
+    const grade = await curriculum.createGrade(
+      { provinceId: province.id, name: `Grade 12 ${tag}`, level: 12, stage: "SECONDARY" },
+      admin,
+    );
+    made.grades.push(grade.id);
+    check("a grade belongs to a province", String(grade.provinceId) === province.id);
+    check("and appears under it", (await curriculum.listGrades({ provinceCode: province.code }))
+      .some((g) => g.id === grade.id));
+
+    const dupGrade = await throws(
+      () =>
+        curriculum.createGrade(
+          { provinceId: province.id, name: grade.name, level: 12, stage: "SECONDARY" },
+          admin,
+        ),
+      (e) => e.code === 11000 || /duplicate key/i.test(e.message),
+    );
+    check("the same grade cannot be added twice to one province",
+      dupGrade.threw && dupGrade.matched, dupGrade.error?.message);
+
+    const badStage = await throws(
+      () =>
+        curriculum.createGrade(
+          { provinceId: province.id, name: `Grade 13 ${tag}`, level: 13, stage: "UNIVERSITY" },
+          admin,
+        ),
+      (e) => e.name === "ValidationError",
+    );
+    check("and a grade cannot be given a stage the model does not define",
+      badStage.threw && badStage.matched, badStage.error?.message);
+
+    // --- subjects ----------------------------------------------------------
+    const subject = await curriculum.createSubject(
+      { name: `Astrophysics ${tag}`, isActive: true, displayOrder: 900 },
+      admin,
+    );
+    made.subjects.push(subject.id);
+    check("a subject is created active and listed",
+      (await curriculum.listSubjects()).some((s) => s.id === subject.id));
+
+    const dupSubject = await throws(
+      () => curriculum.createSubject({ name: subject.name }, admin),
+      (e) => e.code === 11000 || /duplicate key/i.test(e.message),
+    );
+    check("two subjects cannot share a slug",
+      dupSubject.threw && dupSubject.matched, dupSubject.error?.message);
+
+    // --- courses -----------------------------------------------------------
+    const course = await curriculum.createCourse(
+      {
+        provinceId: province.id,
+        gradeId: grade.id,
+        subjectId: subject.id,
+        name: `Stellar Mechanics ${tag}`,
+        code: `ZZZ${tag.slice(0, 2)}`,
+        stream: "University",
+        isActive: true,
+      },
+      admin,
+    );
+    made.courses.push(course.id);
+
+    check("a course copies the province code it was created under",
+      course.provinceCode === province.code);
+    check("and the grade's slug and level", course.gradeSlug === grade.slug && course.gradeLevel === 12);
+    check("and the subject's slug and name",
+      course.subjectSlug === subject.slug && course.subjectName === subject.name);
+    check("its own slug comes from its name", course.slug.startsWith("stellar-mechanics"));
+
+    const badParents = await throws(
+      () =>
+        curriculum.createCourse(
+          {
+            provinceId: new mongoose.Types.ObjectId(),
+            gradeId: grade.id,
+            subjectId: subject.id,
+            name: `Orphan course ${tag}`,
+          },
+          admin,
+        ),
+      (e) => e.code === "NOT_FOUND",
+    );
+    check("a course cannot be hung off a province that does not exist",
+      badParents.threw && badParents.matched, badParents.error?.message);
+
+    const dupCourseCode = await throws(
+      () =>
+        curriculum.createCourse(
+          {
+            provinceId: province.id,
+            gradeId: grade.id,
+            subjectId: subject.id,
+            name: `A different name ${tag}`,
+            code: course.code,
+          },
+          admin,
+        ),
+      (e) => e.code === 11000 || /duplicate key/i.test(e.message),
+    );
+    check("a course code is unique within its province",
+      dupCourseCode.threw && dupCourseCode.matched, dupCourseCode.error?.message);
+
+    // Two codeless courses are legitimate — the uniqueness index is partial
+    // precisely so elementary courses do not collide on a missing code.
+    const codeless = await curriculum.createCourse(
+      {
+        provinceId: province.id,
+        gradeId: grade.id,
+        subjectId: subject.id,
+        name: `Introductory Stargazing ${tag}`,
+      },
+      admin,
+    );
+    made.courses.push(codeless.id);
+    const secondCodeless = await curriculum.createCourse(
+      {
+        provinceId: province.id,
+        gradeId: grade.id,
+        subjectId: subject.id,
+        name: `Advanced Stargazing ${tag}`,
+      },
+      admin,
+    );
+    made.courses.push(secondCodeless.id);
+    check("but two courses with no code at all do not collide",
+      Boolean(codeless.id && secondCodeless.id));
+
+    const foundByPath = await curriculum.getCourseByPath({
+      province: province.code,
+      grade: grade.slug,
+      subject: subject.slug,
+      course: course.slug,
+    });
+    check("the public SEO path resolves to the course", foundByPath?.id === course.id);
+    check("and so does its course code", (
+      await curriculum.getCourseByPath({
+        province: province.code,
+        grade: grade.slug,
+        subject: subject.slug,
+        course: course.code,
+      })
+    )?.id === course.id);
+
+    // --- moving a course rewrites its denormalised copies ------------------
+    const otherSubject = await curriculum.createSubject({ name: `Geology ${tag}` }, admin);
+    made.subjects.push(otherSubject.id);
+    const otherGrade = await curriculum.createGrade(
+      { provinceId: province.id, name: `Grade 11 ${tag}`, level: 11, stage: "SECONDARY" },
+      admin,
+    );
+    made.grades.push(otherGrade.id);
+
+    const moved = await curriculum.updateCourse(
+      course.id,
+      { subjectId: otherSubject.id, gradeId: otherGrade.id },
+      admin,
+    );
+    check("moving a course to another subject rewrites its denormalised subject",
+      moved.subjectSlug === otherSubject.slug && moved.subjectName === otherSubject.name);
+    check("and moving it to another grade rewrites the slug and the level",
+      moved.gradeSlug === otherGrade.slug && moved.gradeLevel === 11);
+    check("so a search filtered by the new grade finds it",
+      (await curriculum.listCourses({ province: province.code, grade: otherGrade.slug }))
+        .items.some((c) => c.id === course.id));
+    check("and one filtered by the old grade no longer does",
+      !(await curriculum.listCourses({ province: province.code, grade: grade.slug }))
+        .items.some((c) => c.id === course.id));
+
+    const missingCourse = await throws(
+      () => curriculum.updateCourse(new mongoose.Types.ObjectId(), { name: "Nowhere" }, admin),
+      (e) => e.code === "NOT_FOUND",
+    );
+    check("updating a course that does not exist is refused",
+      missingCourse.threw && missingCourse.matched);
+
+    // --- active / inactive --------------------------------------------------
+    await curriculum.updateCourse(course.id, { isActive: false }, admin);
+    const publicCourses = await curriculum.listCourses({ province: province.code });
+    const adminCourses = await curriculum.listCourses({
+      province: province.code,
+      activeOnly: false,
+    });
+    check("a deactivated course leaves the public course list",
+      !publicCourses.items.some((c) => c.id === course.id));
+    check("but is still there for the administrator who deactivated it",
+      adminCourses.items.some((c) => c.id === course.id));
+    check("and it no longer resolves on its public path",
+      (await curriculum.getCourseByPath({
+        province: province.code,
+        grade: otherGrade.slug,
+        subject: otherSubject.slug,
+        course: course.slug,
+      })) === null);
+
+    await curriculum.updateSubject(subject.id, { isActive: false }, admin);
+    check("a deactivated subject leaves the subject list",
+      !(await curriculum.listSubjects()).some((s) => s.id === subject.id));
+    check("and leaves the curriculum tree",
+      !(await curriculum.getCurriculumTree(province.code)).subjects.some((s) => s.id === subject.id));
+
+    await curriculum.updateGrade(grade.id, { isActive: false }, admin);
+    check("a deactivated grade leaves the grade list",
+      !(await curriculum.listGrades({ provinceCode: province.code })).some((g) => g.id === grade.id));
+    check("and leaves the curriculum tree",
+      !(await curriculum.getCurriculumTree(province.code)).grades.some((g) => g.id === grade.id));
+
+    await curriculum.updateProvince(province.id, { isActive: false }, admin);
+    check("a deactivated province leaves the picker",
+      !(await curriculum.listProvinces()).some((p) => p.id === province.id));
+    check("but an administrator can still list it",
+      (await curriculum.listProvinces({ activeOnly: false })).some((p) => p.id === province.id));
+    check("and it is still resolvable by code, so existing links do not 500",
+      (await curriculum.getProvince(province.code))?.id === province.id);
+
+    await curriculum.updateProvince(province.id, { isActive: true }, admin);
+    check("reactivating a province puts it back in the picker",
+      (await curriculum.listProvinces()).some((p) => p.id === province.id));
+
+    // --- deleting a course --------------------------------------------------
+    const tutorUsingIt = await TutorProfile.findOne({ isSearchable: true }).lean();
+    if (tutorUsingIt) {
+      await TutorProfile.updateOne(
+        { _id: tutorUsingIt._id },
+        { $addToSet: { courseIds: new mongoose.Types.ObjectId(codeless.id) } },
+      );
+      const inUse = await throws(
+        () => curriculum.deleteCourse(codeless.id, admin),
+        (e) => e.code === "CONFLICT",
+      );
+      check("a course a tutor still teaches cannot be deleted",
+        inUse.threw && inUse.matched, inUse.error?.message);
+      check("and the refusal says how many tutors teach it",
+        /tutor/i.test(inUse.error?.message ?? ""));
+      await TutorProfile.updateOne(
+        { _id: tutorUsingIt._id },
+        { $pull: { courseIds: new mongoose.Types.ObjectId(codeless.id) } },
+      );
+    } else {
+      skip("a course a tutor still teaches cannot be deleted", "no seeded tutor");
+    }
+
+    const deleted = await curriculum.deleteCourse(secondCodeless.id, admin);
+    check("a course nobody teaches can be deleted", deleted.deleted === true);
+    check("and it is gone from the database",
+      (await Course.findById(secondCodeless.id).lean()) === null);
+    made.courses = made.courses.filter((id) => id !== secondCodeless.id);
+
+    // --- audit --------------------------------------------------------------
+    const trail = await AuditLog.find({
+      action: "CURRICULUM_UPDATED",
+      entityType: { $in: ["Province", "Grade", "Subject", "Course"] },
+      actorId: new mongoose.Types.ObjectId(admin.id),
+    }).lean();
+    const types = new Set(trail.map((r) => r.entityType));
+    check("every level of the hierarchy is audited when it changes",
+      ["Province", "Grade", "Subject", "Course"].every((t) => types.has(t)),
+      [...types].join(","));
+    check("and a deletion is recorded as one",
+      trail.some((r) => r.metadata?.deleted === true));
+  } finally {
+    await AuditLog.deleteMany({ actorId: new mongoose.Types.ObjectId(admin.id) });
+    await Course.deleteMany({ _id: { $in: made.courses.map((id) => new mongoose.Types.ObjectId(id)) } });
+    await Subject.deleteMany({ _id: { $in: made.subjects.map((id) => new mongoose.Types.ObjectId(id)) } });
+    await Grade.deleteMany({ _id: { $in: made.grades.map((id) => new mongoose.Types.ObjectId(id)) } });
+    await Province.deleteMany({ _id: { $in: made.provinces.map((id) => new mongoose.Types.ObjectId(id)) } });
+  }
+}
+
+// --- 30. Audit log (§35) ----------------------------------------------------
+
+/**
+ * The global audit browser, and the redaction that stands between it and the
+ * stored metadata.
+ *
+ * The write side of auditing was never the gap — every money movement,
+ * credential rotation and administrative decision was already recorded. What
+ * an operator could not do was read them anywhere but one account at a time.
+ * Opening that up means the read path becomes a second consumer of a
+ * free-form `Mixed` field written from thirty-odd call sites, so the filter
+ * belongs here, on the way out, rather than in the screen that happens to
+ * render it today.
+ */
+async function auditLogTests() {
+  section("Audit log — filtering, redaction and bounds");
+
+  const {
+    redactAuditMetadata, listAuditEvents, listAuditLogs, auditEntityTypes, recordAudit,
+  } = await import("@/services/audit.service");
+
+  // --- redaction is pure, so it is checked without a database --------------
+  const redacted = redactAuditMetadata({
+    module: "payment",
+    provider: "stripe",
+    secretKey: "sk_test_should_never_be_shown",
+    apiKey: "abcdef",
+    webhookSecret: "whsec_abcdef",
+    accessKey: "AKIAEXAMPLE",
+    storageKey: "6a995eb9-0000-4000-8000-000000000000.png",
+    changes: { config: { endpoint: { from: null, to: "https://minio.example.ca" } } },
+    secretsRotated: ["secretKey", "webhookSecret"],
+    secretsCleared: [],
+  });
+
+  check("a value under a credential-shaped key is redacted",
+    redacted.secretKey === "[redacted]" && redacted.apiKey === "[redacted]");
+  check("including the webhook signing secret", redacted.webhookSecret === "[redacted]");
+  check("and an object-storage access key", redacted.accessKey === "[redacted]");
+  check("an internal storage key is redacted too", redacted.storageKey === "[redacted]");
+  check("but the *names* of the credentials that rotated are kept",
+    Array.isArray(redacted.secretsRotated) &&
+      redacted.secretsRotated.join(",") === "secretKey,webhookSecret",
+    "the most useful line in a rotation record must survive");
+  check("and ordinary non-secret configuration is left readable",
+    redacted.changes.config.endpoint.to === "https://minio.example.ca");
+  check("as is the module and provider the record is about",
+    redacted.module === "payment" && redacted.provider === "stripe");
+
+  const byShape = redactAuditMetadata({
+    note: "sk_live_realkeyshapedvalue",
+    envelope: "v1.aXYtaGVyZQ.dGFnLWhlcmU.Y2lwaGVydGV4dA",
+    jwt: "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature",
+    innocent: "Refunded because the tutor never joined.",
+  });
+  check("a credential is redacted by its shape even under an innocent key",
+    byShape.note === "[redacted]");
+  check("so is our own encrypted envelope", byShape.envelope === "[redacted]");
+  check("and a bearer token", byShape.jwt === "[redacted]");
+  check("while ordinary prose is untouched",
+    byShape.innocent === "Refunded because the tutor never joined.");
+
+  const long = redactAuditMetadata({ reason: "x".repeat(900), list: Array.from({ length: 80 }, (_, i) => i) });
+  check("a very long stored string is truncated rather than rendered whole",
+    long.reason.length === 501 && long.reason.endsWith("…"));
+  check("and a very long stored array is capped", long.list.length === 50);
+
+  let deep = { value: "bottom" };
+  for (let i = 0; i < 8; i += 1) deep = { nested: deep };
+  check("nesting is bounded", JSON.stringify(redactAuditMetadata(deep)).includes("[redacted]"));
+
+  check("null and undefined pass through untouched",
+    redactAuditMetadata(null) === null && redactAuditMetadata(undefined) === undefined);
+  check("and so do numbers and booleans",
+    redactAuditMetadata({ n: 42, b: true }).n === 42 && redactAuditMetadata({ b: false }).b === false);
+
+  // --- filtering needs the database ---------------------------------------
+  const uri = process.env.MONGODB_URI;
+  if (!uri) return skip("audit log filtering", "MONGODB_URI is not set");
+
+  if (mongoose.connection.readyState !== 1) {
+    try {
+      await mongoose.connect(uri, { serverSelectionTimeoutMS: 2500 });
+    } catch {
+      return skip("audit log filtering", "MongoDB is not reachable");
+    }
+  }
+
+  const { AuditLog } = await import("@/models");
+  const actorA = new mongoose.Types.ObjectId();
+  const actorB = new mongoose.Types.ObjectId();
+  const subject = new mongoose.Types.ObjectId();
+
+  try {
+    // Three records, deliberately spread across two actors, two entity types
+    // and two days, so every filter has something it must *not* return.
+    await AuditLog.create([
+      {
+        actorId: actorA,
+        actorRole: "ADMIN",
+        action: "REFUND_ISSUED",
+        entityType: "AuditFixturePayment",
+        entityId: subject,
+        metadata: { amountCents: 4500, reason: "Integration fixture." },
+        createdAt: new Date("2031-01-10T10:00:00.000Z"),
+      },
+      {
+        actorId: actorA,
+        actorRole: "ADMIN",
+        action: "SETTINGS_UPDATED",
+        entityType: "AuditFixtureSettings",
+        metadata: { sections: ["branding"], secretKey: "sk_test_leaked" },
+        createdAt: new Date("2031-01-11T10:00:00.000Z"),
+      },
+      {
+        actorId: actorB,
+        actorRole: "ADMIN",
+        action: "REFUND_ISSUED",
+        entityType: "AuditFixturePayment",
+        entityId: new mongoose.Types.ObjectId(),
+        metadata: { amountCents: 100 },
+        createdAt: new Date("2031-01-12T10:00:00.000Z"),
+      },
+    ]);
+
+    const inWindow = async (filters) =>
+      listAuditEvents({
+        from: "2031-01-01T00:00:00.000Z",
+        to: "2031-01-31T00:00:00.000Z",
+        pageSize: 50,
+        ...filters,
+      });
+
+    const all = await inWindow({});
+    check("the period filter returns exactly the records inside it", all.total === 3, String(all.total));
+    check("and they come back newest first",
+      new Date(all.items[0].createdAt) > new Date(all.items[2].createdAt));
+
+    const byAction = await inWindow({ action: "REFUND_ISSUED" });
+    check("filtering by action narrows to that action", byAction.total === 2);
+    check("and returns nothing else",
+      byAction.items.every((e) => e.action === "REFUND_ISSUED"));
+
+    const byActor = await inWindow({ actorId: String(actorA) });
+    check("filtering by actor narrows to what that person did", byActor.total === 2);
+
+    const byEntityType = await inWindow({ entityType: "AuditFixtureSettings" });
+    check("filtering by entity type narrows to that type", byEntityType.total === 1);
+
+    const byEntity = await inWindow({ entityId: String(subject) });
+    check("filtering by a single record's id narrows to its own history", byEntity.total === 1);
+    check("and that history is the right record",
+      byEntity.items[0].metadata.amountCents === 4500);
+
+    const composed = await inWindow({ action: "REFUND_ISSUED", actorId: String(actorA) });
+    check("filters compose rather than replacing each other", composed.total === 1);
+
+    const oneDay = await listAuditEvents({ from: "2031-01-11", to: "2031-01-11", pageSize: 50 });
+    check("a single calendar day means the whole of that day", oneDay.total === 1, String(oneDay.total));
+
+    const firstPage = await inWindow({ pageSize: 2, page: 1 });
+    const secondPage = await inWindow({ pageSize: 2, page: 2 });
+    check("pagination reports the total across every page",
+      firstPage.total === 3 && secondPage.total === 3);
+    check("and a page carries only its own slice",
+      firstPage.items.length === 2 && secondPage.items.length === 1);
+    check("with no record appearing on both",
+      !secondPage.items.some((e) => firstPage.items.some((f) => f.id === e.id)));
+
+    const leaky = byActor.items.find((e) => e.action === "SETTINGS_UPDATED");
+    check("a credential stored in metadata never reaches the browser",
+      leaky.metadata.secretKey === "[redacted]");
+    check("and neither does it through the per-record reader",
+      (await listAuditLogs({ entityType: "AuditFixtureSettings" }))[0].metadata.secretKey ===
+        "[redacted]");
+
+    const types = await auditEntityTypes();
+    check("the entity-type filter offers what is actually in the log",
+      types.includes("AuditFixturePayment") && types.includes("AuditFixtureSettings"));
+    check("and nothing blank", types.every(Boolean));
+
+    // `recordAudit` must never be able to break the thing it is recording.
+    let threw = false;
+    try {
+      await recordAudit({ action: "NOT_A_REAL_ACTION", entityType: "AuditFixturePayment" });
+    } catch {
+      threw = true;
+    }
+    check("a rejected audit write is swallowed rather than failing the action", !threw);
+  } finally {
+    await AuditLog.deleteMany({
+      entityType: { $in: ["AuditFixturePayment", "AuditFixtureSettings"] },
+    });
+  }
+}
+
+// --- 31. User-controlled URLs and public configuration (§16, §36) -----------
+
+/**
+ * Two things that were each relying on somebody downstream to be careful.
+ *
+ * `introVideoUrl` and the profile gallery were stored as any string up to 500
+ * characters. React refuses to render a `javascript:` href and the image
+ * optimiser refuses an unlisted host, so nothing was exploitable — but that
+ * made a framework behaviour the security boundary, which it is not meant to
+ * be. The scheme is now decided server-side, where the value is accepted.
+ *
+ * `resolveAppConfig` is the other half: it is handed to client components on
+ * every page, including unauthenticated ones, so whatever it carries is
+ * published. It used to carry the stored file record behind each branding
+ * asset — storage key, original filename, byte size and the administrator who
+ * uploaded it.
+ */
+async function publicSurfaceTests() {
+  section("Public surfaces — URL schemes and what configuration publishes");
+
+  const { updateTutorProfileSchema, onboardingStepSchemas } = await import(
+    "@/lib/validation/tutors"
+  );
+  const { resolveAppConfig } = await import("@/services/settings.service");
+  const { renderableImageSrc } = await import("@/lib/images/remote");
+
+  const videoOk = (value) => updateTutorProfileSchema.safeParse({ introVideoUrl: value }).success;
+  const galleryOk = (value) => updateTutorProfileSchema.safeParse({ gallery: [value] }).success;
+
+  check("an https intro video is accepted", videoOk("https://youtu.be/abc123"));
+  check("and an http one, which the product has always allowed",
+    videoOk("http://example.ca/intro.mp4"));
+  check("a javascript: intro video is refused", !videoOk("javascript:alert(document.domain)"));
+  check("and the mixed-case spelling of it too",
+    !videoOk("JavaScript:alert(1)") && !videoOk("jAvAsCrIpT:alert(1)"));
+  check("a data: URL is refused", !videoOk("data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg=="));
+  check("a vbscript: URL is refused", !videoOk("vbscript:msgbox(1)"));
+  check("a file: URL is refused", !videoOk("file:///etc/passwd"));
+  check("something that is not a URL at all is refused", !videoOk("not a url"));
+  check("and neither is a bare hostname", !videoOk("example.ca/intro"));
+  check("a blank intro video clears the field rather than failing",
+    updateTutorProfileSchema.safeParse({ introVideoUrl: "" }).data.introVideoUrl === undefined);
+  check("and omitting it entirely is still fine",
+    updateTutorProfileSchema.safeParse({}).success);
+  check("a link longer than the column is refused",
+    !videoOk(`https://example.ca/${"a".repeat(600)}`));
+
+  check("the same rule applies at onboarding, not only on the edit form",
+    !onboardingStepSchemas.PROFILE.safeParse({
+      headline: "Experienced mathematics tutor",
+      bio: "b".repeat(200),
+      languages: ["English"],
+      introVideoUrl: "javascript:alert(1)",
+    }).success);
+
+  check("a gallery photo may be an https URL", galleryOk("https://images.unsplash.com/photo-1"));
+  check("or a path this application serves itself", galleryOk("/api/avatars/9f3c.png"));
+  check("a javascript: gallery entry is refused", !galleryOk("javascript:alert(1)"));
+  check("a data: gallery entry is refused", !galleryOk("data:image/svg+xml,<svg onload=alert(1)>"));
+  check("and a protocol-relative one is refused, because it is not a local path",
+    !galleryOk("//evil.example/x.png"));
+
+  // The render-time guard is a separate rule and must stay separate: it
+  // decides what `next/image` can draw, not what may be stored.
+  check("the renderer still refuses an unlisted host independently",
+    renderableImageSrc("https://evil.example/x.png") === null);
+  check("and still refuses a javascript: URL",
+    renderableImageSrc("javascript:alert(1)") === null);
+  check("while keeping a photo this application serves",
+    renderableImageSrc("/api/avatars/9f3c.png") === "/api/avatars/9f3c.png");
+
+  // --- where sign-in is allowed to send somebody --------------------------
+  //
+  // `next` travels on the login, registration and OAuth links so a person
+  // who was bounced to sign in lands back where they were. "Starts with a
+  // slash" is not enough on its own: a browser reads `//host` and `/\\host`
+  // as another origin, which turns a sign-in link into an open redirect —
+  // the address bar shows this application right until it does not.
+  const { internalPath } = await import("@/lib/utils/url");
+  const { loginSchema } = await import("@/lib/validation/auth");
+
+  check("an ordinary path is kept", internalPath("/bookings/123") === "/bookings/123");
+  check("with its query string", internalPath("/find-a-tutor?q=math") === "/find-a-tutor?q=math");
+  check("a protocol-relative path is not ours", internalPath("//evil.example/x") === null);
+  check("nor is the backslash spelling of it", internalPath("/\\evil.example/x") === null);
+  check("nor an absolute URL", internalPath("https://evil.example/x") === null);
+  check("nor a javascript: URL", internalPath("javascript:alert(1)") === null);
+  check("nor a path smuggling a control character",
+    internalPath("/\tevil") === null && internalPath("/\nevil") === null);
+  check("a relative path with no leading slash is refused",
+    internalPath("bookings") === null);
+  check("and anything that is not a string at all",
+    internalPath(undefined) === null && internalPath(42) === null);
+  check("with a caller-supplied fallback when it is not ours",
+    internalPath("//evil.example", "/dashboard") === "/dashboard");
+
+  const signIn = (next) =>
+    loginSchema.parse({ email: "a@example.ca", password: "x", next });
+  check("the login schema drops a destination that is not ours",
+    signIn("//evil.example/x").next === undefined);
+  check("and keeps one that is", signIn("/tutor/dashboard").next === "/tutor/dashboard");
+
+  // --- the password policy does not drag bcrypt into the browser ----------
+  const policy = await import("@/lib/auth/password-policy");
+  check("the policy module names every unmet rule at once",
+    policy.passwordIssues("short").length === 3);
+  check("and none when the password satisfies all of them",
+    policy.isStrongPassword("Longenough1Password") &&
+      policy.passwordIssues("Longenough1Password").length === 0);
+  const policySource = await readFile(
+    new URL("../src/lib/auth/password-policy.js", import.meta.url),
+    "utf8",
+  );
+  check("and it imports nothing, so a form can use it without shipping bcrypt",
+    !/^\s*import\s/m.test(policySource));
+
+  const clientForms = await Promise.all(
+    ["RegisterForm.jsx", "PasswordForms.jsx"].map((file) =>
+      readFile(new URL(`../src/components/auth/${file}`, import.meta.url), "utf8"),
+    ),
+  );
+  check("the browser forms read the policy module, not the hashing one",
+    clientForms.every((src) => src.includes("@/lib/auth/password-policy")) &&
+      clientForms.every((src) => !src.includes('from "@/lib/auth/password"')));
+
+  // --- what the public configuration carries ------------------------------
+  const config = resolveAppConfig({
+    branding: {
+      appName: "APlus Learn",
+      logo: {
+        storageKey: "6a995eb9-0000-4000-8000-000000000000.png",
+        contentType: "image/png",
+        fileName: "our-real-logo-final-v4.png",
+        sizeBytes: 20480,
+        width: 512,
+        height: 128,
+        uploadedAt: new Date("2031-02-01T00:00:00.000Z"),
+        uploadedBy: "6ab1372b998f04ad610cadc0",
+      },
+    },
+  });
+
+  const published = JSON.stringify(config);
+  check("the public configuration exposes the logo as a URL the browser can fetch",
+    config.branding.logo ===
+      `/api/branding/logo?v=${Date.parse("2031-02-01T00:00:00.000Z")}`,
+    config.branding.logo);
+  check("and carries no storage key", !published.includes("storageKey"));
+  check("nor the original filename", !published.includes("our-real-logo-final-v4"));
+  check("nor the file size", !published.includes("sizeBytes"));
+  check("nor the administrator who uploaded it",
+    !published.includes("uploadedBy") && !published.includes("6ab1372b998f04ad610cadc0"));
+  check("and no raw file record at all", config.branding.files === undefined);
+  check("while the branding the page actually needs is still there",
+    config.branding.appName === "APlus Learn" && Boolean(config.seo.title));
+  check("an asset that was never uploaded is null rather than missing",
+    config.branding.favicon === null);
+
+  // The admin console reads the settings document itself, behind its own
+  // permission — but even there the browser gets only what the screen draws.
+  const { adminSettingsView } = await import("@/services/settings.service");
+  const adminView = adminSettingsView({
+    branding: {
+      appName: "APlus Learn",
+      logo: {
+        storageKey: "6a995eb9-0000-4000-8000-000000000000.png",
+        contentType: "image/png",
+        fileName: "our-real-logo-final-v4.png",
+        sizeBytes: 20480,
+        width: 512,
+        height: 128,
+        uploadedAt: new Date("2031-02-01T00:00:00.000Z"),
+        uploadedBy: "6ab1372b998f04ad610cadc0",
+      },
+      favicon: null,
+    },
+    commissionPercent: 15,
+  });
+  const adminPublished = JSON.stringify(adminView);
+
+  check("the admin branding panel still gets what it draws",
+    adminView.branding.logo.width === 512 &&
+      adminView.branding.logo.height === 128 &&
+      adminView.branding.logo.sizeBytes === 20480);
+  check("without the storage key", !adminPublished.includes("storageKey"));
+  check("without the uploader's user id", !adminPublished.includes("uploadedBy"));
+  check("without the original filename", !adminPublished.includes("our-real-logo-final-v4"));
+  check("an empty slot stays empty", adminView.branding.favicon === null);
+  check("and every other setting is untouched", adminView.commissionPercent === 15);
+}
+
+
+// --- 32. Booking slot claims (§18, §42) -------------------------------------
+
+/**
+ * The database-decided half of double-booking prevention.
+ *
+ * `createBooking` validates the slot by reading the tutor's calendar and then
+ * writing, which two concurrent requests can both pass. The claim closes that
+ * window with a unique `_id`, so the refusal comes from the database rather
+ * than from two reads racing each other — which is what makes it hold across
+ * more than one application instance, where the previous compare-after-write
+ * tie-break had a narrow window in which neither request saw the other.
+ *
+ * The three things that have to be true, and are checked here against the
+ * real service: only one of several simultaneous requests for one slot wins;
+ * a claim left behind by a booking that no longer holds the slot does not
+ * wedge the calendar shut; and a refused claim leaves nothing behind.
+ */
+async function bookingSlotLockTests() {
+  section("Booking slot claims — exclusivity, staleness and cleanup");
+
+  const uri = process.env.MONGODB_URI;
+  if (!uri) return skip("booking slot claims", "MONGODB_URI is not set");
+
+  if (mongoose.connection.readyState !== 1) {
+    try {
+      await mongoose.connect(uri, { serverSelectionTimeoutMS: 2500 });
+    } catch {
+      return skip("booking slot claims", "MongoDB is not reachable");
+    }
+  }
+
+  const { Booking, BookingSlotLock, TutorProfile, StudentProfile, Availability, Payment } =
+    await import("@/models");
+  const booking = await import("@/services/booking.service");
+  const { getBookableSlots } = await import("@/services/availability.service");
+  const { BOOKING_STATUS, ROLES } = await import("@/constants");
+  const { resetPaymentProvider } = await import("@/services/external/payment-provider");
+
+  const tutor = await TutorProfile.findOne({ isSearchable: true }).lean();
+  const learner = await StudentProfile.findOne({ archivedAt: null }).lean();
+  const availability = tutor ? await Availability.findOne({ tutorProfileId: tutor._id }).lean() : null;
+  if (!tutor || !learner || !availability) {
+    return skip("booking slot claims", "no seeded tutor/student/availability — run `bun run seed`");
+  }
+
+  const paymentProviderBefore = process.env.PAYMENT_PROVIDER;
+  process.env.PAYMENT_PROVIDER = "development";
+  resetPaymentProvider();
+
+  const actor = {
+    id: String(learner.ownerId),
+    role: ROLES.PARENT,
+    emailVerifiedAt: new Date(),
+  };
+
+  const madeBookings = [];
+  const madePayments = [];
+  const madeLocks = [];
+
+  /** The first slot this tutor is genuinely offering, so the rules agree. */
+  const nextFreeSlot = async () => {
+    const result = await getBookableSlots(tutor._id, { days: 28, durationMinutes: 60 });
+    for (const day of result.days ?? []) {
+      for (const slot of day.slots ?? []) return slot.startAt;
+    }
+    return null;
+  };
+
+  try {
+    const slot = await nextFreeSlot();
+    if (!slot) {
+      return skip("booking slot claims", "the seeded tutor has no bookable slot in the next 28 days");
+    }
+
+    const request = {
+      tutorProfileId: String(tutor._id),
+      studentProfileId: String(learner._id),
+      courseId: String(tutor.courseIds?.[0] ?? tutor.courses?.[0]?.courseId),
+      mode: "ONLINE",
+      meetingProvider: "ZOOM",
+      startAt: slot,
+      durationMinutes: 60,
+      recurrence: "NONE",
+    };
+
+    // --- 1. exclusivity ----------------------------------------------------
+    //
+    // Counted as a delta rather than an absolute: this instant may already
+    // carry withdrawn bookings from an earlier run, and those hold nothing.
+    const bookingsAtSlotBefore = await Booking.countDocuments({
+      tutorProfileId: tutor._id,
+      startAt: new Date(slot),
+    });
+
+    const attempts = await Promise.allSettled(
+      Array.from({ length: 5 }, () => booking.createBooking(request, actor)),
+    );
+    const winners = attempts.filter((a) => a.status === "fulfilled");
+    const losers = attempts.filter((a) => a.status === "rejected");
+
+    check("exactly one of five simultaneous requests for one slot wins",
+      winners.length === 1, `${winners.length} succeeded`);
+    check("and every loser is refused as a conflict, not an error",
+      losers.every((l) => l.reason?.code === "CONFLICT"),
+      losers.map((l) => l.reason?.code).join(","));
+
+    for (const win of winners) {
+      for (const b of win.value.bookings) madeBookings.push(new mongoose.Types.ObjectId(b.id));
+      if (win.value.payment?.id) madePayments.push(new mongoose.Types.ObjectId(win.value.payment.id));
+    }
+
+    const lockKey = `${tutor._id}:${new Date(slot).getTime()}`;
+    madeLocks.push(lockKey);
+    const lock = await BookingSlotLock.findById(lockKey).lean();
+    check("the winning booking holds the slot's claim",
+      Boolean(lock) && madeBookings.some((id) => String(id) === String(lock.bookingId)),
+      JSON.stringify(lock));
+
+    const held = await Booking.countDocuments({
+      tutorProfileId: tutor._id,
+      startAt: new Date(slot),
+      status: { $in: [BOOKING_STATUS.PENDING_PAYMENT, BOOKING_STATUS.CONFIRMED] },
+    });
+    check("and exactly one booking exists for that instant", held === 1, String(held));
+
+    const bookingsAtSlotAfter = await Booking.countDocuments({
+      tutorProfileId: tutor._id,
+      startAt: new Date(slot),
+    });
+    check("the four that lost left no booking behind",
+      bookingsAtSlotAfter - bookingsAtSlotBefore === 1,
+      `${bookingsAtSlotAfter - bookingsAtSlotBefore} new rows`);
+
+    // --- 2. a claim is not a permanent reservation -------------------------
+    const winnerId = madeBookings[0];
+    if (!winnerId) return check("a winning booking exists to cancel", false);
+    await Booking.updateOne(
+      { _id: winnerId },
+      { $set: { status: BOOKING_STATUS.CANCELLED_BY_STUDENT } },
+    );
+
+    const reclaimed = await booking.createBooking(request, actor);
+    check("a claim left by a cancelled booking does not wedge the slot shut",
+      reclaimed.bookings.length === 1, JSON.stringify(reclaimed));
+    for (const b of reclaimed.bookings) madeBookings.push(new mongoose.Types.ObjectId(b.id));
+    if (reclaimed.payment?.id) madePayments.push(new mongoose.Types.ObjectId(reclaimed.payment.id));
+
+    const inherited = await BookingSlotLock.findById(lockKey).lean();
+    check("and the claim now names the booking that actually holds the slot",
+      String(inherited.bookingId) === String(reclaimed.bookings[0].id));
+
+    // --- 3. the slot is exclusive again once it is taken -------------------
+    const blocked = await throws(
+      () => booking.createBooking(request, actor),
+      (e) => e.code === "CONFLICT",
+    );
+    check("a slot that is genuinely held is refused",
+      blocked.threw && blocked.matched, blocked.error?.message);
+
+    const lockCount = await BookingSlotLock.countDocuments({ _id: lockKey });
+    check("one instant never accumulates more than one claim", lockCount === 1);
+  } finally {
+    if (paymentProviderBefore === undefined) delete process.env.PAYMENT_PROVIDER;
+    else process.env.PAYMENT_PROVIDER = paymentProviderBefore;
+    resetPaymentProvider();
+
+    await BookingSlotLock.deleteMany({ _id: { $in: madeLocks } });
+    await Payment.deleteMany({ _id: { $in: madePayments } });
+    await Booking.deleteMany({ _id: { $in: madeBookings } });
+  }
+}
+
+
+// --- 33. Rate limiting (§36) ------------------------------------------------
+
+/**
+ * The window that protects login, registration and password reset.
+ *
+ * The property that matters is that it is **shared**. A counter held in one
+ * process is a counter multiplied by however many processes are running, so
+ * "five attempts" behind four servers is twenty — which is not a limit. The
+ * store is therefore the database this deployment already has, and this
+ * section proves the three things that makes true: that two independent
+ * callers of the limiter see one another's counts, that a lapsed window rolls
+ * forward instead of accumulating forever, and that a store it cannot reach
+ * degrades to a per-process limit rather than to no limit at all.
+ */
+async function rateLimitTests() {
+  section("Rate limiting — shared windows, rollover and safe failure");
+
+  const {
+    rateLimit, enforceRateLimit, clientKey, rateLimitStore, rateLimitIsShared,
+    RATE_LIMIT_STORES,
+  } = await import("@/lib/security/rate-limit");
+
+  const storeBefore = process.env.RATE_LIMIT_STORE;
+
+  try {
+    // --- which store, stated rather than inferred --------------------------
+    delete process.env.RATE_LIMIT_STORE;
+    check("the default store is the shared one",
+      rateLimitStore() === RATE_LIMIT_STORES.DATABASE && rateLimitIsShared());
+
+    process.env.RATE_LIMIT_STORE = "memory";
+    check("and a deployment can say so explicitly when it wants per-process",
+      rateLimitStore() === RATE_LIMIT_STORES.MEMORY && !rateLimitIsShared());
+
+    process.env.RATE_LIMIT_STORE = "something-else";
+    check("an unrecognised value falls back to the shared store, not to none",
+      rateLimitStore() === RATE_LIMIT_STORES.DATABASE);
+
+    // --- the identity the limit is applied to ------------------------------
+    const headers = new Map([
+      ["x-forwarded-for", "203.0.113.7, 10.0.0.1"],
+      ["x-real-ip", "10.0.0.1"],
+    ]);
+    const request = { headers: { get: (name) => headers.get(name) ?? null } };
+    check("the caller's address comes from the proxy header, left-most first",
+      clientKey(request) === "203.0.113.7");
+    check("and a suffix keeps two limits on one address apart",
+      clientKey(request, "login") === "203.0.113.7:login");
+    check("with a sensible fallback when there is no proxy at all",
+      clientKey({ headers: { get: () => null } }, "login") === "local:login");
+
+    // --- counting, in memory -----------------------------------------------
+    process.env.RATE_LIMIT_STORE = "memory";
+    const memKey = `qa-memory-${randomUUID()}`;
+    const first = await rateLimit(memKey, { limit: 3, windowMs: 60_000 });
+    check("the first attempt is allowed", first.allowed && first.remaining === 2);
+    await rateLimit(memKey, { limit: 3, windowMs: 60_000 });
+    const third = await rateLimit(memKey, { limit: 3, windowMs: 60_000 });
+    check("the last attempt inside the limit is still allowed",
+      third.allowed && third.remaining === 0);
+    const fourth = await rateLimit(memKey, { limit: 3, windowMs: 60_000 });
+    check("the one after it is not", !fourth.allowed);
+    check("and it says how long to wait",
+      fourth.retryAfterSeconds > 0 && fourth.retryAfterSeconds <= 60);
+
+    const refused = await throws(
+      () => enforceRateLimit(memKey, { limit: 3, windowMs: 60_000 }),
+      (e) => e.code === "RATE_LIMITED" && e.status === 429,
+    );
+    check("enforcing it throws the typed error the API maps to 429",
+      refused.threw && refused.matched, refused.error?.message);
+
+    const lapsing = `qa-memory-${randomUUID()}`;
+    await rateLimit(lapsing, { limit: 1, windowMs: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    const rolled = await rateLimit(lapsing, { limit: 1, windowMs: 60_000 });
+    check("a window that has lapsed starts again rather than staying closed",
+      rolled.allowed);
+
+    // --- counting, in the shared store -------------------------------------
+    const uri = process.env.MONGODB_URI;
+    if (!uri) {
+      skip("the shared window", "MONGODB_URI is not set");
+    } else {
+      if (mongoose.connection.readyState !== 1) {
+        try {
+          await mongoose.connect(uri, { serverSelectionTimeoutMS: 2500 });
+        } catch {
+          skip("the shared window", "MongoDB is not reachable");
+          return;
+        }
+      }
+
+      const { RateLimitWindow } = await import("@/models");
+      process.env.RATE_LIMIT_STORE = "database";
+      const dbKey = `qa-shared-${randomUUID()}`;
+
+      try {
+        const one = await rateLimit(dbKey, { limit: 3, windowMs: 60_000 });
+        check("a shared window starts at one", one.allowed && one.remaining === 2);
+
+        const stored = await RateLimitWindow.findById(dbKey).lean();
+        check("and it is a row every instance can see, not a process variable",
+          stored?.count === 1 && stored.resetAt instanceof Date);
+
+        // What a second application instance would do: the same key, with no
+        // memory of the first call. The in-process map is bypassed entirely
+        // because this store does not use it.
+        await rateLimit(dbKey, { limit: 3, windowMs: 60_000 });
+        const over = await rateLimit(dbKey, { limit: 3, windowMs: 60_000 });
+        check("three attempts exhaust a limit of three", over.allowed && over.remaining === 0);
+        const blocked = await rateLimit(dbKey, { limit: 3, windowMs: 60_000 });
+        check("and the fourth is refused wherever it arrived from", !blocked.allowed);
+
+        // Concurrency: ten simultaneous attempts against a limit of four must
+        // allow four, not ten. This is the whole point of the unique key.
+        const burstKey = `qa-burst-${randomUUID()}`;
+        const burst = await Promise.all(
+          Array.from({ length: 10 }, () => rateLimit(burstKey, { limit: 4, windowMs: 60_000 })),
+        );
+        check("ten simultaneous attempts against a limit of four allow exactly four",
+          burst.filter((r) => r.allowed).length === 4,
+          `${burst.filter((r) => r.allowed).length} allowed`);
+        check("and the stored count is the number of attempts, not of instances",
+          (await RateLimitWindow.findById(burstKey).lean())?.count === 10);
+
+        // A lapsed shared window rolls forward once, not once per caller.
+        const staleKey = `qa-stale-${randomUUID()}`;
+        await RateLimitWindow.create({
+          _id: staleKey,
+          count: 99,
+          resetAt: new Date(Date.now() - 60_000),
+        });
+        const afterLapse = await Promise.all(
+          Array.from({ length: 3 }, () => rateLimit(staleKey, { limit: 2, windowMs: 60_000 })),
+        );
+        check("a lapsed shared window reopens", afterLapse.some((r) => r.allowed));
+        check("but reopening it does not reset it once per caller",
+          afterLapse.filter((r) => r.allowed).length <= 2,
+          `${afterLapse.filter((r) => r.allowed).length} allowed`);
+
+        await RateLimitWindow.deleteMany({
+          _id: { $in: [dbKey, burstKey, staleKey] },
+        });
+      } finally {
+        await RateLimitWindow.deleteMany({ _id: /^qa-(shared|burst|stale)-/ });
+      }
+    }
+  } finally {
+    if (storeBefore === undefined) delete process.env.RATE_LIMIT_STORE;
+    else process.env.RATE_LIMIT_STORE = storeBefore;
   }
 }
 

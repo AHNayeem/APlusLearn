@@ -18,7 +18,7 @@ export const POST = routeHandler(
   async ({ request, body, user }) => {
     // Generous enough for a person who mistypes their address and tries again,
     // tight enough that the support inbox cannot be used as a mailing list.
-    enforceRateLimit(clientKey(request, "support-enquiry"), { limit: 4, windowMs: 15 * 60_000 });
+    await enforceRateLimit(clientKey(request, "support-enquiry"), { limit: 4, windowMs: 15 * 60_000 });
 
     return ok(await submitSupportEnquiry(body, { user }));
   },

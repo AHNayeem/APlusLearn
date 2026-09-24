@@ -1,3 +1,4 @@
+import "server-only";
 import bcrypt from "bcryptjs";
 
 const SALT_ROUNDS = 12;
@@ -18,18 +19,11 @@ export async function verifyPassword(plain, hash) {
 }
 
 /**
- * Password policy. Returned as a list so the UI can show every unmet rule at
- * once rather than one at a time.
+ * The policy lives in `./password-policy`, which has no imports at all, and
+ * is re-exported here so a server caller still finds it where it expects to.
+ *
+ * The split is the point: the forms that show the rules as somebody types run
+ * in the browser, and importing them from this module dragged `bcryptjs` into
+ * the client bundle along with them.
  */
-export function passwordIssues(password = "") {
-  const issues = [];
-  if (password.length < 10) issues.push("Use at least 10 characters");
-  if (!/[a-z]/.test(password)) issues.push("Include a lowercase letter");
-  if (!/[A-Z]/.test(password)) issues.push("Include an uppercase letter");
-  if (!/[0-9]/.test(password)) issues.push("Include a number");
-  return issues;
-}
-
-export function isStrongPassword(password) {
-  return passwordIssues(password).length === 0;
-}
+export { passwordIssues, isStrongPassword } from "./password-policy";

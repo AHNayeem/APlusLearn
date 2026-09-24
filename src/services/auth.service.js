@@ -15,6 +15,22 @@ import { sendEmail, brandedEmailTemplates } from "./external/email-provider";
 import { getOAuthProvider } from "./external/oauth-provider";
 import { recordAudit } from "./audit.service";
 import { attributeReferral } from "./referral.service";
+import { renderableImageSrc } from "@/lib/images/remote";
+
+/**
+ * A photo an identity provider handed us, or nothing.
+ *
+ * The claim is signed, so it is not attacker-controlled in the usual sense —
+ * but it is still a string from outside this application that ends up in an
+ * `<img src>` for everyone the account deals with, and `avatarUrl` is the one
+ * field on `User` that no form can set precisely because of that. Putting it
+ * through the same rule the renderer applies means a provider that one day
+ * returns something unexpected stores nothing rather than storing a scheme
+ * the product never intended to serve (§16, §36).
+ */
+function providerAvatar(value) {
+  return renderableImageSrc(value) ?? undefined;
+}
 
 const VERIFY_TTL_MS = 24 * 60 * 60 * 1000;
 const RESET_TTL_MS = 60 * 60 * 1000;
@@ -278,7 +294,9 @@ export async function oauthSignIn({ provider, credential, role, nonce, profile }
       if (user.status === USER_STATUS.PENDING_VERIFICATION) user.status = USER_STATUS.ACTIVE;
     }
     // Fill blanks only — never overwrite what the user has set themselves.
-    if (!user.avatarUrl && identity.avatarUrl) user.avatarUrl = identity.avatarUrl;
+    if (!user.avatarUrl && identity.avatarUrl) {
+      user.avatarUrl = providerAvatar(identity.avatarUrl) ?? user.avatarUrl;
+    }
     user.lastLoginAt = new Date();
     await user.save();
 
@@ -296,7 +314,7 @@ export async function oauthSignIn({ provider, credential, role, nonce, profile }
       email: identity.email,
       firstName: identity.firstName || "New",
       lastName: identity.lastName || "Member",
-      avatarUrl: identity.avatarUrl,
+      avatarUrl: providerAvatar(identity.avatarUrl),
       role: newRole,
       status: identity.emailVerified ? USER_STATUS.ACTIVE : USER_STATUS.PENDING_VERIFICATION,
       emailVerifiedAt: identity.emailVerified ? new Date() : null,
