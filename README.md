@@ -56,8 +56,9 @@ sitting in the admin review queue.
 | `npm run seed:keep` | Add missing seed data without wiping |
 | `npm run storage:check` | Prove the MinIO credentials open the bucket (`--roundtrip` also writes, reads and deletes) |
 | `npm run storage:migrate` | Copy `.storage/**` into the MinIO bucket (`--dry-run` to preview) |
-| `npm run qa` | End-to-end API test suite against a running dev server (1,003 assertions) |
-| `npm run test:integrations` | Provider adapters and DB-backed service rules (1,459 assertions) — no network, no third party |
+| `npm run qa` | End-to-end API test suite against a running dev server (1,085 assertions) |
+| `npm run e2e` | Forgot password in a real browser, against a running dev server — needs Playwright, see [docs/PASSWORD_RESET.md](docs/PASSWORD_RESET.md) |
+| `npm run test:integrations` | Provider adapters and DB-backed service rules (1,620 assertions) — no network, no third party |
 
 `npm run qa` exercises the full parent, tutor and admin journeys over real
 HTTP — including the authorization checks that must *fail*. Run `npm run dev`
@@ -224,7 +225,7 @@ configuration rather than code.
 | Service | Development | Production | Selector |
 |---|---|---|---|
 | Payments | `MockPaymentProvider` — models every state transition | **Stripe** — hosted Checkout + Connect Express | `PAYMENT_PROVIDER` |
-| Email | `ConsoleEmailProvider` — prints links to the server log | **Resend** | `EMAIL_PROVIDER` |
+| Email | `ConsoleEmailProvider` — prints to the server log and keeps a development mailbox at `/dev/mail` | **Resend** / SMTP | `EMAIL_PROVIDER` |
 | OAuth | Local identity (non-production only) | **Google / Apple** — verified ID tokens | `OAUTH_PROVIDER` |
 | Geocoding | Bundled Canadian city & FSA table | **Google Geocoding API** | `GEOCODING_PROVIDER` |
 | Meetings | Deterministic room links | **Zoom** — Server-to-Server OAuth | `MEETING_PROVIDER` |

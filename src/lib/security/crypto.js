@@ -141,6 +141,18 @@ export function verifyState(state, { label = "aplus:oauth-state" } = {}) {
   }
 }
 
+/**
+ * A keyed digest, for a short secret that has to be stored and compared.
+ *
+ * A plain hash of a six-digit code is no protection at all — a million
+ * candidates fall to a laptop in well under a second. Keying the digest under
+ * `AUTH_SECRET` means a copy of the database alone recovers nothing, and the
+ * label keeps this key apart from every other one derived from that secret.
+ */
+export function keyedDigest(value, label) {
+  return createHmac("sha256", keyFor(label)).update(String(value)).digest("hex");
+}
+
 function b64(buffer) {
   return Buffer.from(buffer).toString("base64url");
 }

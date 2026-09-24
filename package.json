@@ -13,6 +13,7 @@
     "storage:check": "node --env-file=.env.local --import ./scripts/lib/register-loader.mjs scripts/storage.mjs check",
     "storage:migrate": "node --env-file=.env.local --import ./scripts/lib/register-loader.mjs scripts/storage.mjs migrate",
     "qa": "node scripts/qa.mjs",
+    "e2e": "node scripts/e2e-password-reset.mjs",
     "test:integrations": "node --env-file=.env.local --import ./scripts/lib/register-loader.mjs scripts/integration-tests.mjs"
   },
   "dependencies": {

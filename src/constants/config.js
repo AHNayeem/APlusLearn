@@ -244,6 +244,32 @@ export const CHECKOUT_HOLD = {
   graceMinutes: 10,
 };
 
+/**
+ * Forgot-password by emailed code (§9, §36).
+ *
+ * A six-digit code is a million possibilities, which is only safe because of
+ * the numbers around it: five guesses per code, a new code voids the last,
+ * and one address can be sent five codes an hour — at most twenty-five
+ * guesses an hour against any one account.
+ *
+ * `resendCooldownSeconds` must stay at 60 or more. Resend de-duplicates on
+ * recipient + subject within a clock minute, so two codes sent inside one
+ * minute would deliver only the first — and the person would be typing a
+ * code that the second request had already voided.
+ *
+ * `requestTtlMinutes` outlives the code on purpose: the browser keeps its
+ * handle on the request long enough to be told "that code expired" rather
+ * than "start again".
+ */
+export const PASSWORD_RESET = {
+  codeTtlMinutes: 10,
+  maxAttempts: 5,
+  resendCooldownSeconds: 60,
+  maxCodesPerHour: 5,
+  authorizationTtlMinutes: 10,
+  requestTtlMinutes: 60,
+};
+
 export const DEFAULT_SETTINGS = {
   /** Platform commission taken from each lesson, as a percentage. */
   commissionPercent: 15,

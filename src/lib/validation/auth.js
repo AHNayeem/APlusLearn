@@ -59,9 +59,26 @@ export const loginSchema = z.object({
 
 export const forgotPasswordSchema = z.object({ email });
 
+/**
+ * The emailed reset code. Spaces and dashes are forgiven — people paste
+ * "123 456" out of a mail client — anything else is refused before the
+ * service counts it as a guess.
+ */
+export const verifyResetCodeSchema = z.object({
+  code: z
+    .string()
+    .transform((value) => value.replace(/[\s-]/g, ""))
+    .pipe(z.string().regex(/^\d{6}$/, "Enter the 6-digit code we sent you.")),
+});
+
+/**
+ * Choosing the new password. `token` is the single-use authorisation a
+ * correct code was exchanged for — never the code itself, and never a flag
+ * the browser sets.
+ */
 export const resetPasswordSchema = z
   .object({
-    token: z.string().min(10, "That reset link is not valid."),
+    token: z.string().min(20, "Your reset session has expired. Request a new code.").max(200),
     password,
     confirmPassword: z.string(),
   })
@@ -110,4 +127,13 @@ export const oauthSignInSchema = z.object({
     })
     .optional(),
   next: nextPath,
+});
+
+/**
+ * Reading the development mailbox (§38). `to` narrows it to one recipient;
+ * an empty filter from the page's search box means "everyone".
+ */
+export const devMailQuerySchema = z.object({
+  to: email.optional().or(z.literal("").transform(() => undefined)),
+  limit: z.coerce.number().int().min(1).max(50).default(20),
 });

@@ -2,7 +2,14 @@ import mongoose from "mongoose";
 
 export const AUTH_TOKEN_PURPOSE = {
   EMAIL_VERIFICATION: "EMAIL_VERIFICATION",
+  /** The six-digit code emailed by forgot-password. `subject` is its request id. */
   PASSWORD_RESET: "PASSWORD_RESET",
+  /**
+   * What a correct reset code is exchanged for: a random, single-use token
+   * that alone may set a new password. The code proves the inbox; this
+   * proves the proof happened, so the browser never has to be believed.
+   */
+  PASSWORD_RESET_AUTHORIZATION: "PASSWORD_RESET_AUTHORIZATION",
   /** Six-digit code texted to a mobile number before it is trusted (§41 Phase 2). */
   PHONE_VERIFICATION: "PHONE_VERIFICATION",
 };
@@ -26,7 +33,11 @@ const AuthTokenSchema = new mongoose.Schema(
      * token rather than read back from a request that could name another.
      */
     subject: { type: String, trim: true },
-    /** Wrong guesses so far. A code is burned after a handful (§36). */
+    /**
+     * Wrong guesses so far. A code is burned after a handful (§36). The
+     * password-reset code is additionally counted per request by the rate
+     * limiter, because that count has to exist for an unknown address too.
+     */
     attempts: { type: Number, default: 0 },
   },
   { timestamps: true },

@@ -1,30 +1,10 @@
-import { Suspense } from "react";
-import Link from "next/link";
-import { ResetPasswordForm } from "@/components/auth/PasswordForms";
-import { Spinner } from "@/components/ui";
+import { redirect } from "next/navigation";
 
-export const metadata = {
-  title: "Choose a new password",
-  robots: { index: false, follow: false },
-};
-
+/**
+ * Password reset used to arrive here from an emailed link. It is now a code
+ * typed into `/forgot-password`, so anything still pointing at this address —
+ * a bookmark, an old email — lands on the one flow there is.
+ */
 export default function ResetPasswordPage() {
-  return (
-    <>
-      <h1 className="text-2xl font-extrabold tracking-tight text-ink-900 sm:text-3xl">
-        Choose a new password
-      </h1>
-      <p className="mt-2 text-sm text-ink-500">
-        Signing in everywhere else will be ended once you set a new password.
-      </p>
-      <Suspense fallback={<Spinner className="mt-8" />}>
-        <ResetPasswordForm />
-      </Suspense>
-      <p className="mt-6 text-sm text-ink-500">
-        <Link href="/login" className="font-semibold text-brand-600 hover:underline">
-          Back to sign in
-        </Link>
-      </p>
-    </>
-  );
+  redirect("/forgot-password");
 }

@@ -4446,6 +4446,215 @@ async function main() {
   });
   check("a verified account is unaffected by the gate", verifiedStillWorks.ok);
 
+  // --- Password reset ----------------------------------------------------------
+  //
+  // Forgot password over real HTTP (§9, §36), on the account registered just
+  // above — nothing seeded changes password. The code is read from the
+  // development mailbox, which is where a dev server with no mail server
+  // delivers: the same code, generated and checked by the same service, that
+  // production would email.
+  section("Password reset — emailed code, enumeration and single use");
+
+  const mailReader = createClient();
+  const readResetCode = async (address) => {
+    // The send runs in `after()`, once the response has gone, so give it a moment.
+    for (let i = 0; i < 25; i += 1) {
+      const res = await mailReader(`/api/dev/mail?to=${encodeURIComponent(address)}`);
+      if (res.status === 404) return { unavailable: true };
+      const message = res.payload?.data?.messages?.find((m) => /password reset code/i.test(m.subject));
+      const code = message?.text.match(/^\s+(\d{6})\s*$/m)?.[1];
+      if (code) return { code };
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    return {};
+  };
+
+  const resetter = createClient();
+  const resetStranger = createClient();
+  const unknownAddress = `qa-nobody-${Date.now()}@example.com`;
+  const RESET_TO = "QaResetPass2024";
+
+  const badAddress = await resetter("/api/auth/forgot-password", {
+    method: "POST",
+    body: { email: "not-an-email" },
+  });
+  check("an invalid email address is refused",
+    badAddress.status === 422 && Boolean(badAddress.payload?.error?.details?.fieldErrors?.email));
+
+  const knownRaw = await resetter("/api/auth/forgot-password", {
+    method: "POST",
+    body: { email: newEmail },
+    raw: true,
+  });
+  const knownCookie = knownRaw.headers.get("set-cookie") ?? "";
+  const forKnown = { status: knownRaw.status, payload: await knownRaw.json().catch(() => null) };
+  const forUnknown = await resetStranger("/api/auth/forgot-password", {
+    method: "POST",
+    body: { email: unknownAddress },
+  });
+  const comparable = (p) => ({ ...p?.data, maskedEmail: undefined, codeExpiresInSeconds: undefined });
+  check("a reset code can be requested", forKnown.status === 200 && forKnown.payload?.ok,
+    JSON.stringify(forKnown.payload?.error));
+  check("an unknown address gets exactly the answer a real one does",
+    forUnknown.ok && JSON.stringify(comparable(forUnknown.payload)) === JSON.stringify(comparable(forKnown.payload)),
+    `${JSON.stringify(forUnknown.payload)} vs ${JSON.stringify(forKnown.payload)}`);
+  check("the reply is the generic one and masks the address",
+    forKnown.payload?.data?.sent === true && /^q\*\*\*@example\.com$/.test(forKnown.payload?.data?.maskedEmail ?? ""));
+  check("the code itself is never returned to the browser",
+    !/\b\d{6}\b/.test(JSON.stringify(forKnown.payload ?? {})));
+  check("the request handle is an httpOnly cookie page script cannot read",
+    /aplus_password_reset=/.test(knownCookie) && /httponly/i.test(knownCookie));
+
+  const cooldownKnown = await resetter("/api/auth/forgot-password/resend", { method: "POST" });
+  const cooldownUnknown = await resetStranger("/api/auth/forgot-password/resend", { method: "POST" });
+  check("resending straight away is held back by the cooldown",
+    cooldownKnown.status === 429 && cooldownKnown.payload?.error?.code === "RESEND_COOLDOWN",
+    `${cooldownKnown.status} ${cooldownKnown.payload?.error?.code}`);
+  check("and an unknown address is held back identically",
+    cooldownUnknown.status === 429 && cooldownUnknown.payload?.error?.code === "RESEND_COOLDOWN");
+
+  const { code: resetCode, unavailable } = await readResetCode(newEmail);
+  if (!registered.ok) {
+    console.log("  ⊘ the rest of password reset — the account it resets could not be registered");
+  } else if (unavailable) {
+    console.log("  ⊘ the rest of password reset — a real mail provider is configured, so the code went to a real inbox");
+  } else {
+    check("the code arrives in the development mailbox", /^\d{6}$/.test(resetCode ?? ""));
+    check("an unknown address is sent nothing",
+      !(await readResetCode(unknownAddress)).code);
+
+    const wrongGuess = resetCode === "000000" ? "111111" : "000000";
+    const wrongKnown = await resetter("/api/auth/forgot-password/verify", {
+      method: "POST",
+      body: { code: wrongGuess },
+    });
+    const wrongUnknown = await resetStranger("/api/auth/forgot-password/verify", {
+      method: "POST",
+      body: { code: "123456" },
+    });
+    check("a wrong code is refused as invalid",
+      wrongKnown.status === 422 && wrongKnown.payload?.error?.message === "The verification code is invalid.");
+    check("and an unknown address's guess is refused in exactly the same words",
+      wrongUnknown.status === 422 && wrongUnknown.payload?.error?.message === wrongKnown.payload?.error?.message);
+
+    const malformed = await resetter("/api/auth/forgot-password/verify", {
+      method: "POST",
+      body: { code: "12" },
+    });
+    check("a malformed code never reaches the service", malformed.status === 422);
+
+    const noHandle = await createClient()("/api/auth/forgot-password/verify", {
+      method: "POST",
+      body: { code: resetCode },
+    });
+    check("the right code from a browser that never asked for it is refused",
+      noHandle.status === 410, `status ${noHandle.status}`);
+
+    const forgedHandle = await createClient()("/api/auth/forgot-password/verify", {
+      method: "POST",
+      body: { code: resetCode },
+      headers: {
+        Cookie: `aplus_password_reset=${Buffer.from(JSON.stringify({ rid: "x", email: newEmail, iat: Date.now(), cx: Date.now() + 600000, exp: 9999999999 })).toString("base64url")}.forged`,
+      },
+    });
+    check("a forged request handle is refused", forgedHandle.status === 410, `status ${forgedHandle.status}`);
+
+    const bypass = await resetter("/api/auth/reset-password", {
+      method: "POST",
+      body: { otpVerified: true, verified: true, password: RESET_TO, confirmPassword: RESET_TO },
+    });
+    check("a browser claiming it verified the code cannot set a password", bypass.status === 422);
+
+    const verified = await resetter("/api/auth/forgot-password/verify", {
+      method: "POST",
+      body: { code: resetCode },
+    });
+    const resetToken = verified.payload?.data?.resetToken;
+    check("the right code is exchanged for a reset authorisation",
+      verified.ok && typeof resetToken === "string", JSON.stringify(verified.payload?.error));
+    check("verifying the code does not sign anybody in",
+      (await resetter("/api/auth/session")).payload?.data?.user == null);
+
+    const codeAgain = await resetter("/api/auth/forgot-password/verify", {
+      method: "POST",
+      body: { code: resetCode },
+    });
+    check("the same code cannot be used twice", !codeAgain.ok);
+
+    const mismatched = await resetter("/api/auth/reset-password", {
+      method: "POST",
+      body: { token: resetToken, password: RESET_TO, confirmPassword: `${RESET_TO}x` },
+    });
+    check("mismatched passwords are refused",
+      mismatched.status === 422 && Boolean(mismatched.payload?.error?.details?.fieldErrors?.confirmPassword));
+
+    const weak = await resetter("/api/auth/reset-password", {
+      method: "POST",
+      body: { token: resetToken, password: "weakpass", confirmPassword: "weakpass" },
+    });
+    check("the existing password policy applies",
+      weak.status === 422 && Boolean(weak.payload?.error?.details?.fieldErrors?.password));
+
+    const forgedToken = await resetter("/api/auth/reset-password", {
+      method: "POST",
+      body: { token: "f".repeat(43), password: RESET_TO, confirmPassword: RESET_TO },
+    });
+    check("an authorisation that was never issued is refused",
+      forgedToken.status === 410 && forgedToken.payload?.error?.code === "RESET_EXPIRED");
+
+    const done = await resetter("/api/auth/reset-password", {
+      method: "POST",
+      body: { token: resetToken, password: RESET_TO, confirmPassword: RESET_TO },
+    });
+    check("the password is reset", done.ok && done.payload?.data?.redirectTo === "/login?reset=1",
+      JSON.stringify(done.payload?.error));
+
+    const doneAgain = await resetter("/api/auth/reset-password", {
+      method: "POST",
+      body: { token: resetToken, password: "AnotherPass2024", confirmPassword: "AnotherPass2024" },
+    });
+    check("the authorisation cannot be used twice", doneAgain.status === 410);
+
+    check("the session that was open before the reset has ended",
+      (await unverified("/api/auth/session")).payload?.data?.user == null);
+
+    // Sign-in has its own per-client window, which the role logins earlier in
+    // this run have already used most of. These two come from their own
+    // address so the limiter is not what they end up measuring.
+    const loginFrom = { "x-forwarded-for": `198.51.100.${Math.floor(Math.random() * 200) + 10}` };
+    const oldLogin = await createClient()("/api/auth/login", {
+      method: "POST",
+      body: { email: newEmail, password: PASSWORD },
+      headers: loginFrom,
+    });
+    check("the old password no longer signs in", oldLogin.status === 401, `status ${oldLogin.status}`);
+
+    const signIn = createClient();
+    const newLogin = await signIn("/api/auth/login", {
+      method: "POST",
+      body: { email: newEmail, password: RESET_TO },
+      headers: loginFrom,
+    });
+    check("the new password signs in", newLogin.ok, JSON.stringify(newLogin.payload?.error));
+    check("and the session is real",
+      (await signIn("/api/auth/session")).payload?.data?.user?.email === newEmail);
+
+    // Five wrong guesses and the request is spent — shown on the unknown
+    // address, which has no stored code at all, because the limit must hold
+    // there too or it would say which addresses are real.
+    for (let i = 0; i < 4; i += 1) {
+      await resetStranger("/api/auth/forgot-password/verify", { method: "POST", body: { code: "123456" } });
+    }
+    const lockedOut = await resetStranger("/api/auth/forgot-password/verify", {
+      method: "POST",
+      body: { code: "123456" },
+    });
+    check("after five wrong guesses the request is locked",
+      lockedOut.status === 429 && lockedOut.payload?.error?.code === "TOO_MANY_ATTEMPTS",
+      `${lockedOut.status} ${lockedOut.payload?.error?.code}`);
+  }
+
+
   // --- Meeting management ---------------------------------------------------
   //
   // Configuring the joining details on a lesson that is already booked (§27).

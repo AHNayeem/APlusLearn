@@ -178,6 +178,7 @@ async function runSections() {
   await publicSurfaceTests();
   await bookingSlotLockTests();
   await rateLimitTests();
+  await passwordResetTests();
   await attachmentTests();
   await studentAnalyticsTests();
 }
@@ -1590,7 +1591,7 @@ async function emailTests() {
 
   for (const [name, message] of Object.entries({
     verifyEmail: verification,
-    resetPassword: emailTemplates.resetPassword({ firstName: "Amara", token: "t" }),
+    passwordResetCode: emailTemplates.passwordResetCode({ firstName: "Amara", code: "123456", expiresInMinutes: 10 }),
     passwordChanged: emailTemplates.passwordChanged({ firstName: "Amara", whenLabel: "today" }),
     bookingConfirmed: emailTemplates.bookingConfirmed({ firstName: "Amara", booking }),
     bookingCancelled: emailTemplates.bookingCancelled({ firstName: "Amara", booking, refundLabel: "$60.00" }),
@@ -1619,8 +1620,12 @@ async function emailTests() {
   });
   check("template input is HTML-escaped", !injected.html.includes("<img src=x"));
 
-  const reset = emailTemplates.resetPassword({ firstName: "A", token: "secret-token" });
-  check("a reset link expires and says so", /expires in one hour/i.test(reset.text));
+  const reset = emailTemplates.passwordResetCode({ firstName: "A", code: "042917", expiresInMinutes: 10 });
+  check("a reset code expires and says so", /expires in 10 minutes/i.test(reset.text));
+  check("the reset code appears in both parts, and in neither as a link",
+    reset.text.includes("042917") && reset.html.includes("042917") && !/https?:\/\/\S*042917/.test(reset.text));
+  check("the code is kept out of the subject line, which lock screens show",
+    !reset.subject.includes("042917"));
   check("a security notification carries no token",
     !emailTemplates.passwordChanged({ firstName: "A", whenLabel: "now" }).text.includes("token="));
 
@@ -11485,6 +11490,407 @@ async function studentAnalyticsTests() {
     if (student) await StudentProfile.deleteOne({ _id: student._id });
     await StudentProfile.deleteMany({ ownerId: { $in: madeUsers } });
     await User.deleteMany({ _id: { $in: madeUsers } });
+  }
+}
+
+// --- Password reset by emailed code ----------------------------------------
+//
+// The whole forgot-password flow at the service level: what is stored, what
+// is refused, and — the property that is easiest to lose — that nothing an
+// unknown address sees differs from what a real one sees.
+async function passwordResetTests() {
+  section("Password reset — emailed code, enumeration, single use");
+
+  const uri = process.env.MONGODB_URI;
+  if (!uri) return skip("password reset", "MONGODB_URI is not set");
+  if (mongoose.connection.readyState !== 1) {
+    try {
+      await mongoose.connect(uri, { serverSelectionTimeoutMS: 2500 });
+    } catch {
+      return skip("password reset", "MongoDB is not reachable");
+    }
+  }
+
+  const { User, AuthToken, AUTH_TOKEN_PURPOSE, AuditLog, RateLimitWindow } = await import("@/models");
+  const { AUDIT_ACTIONS, PASSWORD_RESET } = await import("@/constants");
+  const reset = await import("@/services/password-reset.service");
+  const { hashPassword, verifyPassword } = await import("@/lib/auth/password");
+  const { createHash } = await import("node:crypto");
+  const mailbox = await import("@/services/external/dev-mailbox");
+  const { developmentMailboxEnabled, resetEmailProvider } = await import(
+    "@/services/external/email-provider"
+  );
+  const { invalidateIntegrationCache } = await import("@/lib/config/integrations");
+  const { forgotPasswordSchema, verifyResetCodeSchema, resetPasswordSchema } = await import(
+    "@/lib/validation/auth"
+  );
+
+  const withEnv = async (vars, fn) => {
+    const saved = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]));
+    for (const [k, v] of Object.entries(vars)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    invalidateIntegrationCache();
+    resetEmailProvider();
+    try {
+      return await fn();
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+      invalidateIntegrationCache();
+      resetEmailProvider();
+    }
+  };
+
+  // Every limit here is a real, shared rate-limit window. Each step that
+  // needs a fresh request clears the ones for this run's addresses, rather
+  // than the suite waiting out a sixty-second cooldown.
+  const clearWindows = () => RateLimitWindow.deleteMany({ _id: /^password-reset:/ });
+  const codeFor = (email) => {
+    const message = mailbox.readDevMail({ to: email })
+      .find((m) => /password reset code/i.test(m.subject));
+    return message?.text.match(/^\s+(\d{6})\s*$/m)?.[1] ?? null;
+  };
+  const refused = (fn, code) => throws(fn, (e) => e.code === code);
+
+  const PASSWORD = "AplusLearn2024!";
+  const NEW_PASSWORD = "BrandNewPass123";
+  const made = [];
+  const makeUser = async (label) => {
+    const user = await User.create({
+      email: `reset-${label}-${randomUUID()}@example.com`,
+      passwordHash: await hashPassword(PASSWORD),
+      firstName: "Reset",
+      lastName: "Tester",
+      role: "PARENT",
+      status: "ACTIVE",
+      emailVerifiedAt: new Date(),
+      acceptedTermsAt: new Date(),
+    });
+    made.push(user._id);
+    return user;
+  };
+  const unknownEmail = `nobody-${randomUUID()}@example.com`;
+
+  try {
+    await clearWindows();
+    mailbox.clearDevMail();
+    const alice = await makeUser("alice");
+    const bob = await makeUser("bob");
+
+    // --- validation --------------------------------------------------------
+    check("an invalid email is refused before the service runs",
+      !forgotPasswordSchema.safeParse({ email: "not-an-email" }).success);
+    check("the address is normalised the way sign-in normalises it",
+      forgotPasswordSchema.parse({ email: "Alice@Example.COM" }).email === "alice@example.com");
+    check("a code must be six digits",
+      !verifyResetCodeSchema.safeParse({ code: "12345" }).success &&
+        !verifyResetCodeSchema.safeParse({ code: "12345a" }).success);
+    check("a pasted code with a space still reads as six digits",
+      verifyResetCodeSchema.parse({ code: "123 456" }).code === "123456");
+    const mismatch = resetPasswordSchema.safeParse({
+      token: "t".repeat(43), password: NEW_PASSWORD, confirmPassword: "Different123",
+    });
+    check("mismatched passwords are refused with the shared message",
+      !mismatch.success && mismatch.error.issues.some((i) => i.message === "Passwords do not match."));
+    check("the shared password policy applies to a reset",
+      !resetPasswordSchema.safeParse({ token: "t".repeat(43), password: "short", confirmPassword: "short" }).success);
+
+    // --- request: identical for real and unknown addresses ---------------
+    const known = await reset.requestPasswordReset(alice.email, { ip: "203.0.113.9" });
+    const unknown = await reset.requestPasswordReset(unknownEmail);
+    const shape = (r) => Object.keys(r).sort().join(",");
+    check("a real and an unknown address get responses of the same shape",
+      shape(known) === shape(unknown));
+    check("and the same numbers in them",
+      known.expiresInMinutes === unknown.expiresInMinutes &&
+        known.resendInSeconds === unknown.resendInSeconds &&
+        Math.abs(known.codeExpiresInSeconds - unknown.codeExpiresInSeconds) <= 1);
+    check("both get a request handle", Boolean(known.requestToken) && Boolean(unknown.requestToken));
+    check("the address is masked, not echoed", known.maskedEmail === `r***@example.com`);
+    check("the code expires on the configured schedule",
+      known.expiresInMinutes === PASSWORD_RESET.codeTtlMinutes &&
+        known.codeExpiresInSeconds <= PASSWORD_RESET.codeTtlMinutes * 60);
+    check("nothing returned carries a six-digit code",
+      !/\b\d{6}\b/.test(JSON.stringify({ ...known, requestToken: undefined })));
+
+    const stored = await AuthToken.findOne({
+      userId: alice._id, purpose: AUTH_TOKEN_PURPOSE.PASSWORD_RESET, consumedAt: null,
+    }).lean();
+    const firstCode = codeFor(alice.email);
+    check("a real account gets one live code", Boolean(stored) && Boolean(firstCode));
+    check("the development transport delivered the real code to the mailbox", /^\d{6}$/.test(firstCode ?? ""));
+    check("the code is not stored in the clear",
+      stored && !stored.tokenHash.includes(firstCode) && stored.tokenHash !== firstCode);
+    check("nor as a plain hash a leaked database could reverse",
+      stored && stored.tokenHash !== createHash("sha256").update(firstCode).digest("hex"));
+    check("the code expires in ten minutes",
+      stored && Math.abs(stored.expiresAt.getTime() - Date.now() - PASSWORD_RESET.codeTtlMinutes * 60_000) < 5_000);
+    check("the requesting address is recorded", stored?.requestedIp === "203.0.113.9");
+    check("an unknown address is sent nothing", mailbox.readDevMail({ to: unknownEmail }).length === 0);
+
+    // --- cooldown and hourly cap, identical for both -------------------------
+    const againKnown = await refused(() => reset.requestPasswordReset(alice.email), "RESEND_COOLDOWN");
+    const againUnknown = await refused(() => reset.requestPasswordReset(unknownEmail), "RESEND_COOLDOWN");
+    check("an immediate second request is held back by the cooldown",
+      againKnown.threw && againKnown.matched && againKnown.error.status === 429);
+    check("and an unknown address is held back identically",
+      againUnknown.threw && againUnknown.matched &&
+        againUnknown.error.message.replace(/\d+/, "N") === againKnown.error.message.replace(/\d+/, "N"));
+    check("the cooldown says how long to wait",
+      againKnown.error?.details?.retryAfterSeconds > 0 &&
+        againKnown.error.details.retryAfterSeconds <= PASSWORD_RESET.resendCooldownSeconds);
+
+    // --- a deferred send: the account work happens after the response -------
+    await clearWindows();
+    const deferred = [];
+    await reset.requestPasswordReset(bob.email, { defer: (task) => deferred.push(task) });
+    check("with a deferring route, no account work has happened by the time it answers",
+      deferred.length === 1 && !(await AuthToken.exists({ userId: bob._id, purpose: AUTH_TOKEN_PURPOSE.PASSWORD_RESET })));
+    await deferred[0]();
+    check("and it happens when the deferred task runs",
+      Boolean(await AuthToken.exists({ userId: bob._id, purpose: AUTH_TOKEN_PURPOSE.PASSWORD_RESET })));
+
+    // --- verification: wrong, expired, forged, cross-account --------------
+    const wrong = await refused(
+      () => reset.verifyPasswordResetCode({ requestToken: known.requestToken, code: firstCode === "000000" ? "111111" : "000000" }),
+      "VALIDATION_ERROR",
+    );
+    check("a wrong code is refused as invalid",
+      wrong.threw && wrong.matched && wrong.error.message === "The verification code is invalid.");
+    const counted = await AuthToken.findById(stored._id).lean();
+    check("and the wrong guess is counted against the code", counted.attempts === 1 && !counted.consumedAt);
+
+    const unknownWrong = await refused(
+      () => reset.verifyPasswordResetCode({ requestToken: unknown.requestToken, code: "123456" }),
+      "VALIDATION_ERROR",
+    );
+    check("an unknown address's guess gets the identical refusal",
+      unknownWrong.threw && unknownWrong.matched && unknownWrong.error.message === wrong.error.message);
+
+    const forged = known.requestToken.replace(/.$/, (c) => (c === "A" ? "B" : "A"));
+    const forgedResult = await refused(
+      () => reset.verifyPasswordResetCode({ requestToken: forged, code: firstCode }), "CODE_EXPIRED",
+    );
+    check("a tampered request handle is refused, even with the right code",
+      forgedResult.threw && forgedResult.matched);
+    const noHandle = await refused(
+      () => reset.verifyPasswordResetCode({ requestToken: null, code: firstCode }), "CODE_EXPIRED",
+    );
+    check("so is no handle at all", noHandle.threw && noHandle.matched);
+
+    const bobCode = codeFor(bob.email);
+    const crossed = await refused(
+      () => reset.verifyPasswordResetCode({ requestToken: known.requestToken, code: bobCode }), "VALIDATION_ERROR",
+    );
+    check("another account's code does not open this one", crossed.threw && crossed.matched);
+
+    const realNow = Date.now;
+    Date.now = () => realNow() + (PASSWORD_RESET.codeTtlMinutes + 1) * 60_000;
+    let late;
+    try {
+      late = await refused(
+        () => reset.verifyPasswordResetCode({ requestToken: known.requestToken, code: firstCode }), "CODE_EXPIRED",
+      );
+    } finally {
+      Date.now = realNow;
+    }
+    check("a code past its ten minutes is refused as expired, not as wrong",
+      late.threw && late.matched && late.error.status === 410 &&
+        late.error.message === "This verification code has expired. Please request a new code.");
+
+    // --- resend voids the previous code ------------------------------------
+    await clearWindows();
+    mailbox.clearDevMail();
+    const resent = await reset.resendPasswordResetCode(known.requestToken);
+    const secondCode = codeFor(alice.email);
+    check("a resend sends a fresh code", Boolean(secondCode) && Boolean(resent.requestToken));
+    check("and voids the one before it",
+      Boolean((await AuthToken.findById(stored._id).lean()).consumedAt));
+    const oldAfterResend = await refused(
+      () => reset.verifyPasswordResetCode({ requestToken: resent.requestToken, code: firstCode === secondCode ? "000000" : firstCode }),
+      "VALIDATION_ERROR",
+    );
+    check("the old code no longer works after a resend", oldAfterResend.threw && oldAfterResend.matched);
+    const oldHandle = await refused(
+      () => reset.verifyPasswordResetCode({ requestToken: known.requestToken, code: secondCode }),
+      "VALIDATION_ERROR",
+    );
+    check("and the new code only works with the request it was sent for", oldHandle.threw && oldHandle.matched);
+    const expiredRequest = await refused(() => reset.resendPasswordResetCode("garbage"), "RESET_REQUEST_EXPIRED");
+    check("a resend without a valid request asks to start again", expiredRequest.threw && expiredRequest.matched);
+
+    // --- the right code, once ---------------------------------------------
+    const verified = await reset.verifyPasswordResetCode({ requestToken: resent.requestToken, code: secondCode });
+    check("the right code is exchanged for a reset authorisation",
+      typeof verified.resetToken === "string" && verified.resetToken.length >= 40);
+    check("which is short-lived", verified.expiresInMinutes === PASSWORD_RESET.authorizationTtlMinutes);
+    const grant = await AuthToken.findOne({
+      userId: alice._id, purpose: AUTH_TOKEN_PURPOSE.PASSWORD_RESET_AUTHORIZATION, consumedAt: null,
+    }).lean();
+    check("the authorisation is stored only as a hash",
+      grant && grant.tokenHash !== verified.resetToken && !grant.tokenHash.includes(verified.resetToken));
+    const reused = await refused(
+      () => reset.verifyPasswordResetCode({ requestToken: resent.requestToken, code: secondCode }),
+      "VALIDATION_ERROR",
+    );
+    check("the same code cannot be used twice", reused.threw && reused.matched);
+
+    // --- reset -------------------------------------------------------------
+    const forgedGrant = await refused(
+      () => reset.resetPassword({ token: "x".repeat(43), password: NEW_PASSWORD }), "RESET_EXPIRED",
+    );
+    check("an authorisation that was never issued is refused", forgedGrant.threw && forgedGrant.matched);
+
+    const versionBefore = (await User.findById(alice._id).lean()).tokenVersion ?? 0;
+    mailbox.clearDevMail();
+    const done = await reset.resetPassword({ token: verified.resetToken, password: NEW_PASSWORD });
+    check("a valid authorisation sets the new password", done.reset === true);
+    const after = await User.findById(alice._id).select("+passwordHash").lean();
+    check("the new password is stored as a bcrypt hash, never in the clear",
+      after.passwordHash.startsWith("$2") && !after.passwordHash.includes(NEW_PASSWORD));
+    check("the new password now signs in", await verifyPassword(NEW_PASSWORD, after.passwordHash));
+    check("the old password no longer does", !(await verifyPassword(PASSWORD, after.passwordHash)));
+    check("every existing session is ended", (after.tokenVersion ?? 0) === versionBefore + 1);
+    check("the account owner is told their password changed",
+      mailbox.readDevMail({ to: alice.email }).some((m) => /password was changed/i.test(m.subject)));
+    check("the reset is audited",
+      Boolean(await AuditLog.exists({ entityId: alice._id, action: AUDIT_ACTIONS.USER_PASSWORD_RESET })));
+    const replay = await refused(
+      () => reset.resetPassword({ token: verified.resetToken, password: "AnotherPass123" }), "RESET_EXPIRED",
+    );
+    check("the authorisation cannot be used twice", replay.threw && replay.matched);
+    check("nothing reset-related is left live on the account",
+      !(await AuthToken.exists({
+        userId: alice._id,
+        purpose: { $in: [AUTH_TOKEN_PURPOSE.PASSWORD_RESET, AUTH_TOKEN_PURPOSE.PASSWORD_RESET_AUTHORIZATION] },
+        consumedAt: null,
+      })));
+
+    // --- an authorisation that has lapsed ------------------------------------
+    await clearWindows();
+    mailbox.clearDevMail();
+    const bobRequest = await reset.requestPasswordReset(bob.email);
+    const bobGrant = await reset.verifyPasswordResetCode({
+      requestToken: bobRequest.requestToken, code: codeFor(bob.email),
+    });
+    await AuthToken.updateOne(
+      { userId: bob._id, purpose: AUTH_TOKEN_PURPOSE.PASSWORD_RESET_AUTHORIZATION, consumedAt: null },
+      { $set: { expiresAt: new Date(Date.now() - 1000) } },
+    );
+    const lapsed = await refused(
+      () => reset.resetPassword({ token: bobGrant.resetToken, password: NEW_PASSWORD }), "RESET_EXPIRED",
+    );
+    check("an authorisation past its ten minutes is refused", lapsed.threw && lapsed.matched);
+    check("and the password is untouched",
+      await verifyPassword(PASSWORD, (await User.findById(bob._id).select("+passwordHash").lean()).passwordHash));
+
+    // --- guesses run out, for a real address and an unknown one alike -------
+    await clearWindows();
+    mailbox.clearDevMail();
+    const bobAgain = await reset.requestPasswordReset(bob.email);
+    const bobRight = codeFor(bob.email);
+    const bobWrong = bobRight === "000000" ? "111111" : "000000";
+    for (let i = 0; i < PASSWORD_RESET.maxAttempts; i += 1) {
+      await throws(() => reset.verifyPasswordResetCode({ requestToken: bobAgain.requestToken, code: bobWrong }));
+    }
+    const locked = await refused(
+      () => reset.verifyPasswordResetCode({ requestToken: bobAgain.requestToken, code: bobRight }),
+      "TOO_MANY_ATTEMPTS",
+    );
+    check("after five wrong guesses even the right code is refused",
+      locked.threw && locked.matched && locked.error.status === 429 &&
+        locked.error.message === "Too many verification attempts. Please request a new code.");
+    check("and the code is burned",
+      !(await AuthToken.exists({ userId: bob._id, purpose: AUTH_TOKEN_PURPOSE.PASSWORD_RESET, consumedAt: null })));
+
+    const ghost = await reset.requestPasswordReset(unknownEmail);
+    for (let i = 0; i < PASSWORD_RESET.maxAttempts; i += 1) {
+      await throws(() => reset.verifyPasswordResetCode({ requestToken: ghost.requestToken, code: "123456" }));
+    }
+    const ghostLocked = await refused(
+      () => reset.verifyPasswordResetCode({ requestToken: ghost.requestToken, code: "123456" }),
+      "TOO_MANY_ATTEMPTS",
+    );
+    check("an unknown address locks out after exactly the same five guesses",
+      ghostLocked.threw && ghostLocked.matched && ghostLocked.error.message === locked.error.message);
+
+    // --- hourly cap per address ---------------------------------------------
+    await clearWindows();
+    let capped = null;
+    for (let i = 0; i <= PASSWORD_RESET.maxCodesPerHour; i += 1) {
+      await RateLimitWindow.deleteMany({ _id: /^password-reset:cooldown:/ });
+      const result = await throws(() => reset.requestPasswordReset(unknownEmail));
+      if (result.threw) {
+        capped = { attempt: i + 1, error: result.error };
+        break;
+      }
+    }
+    check("one address can be sent at most five codes an hour",
+      capped?.attempt === PASSWORD_RESET.maxCodesPerHour + 1 && capped.error.code === "RATE_LIMITED");
+
+    // --- a deleted account is indistinguishable from none -------------------
+    await clearWindows();
+    await User.updateOne({ _id: bob._id }, { $set: { deletedAt: new Date() } });
+    mailbox.clearDevMail();
+    const gone = await reset.requestPasswordReset(bob.email);
+    check("a deleted account is answered like an unknown one and sent nothing",
+      shape(gone) === shape(known) && mailbox.readDevMail({ to: bob.email }).length === 0);
+
+    // --- the development mailbox cannot exist in production -----------------
+    check("in development with no mail server, the mailbox is open", await developmentMailboxEnabled());
+    await withEnv({ APP_ENV: "production" }, async () => {
+      mailbox.recordDevMail({ to: "p@example.com", subject: "s", text: "123456" });
+      check("with APP_ENV=production nothing is recorded or read",
+        mailbox.readDevMail().length === 0 && !mailbox.devMailboxAllowed());
+      check("and the mailbox reports itself closed", !(await developmentMailboxEnabled()));
+    });
+    await withEnv({ NODE_ENV: "production", APP_ENV: "staging" }, async () => {
+      check("a production build is closed even on a non-production deployment",
+        !mailbox.devMailboxAllowed() && !(await developmentMailboxEnabled()));
+    });
+
+    // --- a real provider: the same service, a different transport -----------
+    await clearWindows();
+    mailbox.clearDevMail();
+    const carol = await makeUser("carol");
+    const originalFetch = globalThis.fetch;
+    const sent = [];
+    globalThis.fetch = async (url, options = {}) => {
+      sent.push({ url: String(url), body: options.body ? JSON.parse(options.body) : null });
+      return { ok: true, status: 200, json: async () => ({ id: "msg_reset" }), text: async () => "{}" };
+    };
+    try {
+      await withEnv(
+        { EMAIL_PROVIDER: "resend", RESEND_API_KEY: "re_test_key", EMAIL_FROM: "APlus Learn <no-reply@apluslearn.ca>" },
+        async () => {
+          check("with a mail server configured, the mailbox closes", !(await developmentMailboxEnabled()));
+          const viaResend = await reset.requestPasswordReset(carol.email);
+          const delivery = sent.find((call) => call.url === "https://api.resend.com/emails");
+          const deliveredCode = delivery?.body?.text?.match(/^\s+(\d{6})\s*$/m)?.[1];
+          check("the unchanged service hands the code to the configured provider",
+            Boolean(delivery) && delivery.body.to?.[0] === carol.email && /^\d{6}$/.test(deliveredCode ?? ""));
+          check("and nothing reaches the development mailbox",
+            mailbox.readDevMail({ to: carol.email }).length === 0);
+          const viaResendGrant = await reset.verifyPasswordResetCode({
+            requestToken: viaResend.requestToken, code: deliveredCode,
+          });
+          check("the code the real provider delivered verifies exactly the same way",
+            typeof viaResendGrant.resetToken === "string");
+        },
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  } finally {
+    await clearWindows();
+    mailbox.clearDevMail();
+    await AuthToken.deleteMany({ userId: { $in: made } });
+    await AuditLog.deleteMany({ entityId: { $in: made } });
+    await User.deleteMany({ _id: { $in: made } });
   }
 }
 

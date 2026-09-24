@@ -33,7 +33,6 @@ function providerAvatar(value) {
 }
 
 const VERIFY_TTL_MS = 24 * 60 * 60 * 1000;
-const RESET_TTL_MS = 60 * 60 * 1000;
 
 /**
  * Registration (§4, §9).
@@ -358,69 +357,9 @@ export async function oauthSignIn({ provider, credential, role, nonce, profile }
   return toPlain({ ...user.toObject(), passwordHash: undefined });
 }
 
-export async function requestPasswordReset(email) {
-  const user = await User.findOne({ email }).lean();
-  // Always return success: the response must not reveal whether an account exists.
-  if (!user || user.deletedAt) return { sent: true };
-
-  await AuthToken.updateMany(
-    { userId: user._id, purpose: AUTH_TOKEN_PURPOSE.PASSWORD_RESET, consumedAt: null },
-    { $set: { consumedAt: new Date() } },
-  );
-
-  const { raw, hash } = createToken();
-  await AuthToken.create({
-    userId: user._id,
-    purpose: AUTH_TOKEN_PURPOSE.PASSWORD_RESET,
-    tokenHash: hash,
-    expiresAt: new Date(Date.now() + RESET_TTL_MS),
-  });
-
-  // Deliberately not surfaced: a delivery error here would only ever happen
-  // for an address that exists, which would turn this endpoint into an
-  // account-enumeration oracle. It is logged instead.
-  await sendEmail(
-    {
-      to: user.email,
-      ...(await brandedEmailTemplates()).resetPassword({ firstName: user.firstName, token: raw }),
-    },
-    { category: EMAIL_CATEGORIES.SECURITY },
-  );
-
-  return { sent: true };
-}
-
-export async function resetPassword({ token, password }) {
-  const record = await AuthToken.findOne({
-    tokenHash: hashToken(token),
-    purpose: AUTH_TOKEN_PURPOSE.PASSWORD_RESET,
-  });
-
-  if (!record || record.consumedAt || record.expiresAt < new Date()) {
-    throw new AppError("That reset link has expired. Request a new one.", {
-      status: 410,
-      code: "TOKEN_EXPIRED",
-    });
-  }
-
-  record.consumedAt = new Date();
-  await record.save();
-
-  const user = await User.findById(record.userId);
-  if (!user) throw new NotFoundError("We couldn't find that account.");
-
-  user.passwordHash = await hashPassword(password);
-  // Invalidate every session issued before the reset.
-  user.tokenVersion = (user.tokenVersion ?? 0) + 1;
-  if (user.status === USER_STATUS.PENDING_VERIFICATION && user.emailVerifiedAt) {
-    user.status = USER_STATUS.ACTIVE;
-  }
-  await user.save();
-
-  await notifyPasswordChanged(user);
-
-  return toPlain({ ...user.toObject(), passwordHash: undefined });
-}
+// Forgot password lives in `password-reset.service.js`: it is a flow of its
+// own (request, code, authorisation, reset) and shares only the "your
+// password changed" notice with this module.
 
 export async function changePassword(userId, { currentPassword, password }) {
   const user = await User.findById(userId).select("+passwordHash");
@@ -447,7 +386,7 @@ export async function changePassword(userId, { currentPassword, password }) {
  * address that may no longer be under the account owner's control — its whole
  * job is to let a victim notice a takeover.
  */
-async function notifyPasswordChanged(user) {
+export async function notifyPasswordChanged(user) {
   await sendEmail(
     {
       to: user.email,

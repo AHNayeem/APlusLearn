@@ -64,8 +64,13 @@ export function escapeHtml(value) {
  * subject; hiding it visually while leaving it in the DOM is the standard
  * technique and keeps it available to screen readers.
  */
-function layout(brand, { preheader, heading, body = [], details = [], cta, footnote }) {
+function layout(brand, { preheader, heading, body = [], details = [], code, cta, footnote }) {
   const BRAND = palette(brand);
+  // A one-time code is set apart and spaced so it can be read and typed
+  // without mistaking one digit for its neighbour.
+  const codeBlock = code
+    ? `<p style="margin:8px 0 24px;padding:16px;text-align:center;background:${BRAND.canvas};border:1px solid ${BRAND.line};border-radius:12px;font:700 30px/1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:8px;color:${BRAND.ink}">${escapeHtml(code)}</p>`
+    : "";
   const rows = details.length
     ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:24px 0;border:1px solid ${BRAND.line};border-radius:12px;border-collapse:separate;overflow:hidden">
         ${details
@@ -109,6 +114,7 @@ function layout(brand, { preheader, heading, body = [], details = [], cta, footn
   <tr><td style="padding:20px 28px 28px">
     <h1 style="margin:0 0 16px;font:700 22px/1.3 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;color:${BRAND.ink}">${escapeHtml(heading)}</h1>
     ${body.map((p) => `<p style="margin:0 0 14px;font:400 15px/1.65 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;color:${BRAND.ink}">${escapeHtml(p)}</p>`).join("")}
+    ${codeBlock}
     ${rows}
     ${button}
     ${footnote ? `<p style="margin:0;font:400 13px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;color:${BRAND.muted}">${escapeHtml(footnote)}</p>` : ""}
@@ -128,11 +134,12 @@ function layout(brand, { preheader, heading, body = [], details = [], cta, footn
 }
 
 /** The plain-text twin of `layout`, built from the same pieces. */
-function plain(brand, { heading, body = [], details = [], cta, footnote }) {
+function plain(brand, { heading, body = [], details = [], code, cta, footnote }) {
   return [
     heading,
     "",
     ...body,
+    code ? `\n    ${code}\n` : null,
     details.length ? "" : null,
     ...details.map(([label, value]) => `${label}: ${value}`),
     cta ? `\n${cta.label}: ${cta.href}` : null,
@@ -170,14 +177,22 @@ export function emailTemplatesFor(brand = DEFAULT_EMAIL_BRAND) {
           "This link expires in 24 hours and can be used once. If you didn't create an account, you can ignore this email.",
       }),
 
-    resetPassword: ({ firstName, token }) =>
-      email(`Reset your ${brand.appName} password`, {
-        preheader: "Choose a new password.",
+    /**
+     * The forgot-password code (§9). No link: the code is typed into the
+     * page that asked for it, so a forwarded or intercepted email is useless
+     * without the browser that holds the request.
+     */
+    passwordResetCode: ({ firstName, code, expiresInMinutes }) =>
+      email(`Your ${brand.appName} password reset code`, {
+        preheader: "Use this code to choose a new password.",
         heading: "Reset your password",
-        body: [`Hi ${firstName},`, "We received a request to reset your password. Choose a new one below."],
-        cta: { label: "Choose a new password", href: `${baseUrl()}/reset-password?token=${token}` },
+        body: [
+          `Hi ${firstName},`,
+          "We received a request to reset your password. Enter this code on the reset page to continue:",
+        ],
+        code,
         footnote:
-          "This link expires in one hour and can be used once. If you didn't request this, nothing has changed and you can safely ignore this email.",
+          `This code expires in ${expiresInMinutes} minutes and can be used once. Never share it — ${brand.appName} will never ask you for it. If you didn't request this, nothing has changed and you can safely ignore this email.`,
       }),
 
     /** Security notification — sent after the fact, never carries a token. */

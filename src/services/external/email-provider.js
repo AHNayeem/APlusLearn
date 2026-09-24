@@ -10,13 +10,15 @@ import {
 } from "@/lib/config/integrations";
 import { getAppConfig } from "@/services/settings.service";
 import { emailTemplates, emailTemplatesFor } from "./email-templates";
+import { devMailboxAllowed, recordDevMail } from "./dev-mailbox";
 
 /**
  * Email abstraction (§38).
  *
- *   ConsoleEmailProvider — development. Prints a readable summary so
- *                          verification and reset links are always reachable
- *                          without credentials.
+ *   ConsoleEmailProvider — development. Prints a readable summary, and
+ *                          keeps a copy in the development mailbox
+ *                          (`/dev/mail`), so verification links and reset
+ *                          codes are always reachable without credentials.
  *   ResendEmailProvider  — production transactional delivery.
  *
  * Resend was chosen over SES/SendGrid/Postmark because it needs nothing but
@@ -64,6 +66,7 @@ export class ConsoleEmailProvider extends EmailProvider {
   }
 
   async send({ to, subject, text, html }) {
+    recordDevMail({ to, subject, text: text ?? stripTags(html ?? "") });
     if (process.env.NODE_ENV !== "test") {
       console.info(
         [
@@ -374,6 +377,25 @@ export async function getEmailProvider() {
   const provider = buildEmailProvider(resolved);
   cached = { key, provider };
   return provider;
+}
+
+/**
+ * Whether `/dev/mail` may show anything (§38).
+ *
+ * The mailbox's own two locks (a development build, a non-production
+ * deployment) plus a third: mail must actually be going to the console. A
+ * developer who has pointed a local build at a real SMTP server gets real
+ * mail and no mailbox, so there is never a second place a code could be read.
+ */
+export async function developmentMailboxEnabled() {
+  if (!devMailboxAllowed()) return false;
+  try {
+    return (await getEmailProvider()).name === "CONSOLE";
+  } catch {
+    // Email switched off, or a stored credential that will not decrypt:
+    // either way nothing is being "sent" to the console.
+    return false;
+  }
 }
 
 /** Drop the memoised transport. For tests and for a saved configuration change. */

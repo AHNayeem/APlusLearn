@@ -17,6 +17,7 @@ Package manager is **bun** (`bun.lock`, `packageManager: bun@1.3.12`); npm works
 | `bun run seed:keep` | Add only missing seed data |
 | `bun run qa` | End-to-end API suite over real HTTP — **requires `bun run dev` running in another terminal** |
 | `bun run test:integrations` | Provider adapters and DB-backed service rules, with `fetch` stubbed — no third-party service is contacted |
+| `bun run e2e` | Forgot password in a real browser (Playwright + system Chrome, not a dependency) — **requires `bun run dev` running**, no mail provider configured |
 | `node scripts/pwa-icons.mjs` | Regenerate `public/icons/*` from `public/icon.svg` after a rebrand. Outputs are committed; no build step runs this |
 
 Two suites, no unit-test runner. Both are single sequential scripts with no filter flag —
@@ -145,6 +146,15 @@ ad-hoc JSON responses, and never let a raw driver error reach the client.
   refusing to render a `javascript:` href is a backstop, not the boundary. `internalPath()` in
   [src/lib/utils/url.js](src/lib/utils/url.js) does the same job for the post-sign-in `next`
   parameter — `//host` and `/\host` are another origin to a browser.
+- **Forgot password is one flow, and it cannot tell you who has an account.**
+  [src/services/password-reset.service.js](src/services/password-reset.service.js): email → six-digit
+  code → single-use reset authorisation → new password. Every limit and expiry hangs off the signed
+  request handle (httpOnly cookie) or the address — never off whether an account exists — so an unknown
+  address is throttled, locked out and expired exactly like a real one, and the account work runs in
+  `after()`. The code is stored only as a keyed HMAC; the password step accepts only the server-issued
+  authorisation. Development differs only in transport: `ConsoleEmailProvider` keeps a mailbox at
+  `/dev/mail` (and `GET /api/dev/mail`), locked unless `NODE_ENV` *and* `APP_ENV` are non-production and
+  mail really goes to the console. There is no "any code works" mode — don't add one.
 - **Risk detects; it never punishes.** [src/services/risk.service.js](src/services/risk.service.js) is the only place fraud logic lives. Every signal carries a `dedupeKey` derived from the event, so replays record once, and every call site uses `safelyRecordRiskSignal` so detection can never break the action being taken. No score restricts an account — an administrator does, from user management.
 - **The client supplies intent, never state.** Amounts, commission and statuses are derived server-side from stored data. `bun run qa` asserts an injected `price` or `status` is ignored.
 - **Ownership is checked against the loaded DB record**, never a request field (`requireOwnership`, `requireParticipant`, `ownsOrAdmin`).
@@ -255,6 +265,8 @@ configurable defaults are listed.
 [APLUS_LEARN_PHASE3_IMPLEMENTATION_AUDIT.md](APLUS_LEARN_PHASE3_IMPLEMENTATION_AUDIT.md) does the
 same for §41 Phase 3 — which is a list of fourteen feature names and no requirements, so it is
 mostly a record of which product decisions each deferred item is waiting on.
+[docs/PASSWORD_RESET.md](docs/PASSWORD_RESET.md) covers forgot password: the flow, its limits, the
+development mailbox and what production email needs.
 [docs/PWA.md](docs/PWA.md) covers the service worker: its caching allowlist,
 what is deliberately never cached, offline behaviour and the update strategy.
 

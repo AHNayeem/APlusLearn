@@ -112,3 +112,35 @@ export async function clearOAuthNonce() {
   const store = await cookies();
   store.delete(OAUTH_NONCE_COOKIE);
 }
+
+/**
+ * The browser's handle on a forgot-password request (§9, §36).
+ *
+ * A signed value naming the request and the address it was made for, issued
+ * identically whether or not an account exists. Kept in an httpOnly cookie so
+ * page script never holds it, and so a refreshed page can pick the flow up
+ * where it was. It authorises nothing on its own: it is what a code is
+ * checked *against*.
+ */
+const PASSWORD_RESET_COOKIE = "aplus_password_reset";
+
+export async function setPasswordResetCookie(value, maxAgeSeconds) {
+  const store = await cookies();
+  store.set(PASSWORD_RESET_COOKIE, value, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    path: "/",
+    maxAge: maxAgeSeconds,
+  });
+}
+
+export async function readPasswordResetCookie() {
+  const store = await cookies();
+  return store.get(PASSWORD_RESET_COOKIE)?.value ?? null;
+}
+
+export async function clearPasswordResetCookie() {
+  const store = await cookies();
+  store.delete(PASSWORD_RESET_COOKIE);
+}

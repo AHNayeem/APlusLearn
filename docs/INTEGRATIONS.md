@@ -207,7 +207,7 @@ is, Resend rejects the message and the adapter surfaces its reason.
 | Flow | Template | Trigger |
 |---|---|---|
 | Email verification | `verifyEmail` | Registration, resend |
-| Password reset | `resetPassword` | Forgot password |
+| Password reset code | `passwordResetCode` | Forgot password, resend — six digits, 10 min, no link |
 | Password changed | `passwordChanged` | Reset or change — a security notice, carries no token |
 | Booking confirmed | `bookingConfirmed` | Payment settles — to purchaser *and* tutor |
 | Booking cancelled | `bookingCancelled` | Any cancellation path |
@@ -232,6 +232,16 @@ throwing, so a bounced confirmation never undoes the booking it announces. The
 password-reset path relies on this — surfacing a delivery error there would
 turn the endpoint into an account-enumeration oracle, because it only ever
 sends for an address that exists.
+
+### Without a mail server
+
+`ConsoleEmailProvider` prints each message to the server log and keeps a copy
+in the development mailbox — `/dev/mail` for a person, `GET /api/dev/mail?to=`
+for a script — until the server restarts. That is how a forgot-password code is
+read locally, and how `bun run qa` and `bun run e2e` read it. The mailbox is a
+404 and records nothing unless `NODE_ENV` and `APP_ENV` are both
+non-production and mail really is going to the console, so it cannot exist on
+any `next build`. See [PASSWORD_RESET.md](PASSWORD_RESET.md).
 
 ---
 
