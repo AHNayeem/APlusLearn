@@ -1133,6 +1133,22 @@ export const AUDIT_ACTIONS = {
   CURRICULUM_UPDATED: "CURRICULUM_UPDATED",
 
   /**
+   * Shared files (§21, §41 Phase 3).
+   *
+   * Writes are recorded because a file one member sent another is evidence in
+   * any later safeguarding complaint, and "who put this here" has to survive
+   * the message being deleted. Reads are recorded only for an administrator:
+   * a participant opening a worksheet in their own thread is the feature
+   * working, while a moderator opening a family's file is an act somebody
+   * should be able to review afterwards — the same line `CONVERSATION_REPORT_VIEWED`
+   * already draws.
+   */
+  MESSAGE_ATTACHMENT_ADDED: "MESSAGE_ATTACHMENT_ADDED",
+  PROGRESS_ATTACHMENT_ADDED: "PROGRESS_ATTACHMENT_ADDED",
+  PROGRESS_ATTACHMENT_REMOVED: "PROGRESS_ATTACHMENT_REMOVED",
+  ATTACHMENT_ADMIN_VIEWED: "ATTACHMENT_ADMIN_VIEWED",
+
+  /**
    * External modules (§26, §36). Credential *values* are never recorded —
    * only which fields moved, and whether a secret was set, replaced or
    * cleared. That is the whole point of auditing a rotation: you want to know

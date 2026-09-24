@@ -51,6 +51,27 @@ export async function getProvince(codeOrSlug) {
   });
 }
 
+/**
+ * The province codes a visitor is allowed to browse.
+ *
+ * `Province.isActive` is what the pickers and the homepage call "coming
+ * soon", and until now that promise stopped at the picker: a course under a
+ * deactivated province kept `Course.isActive: true` of its own, so it stayed
+ * in `/courses` and its SEO landing page still rendered. Deactivating a
+ * province is one click and cascading it onto every course underneath would
+ * be a migration, so the gate lives on the read instead — one cached lookup,
+ * invalidated by the same `invalidate()` every curriculum write already calls.
+ *
+ * It applies to the public view only (`activeOnly`), because an administrator
+ * has to be able to see and edit the curriculum they are still building.
+ */
+export async function activeProvinceCodes() {
+  return cached("provinceCodes:active", async () => {
+    const docs = await Province.find({ isActive: true }).select("code").lean();
+    return docs.map((p) => p.code);
+  });
+}
+
 export async function listGrades({ provinceCode, provinceId } = {}) {
   return cached(`grades:${provinceCode ?? provinceId ?? "all"}`, async () => {
     let id = provinceId;
@@ -164,6 +185,16 @@ export async function listCourses(params = {}) {
   const size = pageSize ?? PAGE_SIZES.adminTable;
   const query = buildCourseQuery(params);
 
+  // The public list shows only what a visitor may actually browse. An
+  // explicit `province` filter is narrowed rather than replaced, so asking
+  // for a province that is not live returns nothing instead of everything.
+  if (params.activeOnly !== false) {
+    const codes = await activeProvinceCodes();
+    query.provinceCode = query.provinceCode
+      ? { $in: codes.filter((c) => c === query.provinceCode) }
+      : { $in: codes };
+  }
+
   const [items, total] = await Promise.all([
     Course.find(query)
       .sort(COURSE_SORTS[sort] ?? COURSE_SORTS.RELEVANCE)
@@ -272,10 +303,25 @@ export async function getCourseByCode(code, provinceCode) {
   return doc ? toPlain(doc) : null;
 }
 
-/** Resolve the SEO path /:province/:grade/:subject/:course (§29). */
+/**
+ * Resolve the SEO path /:province/:grade/:subject/:course (§29).
+ *
+ * Returns null for a province that is not live, which is what makes the
+ * landing page 404 rather than advertise tutoring the platform is telling
+ * everybody else is still "coming soon".
+ */
 export async function getCourseByPath({ province, grade, subject, course }) {
+  const codes = await activeProvinceCodes();
   const query = { isActive: true };
-  if (province) query.provinceCode = String(province).toUpperCase();
+  if (province) {
+    const code = String(province).toUpperCase();
+    if (!codes.includes(code)) return null;
+    query.provinceCode = code;
+  } else {
+    // No province in the path is not a path this application builds, but a
+    // caller that omits it still gets the public view rather than every one.
+    query.provinceCode = { $in: codes };
+  }
   if (grade) query.gradeSlug = grade;
   if (subject) query.subjectSlug = subject;
 

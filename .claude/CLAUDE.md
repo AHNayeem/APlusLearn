@@ -43,6 +43,14 @@ can hand a secret back (that is the feature working), so it cannot restore them.
 cannot recreate one over HTTP — it leaves the last one for the risk section and tells you
 to `bun run seed` when the pool runs down.
 
+**Restart the dev server after `bun run seed`.** Curriculum reference data is memoised per
+process (`refCache` in [src/services/curriculum.service.js](src/services/curriculum.service.js),
+dropped on every curriculum *write* but not on a wipe that happens underneath it), so a server
+left running across a reseed can hand a client province and grade ids that no longer exist.
+The next `qa` run then posts those ids back and the curriculum section fails with
+"Choose a valid province, grade and subject" — which is the service correctly refusing an id
+it cannot find, not a defect.
+
 Setup: `cp .env.example .env.local`, then set `MONGODB_URI` and `AUTH_SECRET`
 (≥32 chars, `openssl rand -base64 48`). Everything else has a dev fallback.
 Seeded accounts all use password `AplusLearn2024!` (see [README.md](README.md)).
@@ -105,6 +113,33 @@ ad-hoc JSON responses, and never let a raw driver error reach the client.
   (`ADMIN_AUDIT_VIEW`, held apart from `ADMIN_SETTINGS_MANAGE`) is the reader, filtered by action,
   actor, entity type, entity id and period. `redactAuditMetadata` removes credential-shaped keys and
   values *on the way out*, so a careless call site cannot turn the viewer into a credential reader.
+- **A shared file is authorised by the document it hangs off, never by its key.**
+  Attachments are sub-documents (`Message.attachments`, `ProgressReport.homeworkAttachments`)
+  built from one `AttachmentSchema`, so the record that says who may read a file is loaded in
+  the same query as the file. [src/services/attachment.service.js](src/services/attachment.service.js)
+  owns what a file may *be* — size, count, and a content type read from the bytes by
+  `inspectDocument()` rather than believed from `file.type` — and owns nothing about who may
+  see one. `storageKey` is `select: false` and never leaves the server: readers ask by
+  attachment id through a route that re-checks them (`readMessageAttachment`,
+  `readHomeworkAttachment`). Uploading happens before the row that will own the file exists, so
+  every failure path calls `discardAttachments()` — a refused upload leaves no orphan. Writes
+  are audited; reads are audited only for an administrator, the line
+  `CONVERSATION_REPORT_VIEWED` already draws. Deliberately absent: due dates, submissions,
+  grades. Sharing a worksheet is a file; an assignment that is handed in and marked is a domain
+  nobody has specified.
+- **A learner's analytics are scoped in the service, not in the screen.**
+  `studentAnalytics()` in [src/services/analytics.service.js](src/services/analytics.service.js)
+  resolves one of three views from stored records — owner (`StudentProfile.ownerId`), admin, or a
+  tutor with a *completed* booking for that learner — and carries the scope into every pipeline as
+  a `$match` fragment. A tutor's view has no spend, no other tutor's lessons or reports, and a
+  masked surname. `STUDENT_ANALYTICS_VIEW` opens the door; it does not name a learner. The money
+  rule from admin analytics holds here too: spend comes from `Payment` on `paidAt`, and package
+  purchases are excluded because a household package is not attributable to one child.
+- **`Province.isActive` means "coming soon" everywhere, not just in the picker.**
+  `activeProvinceCodes()` in [src/services/curriculum.service.js](src/services/curriculum.service.js)
+  gates the public reads (`listCourses` when `activeOnly`, `getCourseByPath`), so a course under a
+  deactivated province leaves `/courses` and its SEO landing page 404s — without touching the
+  course's own `isActive`. An administrator still sees everything through `activeOnly: false`.
 - **A stored link may not carry an executable scheme.** `optionalUrl` / `mediaUrl` in
   [src/lib/validation/common.js](src/lib/validation/common.js) decide this server-side; React
   refusing to render a `javascript:` href is a backstop, not the boundary. `internalPath()` in
@@ -189,8 +224,9 @@ Two integrations are shaped slightly differently and it matters:
 - **Meeting links** may have several adapters live at once, because §27 lets a learner pick a
   platform per booking. `MEETING_PROVIDER` takes a comma-separated list and
   `getMeetingProvider(provider)` takes the `MEETING_PROVIDERS` value stored on the booking.
-- **Storage** has two scopes (`documents`, `branding`) and never returns a URL — bytes are
-  fetched server-side and streamed through an authorised route.
+- **Storage** has four scopes (`documents`, `branding`, `avatars`, `attachments`) and never
+  returns a URL — bytes are fetched server-side and streamed through an authorised route. The
+  scope decides the folder, so a key lifted from one addresses nothing in another.
 
 Dev test cards: `4242 4242 4242 4242` succeeds, anything ending `0002` is declined.
 
@@ -216,6 +252,9 @@ its implementation and status — update it when behaviour changes.
 [APLUS_LEARN_PHASE2_IMPLEMENTATION_AUDIT.md](APLUS_LEARN_PHASE2_IMPLEMENTATION_AUDIT.md) audits all
 twelve §41 Phase 2 features, and is where the specification gaps and their
 configurable defaults are listed.
+[APLUS_LEARN_PHASE3_IMPLEMENTATION_AUDIT.md](APLUS_LEARN_PHASE3_IMPLEMENTATION_AUDIT.md) does the
+same for §41 Phase 3 — which is a list of fourteen feature names and no requirements, so it is
+mostly a record of which product decisions each deferred item is waiting on.
 [docs/PWA.md](docs/PWA.md) covers the service worker: its caching allowlist,
 what is deliberately never cached, offline behaviour and the update strategy.
 

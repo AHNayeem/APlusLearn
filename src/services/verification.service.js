@@ -11,7 +11,7 @@ import {
 } from "@/constants";
 import { NotFoundError, BusinessRuleError, AuthorizationError } from "@/lib/api/errors";
 import { toPlain } from "@/lib/utils/serialize";
-import { inspectDocument, safeFileName } from "@/lib/images/inspect";
+import { inspectDocument, safeFileName, documentExtensionFor } from "@/lib/images/inspect";
 import { getStorageProvider, getStorageProviderForRead, STORAGE_SCOPES } from "./external/storage-provider";
 import { notify } from "./notification.service";
 import { recordAudit } from "./audit.service";
@@ -117,7 +117,7 @@ export async function uploadVerificationDocument(
     buffer,
     fileName,
     contentType,
-    extension: extensionForDocument(contentType),
+    extension: documentExtensionFor(contentType),
     scope: STORAGE_SCOPES.DOCUMENTS,
   });
 
@@ -133,17 +133,6 @@ export async function uploadVerificationDocument(
   });
 
   return toPlain({ ...document.toObject(), storageKey: undefined });
-}
-
-const DOCUMENT_EXTENSIONS = {
-  "application/pdf": ".pdf",
-  "image/jpeg": ".jpg",
-  "image/png": ".png",
-  "image/webp": ".webp",
-};
-
-function extensionForDocument(contentType) {
-  return DOCUMENT_EXTENSIONS[contentType] ?? "";
 }
 
 /** Stream a document to an administrator. Never reachable by anyone else. */

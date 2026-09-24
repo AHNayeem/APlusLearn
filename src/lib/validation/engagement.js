@@ -26,6 +26,26 @@ export const sendMessageSchema = z.object({
   path: ["conversationId"],
 });
 
+/**
+ * The text fields of a multipart message upload (§41 Phase 3).
+ *
+ * A `FormData` value is always a string, so `body` may legitimately arrive
+ * empty — a worksheet sent with nothing typed is an ordinary message. The
+ * service is what refuses a message that has neither text nor a file; this
+ * schema's job is the same one `sendMessageSchema` does, which is to insist
+ * that we know who the message is for.
+ */
+export const messageAttachmentSchema = z.object({
+  conversationId: objectId.optional(),
+  tutorProfileId: objectId.optional(),
+  bookingId: objectId.optional(),
+  requestId: objectId.optional(),
+  body: z.string().trim().max(4000, "That message is too long.").optional().default(""),
+}).refine((d) => d.conversationId || d.tutorProfileId, {
+  message: "We need to know who this message is for.",
+  path: ["conversationId"],
+});
+
 export const reportConversationSchema = z.object({
   reason: z.string().trim().min(10, "Tell us what happened.").max(600),
 });

@@ -226,7 +226,8 @@ exercise upload, retrieval and replacement end to end on this machine.
 | Block | `/api/messages/conversations/[id]/actions` | Implemented |
 | Report | `/api/messages/conversations/[id]/actions` opens a case (`Conversation.reportStatus`) that reaches administrators | Implemented |
 | Reports reach a moderator | `/admin/moderation` queue and `/admin/moderation/[id]`, behind `ADMIN_MESSAGE_MODERATE`: reporter, participants, reason, timestamp, booking context, status and history. Opening a thread writes a `CONVERSATION_REPORT_VIEWED` audit entry; a decision writes `CONVERSATION_MODERATED` | Implemented |
-| Ready for attachments & realtime | `Message.attachments` schema present, unused in MVP | Phase 2 |
+| Attachments | `Message.attachments` now populated: multipart `POST /api/messages/attachments`, authorised streaming at `GET /api/messages/attachments/[id]`, type decided from the bytes, storage key `select: false` (§41 Phase 3) | Implemented |
+| Ready for realtime | Thread reads are paginated and stateless; nothing assumes a polling client | Phase 2 |
 
 ### Floating support launcher
 
@@ -285,7 +286,7 @@ themselves) and from `/offline`, which has no network behind it.
 | Reporting periods | `lib/analytics/range.js` — half-open windows, explicit `from`/`to` or a rolling `days`, time-zone aware bucketing that adapts day → week → month | Implemented |
 | Phase 2 feature analytics | `phaseTwoAnalytics()` — request match rate, matching conversion, package utilisation, group fill rate, referral conversion, promotions | Implemented |
 | Tutor's own analytics | `tutorAnalytics()` on `/tutor/earnings`; resolved from the session, with no owner parameter to tamper with | Implemented |
-| Student analytics | Named as Phase 3 in §41 — deliberately not built | Deferred |
+| Student analytics | `studentAnalytics()` on `/insights` (family) and `/tutor/students/[id]` (tutor). Aggregated in MongoDB from bookings, payments, progress reports and learning goals; three scopes resolved from the stored `StudentProfile.ownerId` and completed bookings (§41 Phase 3) | Implemented |
 
 ## 26. Cancellation / refund / no-show
 
@@ -566,12 +567,35 @@ specification gaps and the configurable default chosen for each — is
 | Advanced analytics | `analytics.service.js`, `lib/analytics/range.js` | Implemented |
 | Fraud / risk tools | `RiskCase`, `risk.service.js`, `/admin/risk` | Implemented |
 
-| Still deferred | Architectural hook | Status |
+### Phase 3
+
+§41 lists Phase 3 as fourteen feature names under the instruction *"Do not
+unnecessarily implement all future features now. However, architecture must
+allow…"*. That is the whole specification: there are no Phase 3 requirements,
+domain models, or business rules anywhere in `Project.md`. Three items were
+therefore implementable without inventing anything, and the rest are deferred
+with the specific product or provider decision each one is waiting on. The
+audit is
+[APLUS_LEARN_PHASE3_IMPLEMENTATION_AUDIT.md](../APLUS_LEARN_PHASE3_IMPLEMENTATION_AUDIT.md).
+
+| Phase 3 item | Status | Where it stands |
 |---|---|---|
-| Message attachments | `Message.attachments` schema | Phase 2 backlog |
-| Additional provinces | Province/Grade/Course collections + admin curriculum manager | Ready now |
-| Student analytics | `analytics.service.js` is role-scoped and extensible | Phase 3 |
-| Native apps | API-first design; every screen is backed by a JSON endpoint | Phase 3 |
+| Additional provinces | Implemented | `Province.isActive`, admin CRUD, province-scoped grades/courses, SEO routes. A course under a deactivated province now also leaves the public list and its landing page — `activeProvinceCodes()` in `curriculum.service.js` |
+| Homework / document sharing | Implemented (sharing) | `AttachmentSchema` on `Message.attachments` and `ProgressReport.homeworkAttachments`, `attachment.service.js`, `attachments` storage scope. A graded assignment domain is deferred — see below |
+| Student analytics | Implemented | `studentAnalytics()`, `/insights`, `/tutor/students/[id]`, `STUDENT_ANALYTICS_VIEW` |
+| iOS / Android | Not implemented | The REST API is app-consumable — envelope, pagination, validation and RBAC are uniform — but auth is cookie-only and there is no CORS configuration. Store badges correctly read "Coming soon" |
+| Native video classroom | Deferred | `MeetingProvider` with Zoom, Meet and Teams adapters is the extension point. "Native" names no technology; WebRTC/SFU infrastructure would be invention |
+| Interactive whiteboard | Not implemented | Nothing in the specification defines persistence, participants, permissions, collaboration model, export or retention |
+| AI recommendations / search / lesson summaries | Deferred | No AI abstraction, provider contract or data-handling rule exists. Sending learner data to a third party needs an explicit architecture decision |
+| Tutor subscriptions | Deferred | `PaymentProvider` has no recurring method, and `/become-a-tutor` currently tells tutors there is no subscription. Needs pricing, billing period, entitlement, dunning and cancellation rules |
+| Group courses | Deferred | `GroupSession` is one session at one time. A multi-session course is a different shape and needs its own enrolment, pricing and attendance rules |
+| Exam preparation marketplace | Deferred | No concrete domain in the specification. Reusing subjects, packages and promotions is possible once someone says what an "exam" is here |
+| University tutoring | Deferred | Curriculum is province-scoped K–12 (`Grade.stage` is `ELEMENTARY`/`MIDDLE`/`SECONDARY`). Needs a domain boundary decision before anything is modelled |
+
+| Still deferred from Phase 2 | Architectural hook | Status |
+|---|---|---|
+| Realtime messaging | Stateless paginated thread reads | Phase 2 backlog |
+| Push notifications | `NOTIFICATION_CHANNELS` carries the channel | Needs a mobile app |
 
 ## 42. Core business rules
 
@@ -681,7 +705,6 @@ deliberate deferral.
 | No hard delete for subjects, grades and provinces | Deactivation is the removal path, and it is a real one: a deactivated record leaves every public read. A hard delete would have to answer what happens to the courses and tutor profiles pointing at it, which is a data-migration question rather than a missing endpoint. Courses *do* support delete, and refuse while a tutor still teaches them |
 | `script-src` and `style-src` allow `'unsafe-inline'` | Next streams the RSC payload as inline `<script>`, and the operator's theme is an inline `<style>`. A per-request nonce would remove both, at the cost of opting every page — including the prerendered SEO pages — into dynamic rendering. The trade-off is written out in `next.config.mjs` |
 | HSTS carries no `includeSubDomains` or `preload` | Both are one-way doors that depend on facts this repository cannot know about the deployment's other subdomains. A deployment that has checked should add them |
-| Message attachments | Schema only — an explicit Phase 2 deferral, not an oversight |
 | Application and verification decisions are re-decidable | Deliberate, and the opposite of the dispute rule: re-approving a tutor who was rejected, or re-issuing a badge, is an ordinary administrative act and moves no money. A dispute decision is terminal because it has already issued an irreversible refund |
 | Monitoring and error reporting | `console.*` only. Wiring a monitoring service is a deployment choice rather than an application gap |
 
@@ -766,9 +789,7 @@ installed copy re-downloads its shell after a quiet week.
 
 1. **Push notifications.** The channel exists on the model and in
    `NOTIFICATION_CHANNELS`. In-app, email and SMS are delivered; push is not.
-2. **Message attachments.** `Message.attachments` is on the schema and unused.
-3. **Student-facing analytics.** Named as Phase 3 in §41.
-4. **Meeting credentials are not operator-editable.** Zoom, Google Meet and
+2. **Meeting credentials are not operator-editable.** Zoom, Google Meet and
    Microsoft Teams are configured from the environment only — they are the one
    integration missing from `INTEGRATION_MODULES`, so an operator cannot turn
    Zoom on from Admin → Integrations the way they can email, payments,

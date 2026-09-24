@@ -178,6 +178,28 @@ function zlibDeflate(buffer) {
   return zlib.deflateSync(buffer);
 }
 
+/**
+ * A structurally valid PDF.
+ *
+ * `inspectDocument` reads the first five bytes, so this is exactly as much
+ * PDF as the server looks at — and, as with `pngBytes`, it is a real
+ * signature rather than text with a label, which is the distinction the
+ * upload assertions exist to prove.
+ */
+function pdfBytes(padToBytes = 0) {
+  const head = Buffer.from("%PDF-1.7\n%\xE2\xE3\xCF\xD3\n", "binary");
+  return padToBytes > head.length
+    ? Buffer.concat([head, Buffer.alloc(padToBytes - head.length, 0x20)])
+    : head;
+}
+
+/** A multipart body carrying one or more files under the `file` field. */
+function formWith(...files) {
+  const form = new FormData();
+  for (const file of files) form.append("file", file);
+  return form;
+}
+
 async function main() {
   console.log(`\nAPlus Learn QA → ${BASE}\n${"─".repeat(56)}`);
 
@@ -1295,6 +1317,91 @@ async function main() {
       adminProgress.ok && Array.isArray(adminProgress.payload?.data?.reports));
     check("no private note reaches the admin list",
       !JSON.stringify(adminProgress.payload ?? {}).includes("must never reach the family"));
+
+    // --- homework files (§41 Phase 3) ---------------------------------------
+    const worksheet = () => new File([pdfBytes(1024)], "worksheet.pdf", { type: "application/pdf" });
+
+    const familyAttaches = await parent(
+      `/api/tutor/progress/${progressReportId}/attachments`,
+      { form: formWith(worksheet()) },
+    );
+    check("a family cannot attach homework to a report", familyAttaches.status === 403);
+
+    const anonAttaches = await anon(
+      `/api/tutor/progress/${progressReportId}/attachments`,
+      { form: formWith(worksheet()) },
+    );
+    check("nor can anybody signed out", anonAttaches.status === 401);
+
+    const renamedScript = new File([Buffer.from("#!/bin/sh\nrm -rf /\n")], "invoice.pdf", {
+      type: "application/pdf",
+    });
+    const refusedBytes = await tutor(
+      `/api/tutor/progress/${progressReportId}/attachments`,
+      { form: formWith(renamedScript) },
+    );
+    check("a script renamed .pdf is refused by the endpoint, on its bytes",
+      refusedBytes.status === 422 &&
+        refusedBytes.payload?.error?.code === "UNSUPPORTED_FILE_TYPE",
+      JSON.stringify(refusedBytes.payload?.error));
+
+    const noFile = await tutor(`/api/tutor/progress/${progressReportId}/attachments`, {
+      form: new FormData(),
+    });
+    check("an upload with no file is a per-field validation error",
+      noFile.status === 422 && Boolean(noFile.payload?.error?.details?.fieldErrors?.file));
+
+    const attached = await tutor(
+      `/api/tutor/progress/${progressReportId}/attachments`,
+      { form: formWith(worksheet()) },
+    );
+    check("the report's author can attach a worksheet",
+      attached.status === 201, JSON.stringify(attached.payload?.error));
+
+    const homework = attached.payload?.data?.attachments?.[0];
+    check("the response carries an id and a download route, and no storage key",
+      Boolean(homework?.id) &&
+        homework.href === `/api/progress/attachments/${homework.id}` &&
+        !JSON.stringify(attached.payload).includes("storageKey"));
+
+    const familyDownloads = await parent(homework.href, { raw: true });
+    check("the family can download it", familyDownloads.status === 200);
+    check("it is served as the type its bytes proved to be",
+      familyDownloads.headers.get("content-type") === "application/pdf");
+    check("as a download rather than something the tab renders",
+      /^attachment;/.test(familyDownloads.headers.get("content-disposition") ?? ""));
+    check("under a policy that lets it do nothing at all",
+      /sandbox/.test(familyDownloads.headers.get("content-security-policy") ?? "") &&
+        familyDownloads.headers.get("x-content-type-options") === "nosniff");
+    check("and never from a cache",
+      /no-store/.test(familyDownloads.headers.get("cache-control") ?? ""));
+
+    const anonDownloads = await anon(homework.href, { raw: true });
+    check("signed out, the same link gives nothing", anonDownloads.status === 401);
+
+    // The author, the family and an administrator are the audience; the
+    // cross-account refusals are asserted in the "Shared files" section
+    // below, where this suite already holds sessions for other accounts.
+    const adminDownloads = await admin(homework.href, { raw: true });
+    check("an administrator can read it, for support", adminDownloads.status === 200);
+
+    const guessedAttachment = await parent(
+      "/api/progress/attachments/000000000000000000000000",
+      { raw: true },
+    );
+    check("and a guessed attachment id resolves to nothing",
+      guessedAttachment.status === 404);
+
+    const removed = await tutor(
+      `/api/tutor/progress/${progressReportId}/attachments/${homework.id}`,
+      { method: "DELETE" },
+    );
+    check("the author can remove it again", removed.ok);
+    check("and the list comes back without it",
+      (removed.payload?.data?.attachments ?? []).every((a) => a.id !== homework.id));
+
+    const afterRemoval = await parent(homework.href, { raw: true });
+    check("after which the family's link stops resolving", afterRemoval.status === 404);
 
     // Leave the fixture archived rather than shared, so repeat runs are clean.
     await tutor(`/api/tutor/progress/${progressReportId}`, { method: "DELETE" });
@@ -5514,6 +5621,184 @@ async function main() {
   // this section creates are deactivated rather than removed — invisible
   // everywhere public, and cleared by the next `bun run seed`. Courses do
   // support delete, and this section deletes the one it makes.
+  // --- Shared files and learner insights (§21, §24, §41 Phase 3) -----------
+  section("Shared files — upload, download and cross-account refusal");
+
+  const sharedFile = () =>
+    new File([pdfBytes(900)], "qa shared file.pdf", { type: "application/pdf" });
+
+  const anonUpload = await anon("/api/messages/attachments", { form: formWith(sharedFile()) });
+  check("signed out, nobody can post a file into a thread", anonUpload.status === 401);
+
+  const noTarget = await parent("/api/messages/attachments", { form: formWith(sharedFile()) });
+  check("an upload that does not say who it is for is refused",
+    noTarget.status === 422 &&
+      Boolean(noTarget.payload?.error?.details?.fieldErrors?.conversationId),
+    JSON.stringify(noTarget.payload?.error));
+
+  const emptyUpload = await parent("/api/messages/attachments", {
+    form: (() => {
+      const f = new FormData();
+      f.set("conversationId", conversationId);
+      f.set("body", "No file attached.");
+      return f;
+    })(),
+  });
+  check("nor is one with a conversation but no file",
+    emptyUpload.status === 422 &&
+      Boolean(emptyUpload.payload?.error?.details?.fieldErrors?.file));
+
+  const spoofed = new File([Buffer.from("<?php system($_GET[0]); ?>")], "notes.pdf", {
+    type: "application/pdf",
+  });
+  const spoofRefused = await parent("/api/messages/attachments", {
+    form: (() => {
+      const f = new FormData();
+      f.set("conversationId", conversationId);
+      f.append("file", spoofed);
+      return f;
+    })(),
+  });
+  check("a file whose bytes disagree with its type never reaches the store",
+    spoofRefused.status === 422 &&
+      spoofRefused.payload?.error?.code === "UNSUPPORTED_FILE_TYPE",
+    JSON.stringify(spoofRefused.payload?.error));
+
+  const sentWithFile = await parent("/api/messages/attachments", {
+    form: (() => {
+      const f = new FormData();
+      f.set("conversationId", conversationId);
+      f.set("body", "QA run — here's the worksheet.");
+      f.append("file", sharedFile());
+      return f;
+    })(),
+  });
+  check("a learner can send a file in their own thread",
+    sentWithFile.status === 201, JSON.stringify(sentWithFile.payload?.error));
+
+  const sentAttachment = sentWithFile.payload?.data?.message?.attachments?.[0];
+  check("the message comes back carrying the attachment",
+    Boolean(sentAttachment?.id) && sentAttachment.fileName === "qa shared file.pdf");
+  check("with a download route and no storage key anywhere in the envelope",
+    sentAttachment?.href === `/api/messages/attachments/${sentAttachment?.id}` &&
+      !JSON.stringify(sentWithFile.payload).includes("storageKey"));
+
+  const threadRead = await parent(`/api/messages/conversations/${conversationId}`);
+  check("and reading the thread back carries it too",
+    JSON.stringify(threadRead.payload?.data?.messages ?? []).includes(sentAttachment.id));
+  check("still with no key in the thread payload",
+    !JSON.stringify(threadRead.payload).includes("storageKey"));
+
+  const senderDownloads = await parent(sentAttachment.href, { raw: true });
+  check("the sender can download what they sent", senderDownloads.status === 200);
+  check("served as the type the bytes proved to be",
+    senderDownloads.headers.get("content-type") === "application/pdf");
+  check("and never stored by a cache in between",
+    /no-store/.test(senderDownloads.headers.get("cache-control") ?? ""));
+
+  const anonFileRead = await anon(sentAttachment.href, { raw: true });
+  check("signed out, the link gives nothing", anonFileRead.status === 401);
+
+  const otherFamilyReads = await strangerParent(sentAttachment.href, { raw: true });
+  check("another family cannot read a file from a thread they are not in",
+    otherFamilyReads.status === 403, String(otherFamilyReads.status));
+
+  const otherTutorReads = await strangerTutor(sentAttachment.href, { raw: true });
+  check("nor can a tutor who is not in the thread",
+    otherTutorReads.status === 403, String(otherTutorReads.status));
+
+  const badAttachmentId = await parent("/api/messages/attachments/not-an-id", { raw: true });
+  check("a malformed attachment id is refused by the pipeline",
+    badAttachmentId.status === 422);
+
+  const unknownAttachment = await parent(
+    "/api/messages/attachments/000000000000000000000000",
+    { raw: true },
+  );
+  check("and an id that is not an attachment resolves to nothing",
+    unknownAttachment.status === 404);
+
+  // --- learner insights -----------------------------------------------------
+  section("Student analytics — scoping and authorization");
+
+  const anonInsights = await anon(`/api/students/${studentId}/analytics`);
+  check("analytics need an account", anonInsights.status === 401);
+
+  const ownInsights = await parent(`/api/students/${studentId}/analytics?days=90`);
+  check("a family can read their own learner's analytics",
+    ownInsights.ok, JSON.stringify(ownInsights.payload?.error));
+
+  const figures = ownInsights.payload?.data?.analytics;
+  check("the view is marked as the whole picture", figures?.scope === "FULL");
+  check("and it names the period it covers",
+    Boolean(figures?.period?.from && figures?.period?.to));
+  check("lessons completed never exceed lessons booked",
+    figures?.lessons?.completed <= figures?.lessons?.total,
+    `${figures?.lessons?.completed}/${figures?.lessons?.total}`);
+  check("the series adds up to the lessons counted",
+    (figures?.series ?? []).reduce((sum, p) => sum + p.lessons, 0) === figures?.lessons?.total);
+  check("a family is shown what they spent, from settled payments",
+    typeof figures?.spend?.netCents === "number" &&
+      figures.spend.excludesPackagePurchases === true);
+
+  const otherFamilyInsights = await strangerParent(`/api/students/${studentId}/analytics`);
+  check("another family cannot read them", otherFamilyInsights.status === 403);
+
+  const unrelatedTutorInsights = await strangerTutor(`/api/students/${studentId}/analytics`);
+  check("nor can a tutor who has never taught that learner",
+    unrelatedTutorInsights.status === 403, String(unrelatedTutorInsights.status));
+
+  /**
+   * The scoped view, against a learner this tutor has demonstrably taught.
+   *
+   * Taking the QA parent's first child would make this assertion depend on
+   * whether the seeded pool still happens to pair those two — and the no-show
+   * section consumes a COMPLETED lesson every run, so it drains. Reading the
+   * tutor's own roster instead means the scoped assertions run every time, or
+   * report themselves as unrunnable rather than quietly becoming a weaker
+   * check that always passes.
+   */
+  const insightsRoster = await tutor("/api/tutor/students");
+  const taughtLearner = (insightsRoster.payload?.data?.students ?? [])
+    .find((entry) => entry.completed > 0);
+
+  if (!taughtLearner) {
+    check("student analytics — tutor-scoped view", false,
+      "the seeded tutor has no completed lessons with anybody — run `bun run seed`");
+  } else {
+    const tutorInsights = await tutor(
+      `/api/students/${taughtLearner.id}/analytics?days=366`,
+    );
+    check("a tutor who has taught a learner gets the scoped view",
+      tutorInsights.ok && tutorInsights.payload.data.analytics.scope === "TUTOR",
+      JSON.stringify(tutorInsights.payload?.error));
+
+    const scoped = tutorInsights.payload?.data?.analytics ?? {};
+    check("and is never shown what the family paid", scoped.spend === null);
+    check("nor which other tutors the family uses", scoped.tutors?.count === 0);
+    check("and the payload carries no spend figure at all",
+      !JSON.stringify(scoped).includes("chargedCents") &&
+        !JSON.stringify(scoped).includes("netCents"));
+    check("the lessons it reports are the ones the roster says they taught",
+      scoped.lessons?.completed <= taughtLearner.completed,
+      `${scoped.lessons?.completed} vs ${taughtLearner.completed}`);
+  }
+
+  const adminInsights = await admin(`/api/students/${studentId}/analytics`);
+  check("an administrator can read them under the existing RBAC",
+    adminInsights.ok && adminInsights.payload.data.analytics.scope === "FULL");
+
+  const badLearner = await parent("/api/students/not-an-id/analytics");
+  check("a malformed learner id is refused by the pipeline", badLearner.status === 422);
+
+  const missingLearner = await parent("/api/students/000000000000000000000000/analytics");
+  check("and a learner that does not exist is a 404, not an empty report",
+    missingLearner.status === 404);
+
+  const badPeriod = await parent(`/api/students/${studentId}/analytics?days=9999`);
+  check("an out-of-range period is refused rather than clamped silently",
+    badPeriod.status === 422);
+
   section("Curriculum management");
 
   const qaTag = Date.now().toString(36).toUpperCase();
@@ -5546,6 +5831,25 @@ async function main() {
   const badProvinceTree = await anon("/api/curriculum/tree?province=ZZ");
   check("a province code that is not Canadian is refused, not guessed at",
     badProvinceTree.status === 422, `status ${badProvinceTree.status}`);
+
+  /**
+   * A province marked "coming soon" is coming soon everywhere (§13, §41).
+   *
+   * `isActive` used to stop at the picker: courses under an inactive province
+   * carried their own `isActive: true` and stayed in the public list, so the
+   * platform told one visitor the province was not live while showing another
+   * a page of its courses. The service-level proof is in the integration
+   * suite; this is the endpoint saying the same thing.
+   */
+  const liveProvinceCodes = new Set(
+    publicProvinces.payload.data.provinces.map((p) => p.code),
+  );
+  const publicCourseList = await anon("/api/curriculum/courses?pageSize=50");
+  check("the public course list carries courses from live provinces only",
+    publicCourseList.ok &&
+      (publicCourseList.payload.data.courses ?? publicCourseList.payload.data.items ?? [])
+        .every((c) => liveProvinceCodes.has(c.provinceCode)),
+    JSON.stringify(Object.keys(publicCourseList.payload?.data ?? {})));
 
   // --- the write side is closed --------------------------------------------
   const anonSubject = await anon("/api/admin/curriculum/subjects", {

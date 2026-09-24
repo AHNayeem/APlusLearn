@@ -13,6 +13,7 @@ import {
   GOAL_PROGRESS, GOAL_PROGRESS_LABELS,
 } from "@/constants";
 import { formatDate } from "@/lib/utils/format";
+import { AttachmentList } from "@/components/attachments/Attachments";
 
 /**
  * A family reading a progress report (§41 Phase 2).
@@ -106,14 +107,19 @@ export function ProgressReportView({ report, canAcknowledge }) {
             </div>
           )}
 
-          {report.homework && (
+          {(report.homework || report.homeworkAttachments?.length > 0) && (
             <div className="border-t border-ink-100 pt-5">
               <h3 className="text-xs font-bold uppercase tracking-wide text-ink-400">
                 Practice before the next lesson
               </h3>
-              <p className="mt-2 whitespace-pre-line text-sm leading-relaxed text-ink-600">
-                {report.homework}
-              </p>
+              {report.homework && (
+                <p className="mt-2 whitespace-pre-line text-sm leading-relaxed text-ink-600">
+                  {report.homework}
+                </p>
+              )}
+              {/* The worksheet itself. Each link goes to a route that checks
+                  this reader against the report before it sends a byte. */}
+              <AttachmentList attachments={report.homeworkAttachments} />
             </div>
           )}
         </CardBody>

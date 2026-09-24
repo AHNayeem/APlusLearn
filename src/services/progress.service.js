@@ -24,8 +24,18 @@ import {
 import { toPlain } from "@/lib/utils/serialize";
 import { publicReference } from "@/lib/auth/tokens";
 import { publicName, learnerDisplayName } from "@/lib/utils/format";
+import { toPublicAttachment } from "@/models/Attachment";
 import { notify } from "./notification.service";
 import { recordAudit } from "./audit.service";
+import {
+  ATTACHMENT_LIMITS,
+  storeAttachments,
+  discardAttachments,
+  readAttachmentBytes,
+} from "./attachment.service";
+
+/** Where a browser asks for a homework attachment's bytes. */
+const PROGRESS_ATTACHMENT_HREF = "/api/progress/attachments";
 
 /**
  * Student progress reports (§41 Phase 2).
@@ -356,6 +366,9 @@ export async function getProgressReport(id, actor) {
 
   const shaped = isAuthor ? maskLearnerForTutor(toPlain(report)) : withTutorSummary(toPlain(report));
   if (!isAuthor) delete shaped.privateNote;
+  // Replaced rather than serialised: the public shape carries the id and the
+  // route that checks the reader, and never the key.
+  shaped.homeworkAttachments = publicHomeworkAttachments(report).attachments;
 
   return { report: shaped, canEdit: isAuthor, canAcknowledge: isOwner };
 }
@@ -467,6 +480,209 @@ export async function reportableStudents(actor) {
   };
 }
 
+// --- Homework files (§41 Phase 3) -------------------------------------------
+
+/**
+ * Attach the worksheet to the homework the tutor already wrote.
+ *
+ * `homework` has always been the instruction; this is the thing being handed
+ * over. Only the report's author may add one, checked against the loaded
+ * record — and the capacity check is part of the same conditional update
+ * rather than a read followed by a write, so a tutor double-clicking cannot
+ * push a report past its cap.
+ *
+ * Adding to an already-submitted report is deliberately allowed and
+ * deliberately does *not* snapshot a revision: a new file is additive, the
+ * way a milestone is, and nothing the family was previously shown changes.
+ * Removing one is the case that rewrites history, and that is handled below.
+ */
+export async function addHomeworkAttachments(id, files, actor) {
+  const existing = await ProgressReport.findById(id)
+    .select("tutorUserId status ownerId homeworkAttachments courseCode courseName")
+    .lean();
+  if (!existing) throw new NotFoundError("That report no longer exists.");
+  assertAuthor(existing, actor);
+
+  const already = existing.homeworkAttachments?.length ?? 0;
+  const room = ATTACHMENT_LIMITS.maxPerReport - already;
+  if (room <= 0) {
+    throw new BusinessRuleError(
+      `A report can carry at most ${ATTACHMENT_LIMITS.maxPerReport} files.`,
+      "TOO_MANY_ATTACHMENTS",
+    );
+  }
+
+  const attachments = await storeAttachments(files, actor, {
+    max: room,
+    label: "homework",
+  });
+  if (!attachments.length) throw new BusinessRuleError("Choose a file to attach.");
+
+  // The guard and the write are one operation: the update applies only while
+  // the array is still short enough to hold what is being added.
+  const capacityKey = `homeworkAttachments.${ATTACHMENT_LIMITS.maxPerReport - attachments.length}`;
+  const report = await ProgressReport.findOneAndUpdate(
+    { _id: id, tutorUserId: actor.id, [capacityKey]: { $exists: false } },
+    { $push: { homeworkAttachments: { $each: attachments } } },
+    { returnDocument: "after" },
+  ).lean();
+
+  if (!report) {
+    await discardAttachments(attachments);
+    throw new ConflictError(
+      `A report can carry at most ${ATTACHMENT_LIMITS.maxPerReport} files.`,
+    );
+  }
+
+  await recordAudit({
+    actor,
+    action: AUDIT_ACTIONS.PROGRESS_ATTACHMENT_ADDED,
+    entityType: "ProgressReport",
+    entityId: report._id,
+    metadata: {
+      count: attachments.length,
+      files: attachments.map((a) => ({
+        fileName: a.fileName,
+        contentType: a.contentType,
+        sizeBytes: a.sizeBytes,
+      })),
+    },
+  });
+
+  // A family watching for "anything new?" should hear about a worksheet that
+  // arrived after the report was shared.
+  if (report.status !== PROGRESS_REPORT_STATUS.DRAFT) {
+    await notify({
+      userId: report.ownerId,
+      type: NOTIFICATION_TYPES.PROGRESS_REPORT_UPDATED,
+      title: "New homework from your tutor",
+      body: `${attachments.length} file${attachments.length === 1 ? "" : "s"} added to your ${report.courseCode ?? report.courseName ?? ""} report.`.trim(),
+      href: `/progress/${report._id}`,
+      entityType: "ProgressReport",
+      entityId: report._id,
+    });
+  }
+
+  return publicHomeworkAttachments(report);
+}
+
+/**
+ * Take a worksheet back off a report.
+ *
+ * Allowed after submission, because the case that matters is a tutor who
+ * attached the wrong learner's work and needs it gone now — refusing that in
+ * the name of an immutable history would turn a mistake into a standing
+ * privacy breach. What preserves the history instead is the same mechanism
+ * every other post-submission edit uses: the report as it read is snapshotted
+ * into `revisions` first, so the record still says the file was there.
+ *
+ * The bytes go last and only once the document no longer points at them.
+ */
+export async function removeHomeworkAttachment(id, attachmentId, actor) {
+  const report = await ProgressReport.findById(id).select("+homeworkAttachments.storageKey");
+  if (!report) throw new NotFoundError("That report no longer exists.");
+  assertAuthor(report, actor);
+
+  const attachment = report.homeworkAttachments.id(attachmentId);
+  if (!attachment) throw new NotFoundError("That file is no longer attached.");
+
+  if (report.status !== PROGRESS_REPORT_STATUS.DRAFT) {
+    report.revisions.push({
+      at: new Date(),
+      byId: actor.id,
+      reason: `Removed attachment: ${attachment.fileName}`,
+      snapshot: snapshotOf(report),
+    });
+  }
+
+  const removed = { storageKey: attachment.storageKey, fileName: attachment.fileName };
+  report.homeworkAttachments.pull(attachmentId);
+  await report.save();
+
+  await recordAudit({
+    actor,
+    action: AUDIT_ACTIONS.PROGRESS_ATTACHMENT_REMOVED,
+    entityType: "ProgressReport",
+    entityId: report._id,
+    metadata: { attachmentId: String(attachmentId), fileName: removed.fileName },
+  });
+
+  await discardAttachments([removed]);
+
+  return publicHomeworkAttachments(report.toObject());
+}
+
+/**
+ * Read one homework file, for somebody entitled to it.
+ *
+ * The audience is the report's, not the file's: the tutor who wrote it, the
+ * family it was written for, and an administrator. It is resolved from the
+ * stored report — `ownerId` was set at creation from the learner, never from
+ * a request — so there is no parameter through which one family could reach
+ * another's worksheet.
+ *
+ * A draft's files are the tutor's own, exactly as a draft's text is.
+ */
+export async function readHomeworkAttachment(attachmentId, actor) {
+  // Only the deselected path is named: Mongo refuses a projection that asks
+  // for both `homeworkAttachments` and `homeworkAttachments.storageKey`, and
+  // `+path` on its own returns the whole document with that path added —
+  // which still leaves `privateNote` behind, because it was not asked for.
+  const report = await ProgressReport.findOne({ "homeworkAttachments._id": attachmentId })
+    .select("+homeworkAttachments.storageKey")
+    .lean();
+  if (!report) throw new NotFoundError("That file is no longer available.");
+
+  const isAuthor = String(report.tutorUserId) === String(actor.id);
+  const isOwner = String(report.ownerId) === String(actor.id);
+  const isAdmin = actor.role === ROLES.ADMIN;
+
+  if (!isAuthor && !isOwner && !isAdmin) {
+    throw new AuthorizationError("You do not have access to this file.");
+  }
+  if (report.status === PROGRESS_REPORT_STATUS.DRAFT && !isAuthor) {
+    throw new NotFoundError("That file is no longer available.");
+  }
+
+  const attachment = (report.homeworkAttachments ?? []).find(
+    (candidate) => String(candidate._id) === String(attachmentId),
+  );
+  if (!attachment) throw new NotFoundError("That file is no longer available.");
+
+  if (isAdmin && !isAuthor && !isOwner) {
+    await recordAudit({
+      actor,
+      action: AUDIT_ACTIONS.ATTACHMENT_ADMIN_VIEWED,
+      entityType: "ProgressReport",
+      entityId: report._id,
+      metadata: {
+        attachmentId: String(attachment._id),
+        fileName: attachment.fileName,
+        contentType: attachment.contentType,
+      },
+    });
+  }
+
+  const { buffer, contentType, fileName } = await readAttachmentBytes(attachment);
+  return { buffer, contentType, fileName, sizeBytes: attachment.sizeBytes };
+}
+
+/**
+ * The attachments of one report, in the shape a browser may hold.
+ *
+ * Every read path runs through this rather than serialising the array, for
+ * the reason written on `AttachmentSchema`: a hydrated report loaded with
+ * `+homeworkAttachments.storageKey` carries the keys, and `toPlain()` would
+ * publish them.
+ */
+export function publicHomeworkAttachments(report) {
+  return {
+    attachments: (report?.homeworkAttachments ?? []).map((attachment) =>
+      toPublicAttachment(attachment, PROGRESS_ATTACHMENT_HREF),
+    ),
+  };
+}
+
 // --- Internals -------------------------------------------------------------
 
 function assertAuthor(report, actor) {
@@ -531,6 +747,14 @@ function snapshotOf(report) {
     strengths: report.strengths,
     focusAreas: report.focusAreas,
     homework: report.homework,
+    // Names only. A revision records *that* a worksheet was shared and what
+    // it was called; the key that addresses the bytes belongs nowhere near a
+    // `Mixed` field that the audit viewer will later render (§35).
+    homeworkAttachments: (report.homeworkAttachments ?? []).map((a) => ({
+      fileName: a.fileName,
+      contentType: a.contentType,
+      sizeBytes: a.sizeBytes,
+    })),
     ratings: report.ratings ? { ...report.ratings.toObject?.() ?? report.ratings } : undefined,
     goals: (report.goals ?? []).map((g) => ({ label: g.label, status: g.status, note: g.note })),
     milestones: (report.milestones ?? []).map((m) => ({ label: m.label, achievedAt: m.achievedAt })),

@@ -165,6 +165,20 @@ export default async function TutorStudentsPage() {
                 <p className="mt-3 text-xs text-ink-400">
                   Last lesson {formatRelative(entry.lastLessonAt)}
                 </p>
+
+                {/* Only a learner this tutor has actually completed a lesson
+                    with has anything to show, and the page refuses the rest. */}
+                {entry.completed > 0 && (
+                  <Button
+                    href={`/tutor/students/${entry.id}`}
+                    variant="secondary"
+                    size="sm"
+                    fullWidth
+                    className="mt-3"
+                  >
+                    View progress
+                  </Button>
+                )}
               </CardBody>
             </Card>
           ))}

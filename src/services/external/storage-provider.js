@@ -28,6 +28,12 @@ import { ObjectStoreClient, storageError } from "./object-storage";
  *               a route that resolves the key back to the account currently
  *               holding it, so only a key that *is* somebody's avatar right
  *               now can be read, and a document key can never be one (§8).
+ *   attachments — files members shared with each other: a worksheet on a
+ *               progress report, a photo of a problem set in a message
+ *               thread. Private, and private to a *pair* rather than to one
+ *               person: the document the attachment hangs off names who may
+ *               read it, and the streaming route asks that document before it
+ *               reads a byte (§21, §41 Phase 3).
  *
  * The separation is what makes that last sentence true: the scope decides the
  * folder, so a key lifted from one scope addresses nothing in another.
@@ -64,6 +70,7 @@ export const STORAGE_SCOPES = {
   DOCUMENTS: "documents",
   BRANDING: "branding",
   AVATARS: "avatars",
+  ATTACHMENTS: "attachments",
 };
 
 /**
@@ -78,6 +85,7 @@ export const STORAGE_SCOPES = {
 const SCOPE_FOLDERS = {
   [STORAGE_SCOPES.BRANDING]: "branding",
   [STORAGE_SCOPES.AVATARS]: "avatars",
+  [STORAGE_SCOPES.ATTACHMENTS]: "attachments",
   [STORAGE_SCOPES.DOCUMENTS]: "documents",
 };
 

@@ -117,6 +117,7 @@ export const PARENT_NAV = [
   { href: "/messages", label: "Messages", icon: "MessageSquare", badge: "unreadMessages", feature: FEATURES.MESSAGING },
   { href: "/tutors", label: "My tutors", icon: "Users" },
   { href: "/progress", label: "Progress", icon: "FileText" },
+  { href: "/insights", label: "Insights", icon: "LineChart" },
   { href: "/packages", label: "My packages", icon: "Package" },
   { href: "/my-groups", label: "Group sessions", icon: "Users" },
   { href: "/favourites", label: "Saved tutors", icon: "Heart", feature: FEATURES.FAVOURITES },

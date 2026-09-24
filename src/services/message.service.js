@@ -13,8 +13,18 @@ import { requireVerifiedEmail } from "@/lib/auth/assert";
 import { toPlain } from "@/lib/utils/serialize";
 import { publicName, truncate } from "@/lib/utils/format";
 import { sanitizeMultiline } from "@/lib/security/sanitize";
+import { toPublicAttachment } from "@/models/Attachment";
 import { notify } from "./notification.service";
 import { recordAudit } from "./audit.service";
+import {
+  ATTACHMENT_LIMITS,
+  storeAttachments,
+  discardAttachments,
+  readAttachmentBytes,
+} from "./attachment.service";
+
+/** Where a browser asks for a message attachment's bytes. */
+const MESSAGE_ATTACHMENT_HREF = "/api/messages/attachments";
 
 /**
  * Messaging (§21).
@@ -56,13 +66,33 @@ export async function getOrCreateConversation({ learnerUserId, tutorProfileId, b
   return conversation;
 }
 
+/**
+ * Send a message, with or without files attached (§21, §41 Phase 3).
+ *
+ * `input.files` is a list of web `File`s from a multipart request; JSON
+ * callers simply do not send it, and every rule below holds either way. This
+ * is deliberately the *only* function that creates a message: the attachment
+ * route uploads and then calls this, rather than writing a second creation
+ * path that would have to remember blocking, unread counts, response-time
+ * tracking and the recipient's notification.
+ *
+ * Files are stored before the message row exists, so everything that could
+ * refuse the message — a blocked thread, a conversation the sender is not in
+ * — is checked *first*, and anything that still goes wrong afterwards takes
+ * the stored objects back out. The one thing this cannot do is make the
+ * upload and the insert a single transaction; what it can do is guarantee
+ * that a failure leaves no orphan and no half-message, and that is what the
+ * `discardAttachments` on the failure path is for.
+ */
 export async function sendMessage(input, actor) {
   // Messaging reaches another member — and often a minor's guardian — so the
   // sender's address must be a confirmed one (§9, §35).
   requireVerifiedEmail(actor, "Confirm your email address before messaging a tutor.");
 
+  const files = input.files ?? [];
   const body = sanitizeMultiline(input.body, { maxLength: 4000 });
-  if (!body) throw new BusinessRuleError("Write a message first.");
+  // A message is text, or a file, or both — but not nothing.
+  if (!body && !files.length) throw new BusinessRuleError("Write a message first.");
 
   let conversation;
 
@@ -91,17 +121,35 @@ export async function sendMessage(input, actor) {
     );
   }
 
-  const message = await Message.create({
-    conversationId: conversation._id,
-    senderId: actor.id,
-    body,
-    readBy: [actor.id],
+  // Nothing is uploaded until the thread has accepted the message: a sender
+  // who is blocked, or who is not a participant, never reaches the store.
+  const attachments = await storeAttachments(files, actor, {
+    max: ATTACHMENT_LIMITS.maxPerMessage,
+    label: "attachment",
   });
+
+  let message;
+  try {
+    message = await Message.create({
+      conversationId: conversation._id,
+      senderId: actor.id,
+      body,
+      attachments,
+      readBy: [actor.id],
+    });
+  } catch (error) {
+    await discardAttachments(attachments);
+    throw error;
+  }
 
   const recipientId = String(conversation.participantIds.find((id) => String(id) !== String(actor.id)));
 
   conversation.lastMessageAt = message.createdAt;
-  conversation.lastMessagePreview = truncate(body, 140);
+  // A file with no note still has to read as something in the thread list.
+  conversation.lastMessagePreview = truncate(
+    body || attachmentPreview(attachments),
+    140,
+  );
   conversation.lastMessageSenderId = actor.id;
   conversation.unreadCounts.set(recipientId, (conversation.unreadCounts.get(recipientId) ?? 0) + 1);
   conversation.unreadCounts.set(String(actor.id), 0);
@@ -113,12 +161,33 @@ export async function sendMessage(input, actor) {
 
   await updateTutorResponseTime(conversation, actor, message);
 
+  // Recorded because a file one member sent another is evidence in any later
+  // safeguarding complaint, and "who put this here" has to outlive the
+  // message. Names and types only — never the key, never the bytes (§35).
+  if (attachments.length) {
+    await recordAudit({
+      actor,
+      action: AUDIT_ACTIONS.MESSAGE_ATTACHMENT_ADDED,
+      entityType: "Message",
+      entityId: message._id,
+      metadata: {
+        conversationId: String(conversation._id),
+        count: attachments.length,
+        files: attachments.map((a) => ({
+          fileName: a.fileName,
+          contentType: a.contentType,
+          sizeBytes: a.sizeBytes,
+        })),
+      },
+    });
+  }
+
   const sender = await User.findById(actor.id).select("firstName lastName").lean();
   await notify({
     userId: recipientId,
     type: NOTIFICATION_TYPES.MESSAGE_RECEIVED,
     title: `New message from ${publicName(sender?.firstName ?? "", sender?.lastName ?? "")}`,
-    body: truncate(body, 120),
+    body: truncate(body || attachmentPreview(attachments), 120),
     href:
       String(recipientId) === String(conversation.tutorUserId)
         ? `/tutor/messages/${conversation._id}`
@@ -127,7 +196,38 @@ export async function sendMessage(input, actor) {
     entityId: conversation._id,
   });
 
-  return { message: toPlain(message), conversationId: String(conversation._id) };
+  return {
+    message: publicMessage(toPlain(message)),
+    conversationId: String(conversation._id),
+  };
+}
+
+/** How a message with no text reads in a thread list or a notification. */
+function attachmentPreview(attachments = []) {
+  if (!attachments.length) return "";
+  return attachments.length === 1
+    ? `Sent a file: ${attachments[0].fileName}`
+    : `Sent ${attachments.length} files`;
+}
+
+/**
+ * A message on its way to a browser.
+ *
+ * `storageKey` and `checksum` are `select: false`, so a lean read never has
+ * them — but a message created in this process is a hydrated document that
+ * *does*, and `toPlain()` would serialise it straight into the response. This
+ * function is what stands between those two facts: every attachment is
+ * rebuilt as the public shape, so the only way to the bytes is the id and the
+ * route that checks who is asking.
+ */
+export function publicMessage(message) {
+  if (!message) return message;
+  return {
+    ...message,
+    attachments: (message.attachments ?? []).map((attachment) =>
+      toPublicAttachment(attachment, MESSAGE_ATTACHMENT_HREF),
+    ),
+  };
 }
 
 /**
@@ -254,7 +354,7 @@ export async function getConversation(id, actor, { page = 1, pageSize } = {}) {
       isBlocked: (conversation.blockedBy ?? []).some((bid) => String(bid) === me),
     },
     // Oldest-first for rendering; the query paginates from newest.
-    messages: toPlain(messages).reverse(),
+    messages: toPlain(messages).map(publicMessage).reverse(),
     total,
     page,
     pageSize: size,
@@ -438,9 +538,64 @@ export async function getReportedConversation(id, admin, { limit = 100 } = {}) {
 
   return {
     conversation: toPlain(conversation),
-    messages: toPlain(messages),
+    // A moderator judging a reported thread has to be able to see what was
+    // shared in it, not only what was typed.
+    messages: toPlain(messages).map(publicMessage),
     bookings: toPlain(bookings),
   };
+}
+
+/**
+ * Read one message attachment, for somebody entitled to it (§21, §35).
+ *
+ * The id names an attachment; the *message* holding it is what decides who
+ * may read it, and that decision is made against the conversation as stored —
+ * `assertParticipant` is the same check every other read in this file makes,
+ * so a file cannot be reachable by anyone a message is not.
+ *
+ * The lookup is `attachments._id`, which means a guessed or stolen id
+ * resolves to nothing unless it really is an attachment in a thread this
+ * person belongs to. There is no path here that takes a storage key.
+ */
+export async function readMessageAttachment(attachmentId, actor) {
+  // `+path` alone, with nothing else named: Mongo refuses a projection that
+  // asks for both `attachments` and `attachments.storageKey`, and naming only
+  // the deselected path returns the whole document with that path added.
+  const message = await Message.findOne({ "attachments._id": attachmentId, deletedAt: null })
+    .select("+attachments.storageKey")
+    .lean();
+  if (!message) throw new NotFoundError("That file is no longer available.");
+
+  const conversation = await Conversation.findById(message.conversationId)
+    .select("participantIds")
+    .lean();
+  if (!conversation) throw new NotFoundError("That file is no longer available.");
+  assertParticipant(conversation, actor);
+
+  const attachment = (message.attachments ?? []).find(
+    (candidate) => String(candidate._id) === String(attachmentId),
+  );
+  if (!attachment) throw new NotFoundError("That file is no longer available.");
+
+  // A participant opening a file in their own thread is the feature working.
+  // An administrator opening one is an act worth being able to review later —
+  // the same line `CONVERSATION_REPORT_VIEWED` draws (§35).
+  if (actor.role === ROLES.ADMIN) {
+    await recordAudit({
+      actor,
+      action: AUDIT_ACTIONS.ATTACHMENT_ADMIN_VIEWED,
+      entityType: "Message",
+      entityId: message._id,
+      metadata: {
+        attachmentId: String(attachment._id),
+        fileName: attachment.fileName,
+        contentType: attachment.contentType,
+      },
+    });
+  }
+
+  const { buffer, contentType, fileName } = await readAttachmentBytes(attachment);
+  return { buffer, contentType, fileName, sizeBytes: attachment.sizeBytes };
 }
 
 /**

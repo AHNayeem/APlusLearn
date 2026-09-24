@@ -178,6 +178,8 @@ async function runSections() {
   await publicSurfaceTests();
   await bookingSlotLockTests();
   await rateLimitTests();
+  await attachmentTests();
+  await studentAnalyticsTests();
 }
 
 /**
@@ -9807,6 +9809,13 @@ async function curriculumTests() {
     check("and leaves the curriculum tree",
       !(await curriculum.getCurriculumTree(province.code)).grades.some((g) => g.id === grade.id));
 
+    // `codeless` is still active in its own right, which is the point: the
+    // province coming down must take its courses out of the public view even
+    // though nothing wrote to them.
+    check("before deactivation, an active course under it is publicly listed",
+      (await curriculum.listCourses({ province: province.code }))
+        .items.some((c) => c.id === codeless.id));
+
     await curriculum.updateProvince(province.id, { isActive: false }, admin);
     check("a deactivated province leaves the picker",
       !(await curriculum.listProvinces()).some((p) => p.id === province.id));
@@ -9815,9 +9824,43 @@ async function curriculumTests() {
     check("and it is still resolvable by code, so existing links do not 500",
       (await curriculum.getProvince(province.code))?.id === province.id);
 
+    /**
+     * A province marked "coming soon" is coming soon everywhere.
+     *
+     * Deactivating one used to stop at the picker: its courses each carried
+     * their own `isActive: true`, so they stayed in `/courses` and their SEO
+     * landing pages kept rendering — the platform telling one visitor the
+     * province was not live yet while showing another a page of tutors for it.
+     */
+    check("a course under a deactivated province leaves the public course list",
+      !(await curriculum.listCourses({ province: province.code }))
+        .items.some((c) => c.id === codeless.id));
+    check("and cannot be reached by asking for no province in particular",
+      !(await curriculum.listCourses({})).items.some((c) => c.id === codeless.id));
+    check("and its public landing page no longer resolves",
+      (await curriculum.getCourseByPath({
+        province: province.code,
+        grade: grade.slug,
+        subject: subject.slug,
+        course: codeless.slug,
+      })) === null);
+    check("but the administrator building that curriculum still sees it",
+      (await curriculum.listCourses({ province: province.code, activeOnly: false }))
+        .items.some((c) => c.id === codeless.id));
+
     await curriculum.updateProvince(province.id, { isActive: true }, admin);
     check("reactivating a province puts it back in the picker",
       (await curriculum.listProvinces()).some((p) => p.id === province.id));
+    check("and puts its courses back in the public list, untouched",
+      (await curriculum.listCourses({ province: province.code }))
+        .items.some((c) => c.id === codeless.id));
+    check("and makes their landing pages resolve again",
+      (await curriculum.getCourseByPath({
+        province: province.code,
+        grade: grade.slug,
+        subject: subject.slug,
+        course: codeless.slug,
+      }))?.id === codeless.id);
 
     // --- deleting a course --------------------------------------------------
     const tutorUsingIt = await TutorProfile.findOne({ isSearchable: true }).lean();
@@ -10581,6 +10624,867 @@ async function rateLimitTests() {
   } finally {
     if (storeBefore === undefined) delete process.env.RATE_LIMIT_STORE;
     else process.env.RATE_LIMIT_STORE = storeBefore;
+  }
+}
+
+
+// --- 33. Shared files (§21, §41 Phase 3) ------------------------------------
+
+/**
+ * A structurally valid PDF header.
+ *
+ * `inspectDocument` reads the first five bytes and nothing else, so this is
+ * exactly as much PDF as the code under test looks at — and, crucially, it is
+ * a real signature rather than a text blob with a label, which is the whole
+ * distinction these tests exist to prove.
+ */
+function fakePdf(padToBytes = 0) {
+  const head = Buffer.from("%PDF-1.7\n%\xE2\xE3\xCF\xD3\n", "binary");
+  return padToBytes > head.length
+    ? Buffer.concat([head, Buffer.alloc(padToBytes - head.length, 0x20)])
+    : head;
+}
+
+/**
+ * Homework and document sharing, through the services that own it.
+ *
+ * The HTTP suite proves the endpoints refuse what they should. This proves
+ * the four things only a direct call can reach:
+ *
+ *   that a file's *bytes* decide its type, so a script renamed `.pdf` never
+ *   reaches the store at all;
+ *
+ *   that the bytes land in the `attachments` scope and nowhere near the
+ *   folder holding tutors' identity documents;
+ *
+ *   that a refused upload leaves nothing behind — the compensating delete on
+ *   the failure path is the only thing standing between a validation error
+ *   and an orphaned object nobody will ever look for;
+ *
+ *   and that the storage key never appears in anything a service returns,
+ *   which is the property that makes the whole "ask by id, not by key" design
+ *   worth having.
+ */
+async function attachmentTests() {
+  section("Shared files — validation, scope, authorization and cleanup");
+
+  const uri = process.env.MONGODB_URI;
+  if (!uri) return skip("attachments", "MONGODB_URI is not set");
+
+  if (mongoose.connection.readyState !== 1) {
+    try {
+      await mongoose.connect(uri, { serverSelectionTimeoutMS: 2500 });
+    } catch {
+      return skip("attachments", "MongoDB is not reachable");
+    }
+  }
+
+  const {
+    User, Conversation, Message, ProgressReport, StudentProfile, TutorProfile,
+    Booking, Notification, AuditLog,
+  } = await import("@/models");
+  const messages = await import("@/services/message.service");
+  const progress = await import("@/services/progress.service");
+  const attachments = await import("@/services/attachment.service");
+  const {
+    STORAGE_SCOPES, resetStorageProvider, localStorageRoot,
+  } = await import("@/services/external/storage-provider");
+  const { ROLES, USER_STATUS, PROGRESS_REPORT_STATUS, BOOKING_STATUS, UPLOAD } =
+    await import("@/constants");
+
+  const tutorProfile = await TutorProfile.findOne({ isSearchable: true }).lean();
+  const seededStudent = await StudentProfile.findOne({ archivedAt: null }).lean();
+  if (!tutorProfile || !seededStudent) {
+    return skip("attachments", "no seeded tutor/student — run `bun run seed`");
+  }
+
+  // Local mode, in a directory of this test's own, so the scope assertions
+  // are about real files on a real filesystem rather than about a stub.
+  const root = await mkdtemp(path.join(tmpdir(), "aplus-attachments-"));
+  const storageEnv = {
+    APP_ENV: "development",
+    STORAGE_PROVIDER: undefined,
+    STORAGE_LOCAL_DIR: root,
+    STORAGE_ENDPOINT: undefined,
+    STORAGE_BUCKET: undefined,
+    STORAGE_ACCESS_KEY: undefined,
+    STORAGE_SECRET_KEY: undefined,
+    STORAGE_REQUIRE_EXTERNAL: undefined,
+  };
+  const savedEnv = Object.fromEntries(Object.keys(storageEnv).map((k) => [k, process.env[k]]));
+  Object.assign(process.env, storageEnv);
+  for (const [k, v] of Object.entries(storageEnv)) if (v === undefined) delete process.env[k];
+  resetStorageProvider();
+
+  /** A `File`-shaped upload, the way a route hands one to the service. */
+  const asFile = (buffer, type = "application/pdf", name = "worksheet.pdf") => ({
+    size: buffer.length,
+    type,
+    name,
+    arrayBuffer: async () => buffer,
+  });
+
+  const countStored = async (scope) =>
+    (await readdir(path.join(root, scope)).catch(() => [])).length;
+
+  const madeUsers = [];
+  const madeConversations = [];
+  const madeBookings = [];
+  const madeReports = [];
+  let student = null;
+
+  try {
+    const learner = await User.create({
+      email: `attach-${randomUUID()}@example.invalid`,
+      firstName: "Attach",
+      lastName: "Testcase",
+      role: ROLES.PARENT,
+      status: USER_STATUS.ACTIVE,
+      emailVerifiedAt: new Date(),
+    });
+    madeUsers.push(learner._id);
+
+    const learnerActor = {
+      id: String(learner._id),
+      role: ROLES.PARENT,
+      emailVerifiedAt: learner.emailVerifiedAt,
+    };
+    const tutorActor = {
+      id: String(tutorProfile.userId),
+      role: ROLES.TUTOR,
+      emailVerifiedAt: new Date(),
+    };
+    const stranger = {
+      id: String(new mongoose.Types.ObjectId()),
+      role: ROLES.PARENT,
+      emailVerifiedAt: new Date(),
+    };
+    const admin = { id: String(new mongoose.Types.ObjectId()), role: ROLES.ADMIN };
+
+    // --- what a file has to be --------------------------------------------
+    const before = await countStored(STORAGE_SCOPES.ATTACHMENTS);
+
+    const renamed = await throws(
+      () =>
+        attachments.storeAttachment(
+          asFile(Buffer.from("#!/bin/sh\nrm -rf /\n"), "application/pdf", "invoice.pdf"),
+          learnerActor,
+        ),
+      (e) => e.code === "UNSUPPORTED_FILE_TYPE",
+    );
+    check("a script renamed .pdf is refused on its bytes, not its name",
+      renamed.threw && renamed.matched, renamed.error?.message);
+
+    const mislabelled = await throws(
+      () => attachments.storeAttachment(asFile(fakePdf(), "image/png", "x.png"), learnerActor),
+      (e) => e.code === "UNSUPPORTED_FILE_TYPE",
+    );
+    check("a real PDF declared as a PNG is refused for disagreeing with itself",
+      mislabelled.threw && mislabelled.matched);
+
+    const wrongType = await throws(
+      () =>
+        attachments.storeAttachment(
+          asFile(Buffer.from("PK\u0003\u0004zip"), "application/zip", "a.zip"),
+          learnerActor,
+        ),
+      (e) => e.code === "UNSUPPORTED_FILE_TYPE",
+    );
+    check("a type outside the accepted list is refused before the bytes are read",
+      wrongType.threw && wrongType.matched);
+
+    const empty = await throws(
+      () => attachments.storeAttachment(asFile(Buffer.alloc(0), "application/pdf"), learnerActor),
+      (e) => e.code === "UNSUPPORTED_FILE_TYPE",
+    );
+    check("an empty file is refused", empty.threw && empty.matched);
+
+    const huge = {
+      size: UPLOAD.maxAttachmentBytes + 1,
+      type: "application/pdf",
+      name: "scan.pdf",
+      arrayBuffer: async () => fakePdf(),
+    };
+    const oversized = await throws(
+      () => attachments.storeAttachment(huge, learnerActor),
+      (e) => e.code === "FILE_TOO_LARGE",
+    );
+    check("a file over the limit is refused on its declared size, before it is read",
+      oversized.threw && oversized.matched);
+
+    // A body bigger than the limit that *announced* itself as small: the
+    // declared length is a claim too, and the real one is checked after read.
+    const liar = {
+      size: 10,
+      type: "application/pdf",
+      name: "liar.pdf",
+      arrayBuffer: async () => fakePdf(UPLOAD.maxAttachmentBytes + 1024),
+    };
+    const lied = await throws(
+      () => attachments.storeAttachment(liar, learnerActor),
+      (e) => e.code === "FILE_TOO_LARGE",
+    );
+    check("and a body that lied about its length is refused once the real size is known",
+      lied.threw && lied.matched);
+
+    check("not one refused upload put anything in the store",
+      (await countStored(STORAGE_SCOPES.ATTACHMENTS)) === before,
+      `${await countStored(STORAGE_SCOPES.ATTACHMENTS)} vs ${before}`);
+
+    // --- all of them, or none of them --------------------------------------
+    const partial = await throws(
+      () =>
+        attachments.storeAttachments(
+          [
+            asFile(fakePdf(), "application/pdf", "good.pdf"),
+            asFile(Buffer.from("not a pdf at all"), "application/pdf", "bad.pdf"),
+          ],
+          learnerActor,
+          { max: 4 },
+        ),
+      (e) => e.code === "UNSUPPORTED_FILE_TYPE",
+    );
+    check("a batch with one bad file is refused as a batch",
+      partial.threw && partial.matched);
+    check("and the good file that was already written is taken back out",
+      (await countStored(STORAGE_SCOPES.ATTACHMENTS)) === before,
+      `${await countStored(STORAGE_SCOPES.ATTACHMENTS)} vs ${before}`);
+
+    const tooMany = await throws(
+      () =>
+        attachments.storeAttachments(
+          Array.from({ length: UPLOAD.maxAttachmentsPerMessage + 1 }, () => asFile(fakePdf())),
+          learnerActor,
+          { max: UPLOAD.maxAttachmentsPerMessage },
+        ),
+      (e) => e.code === "TOO_MANY_ATTACHMENTS",
+    );
+    check("more files than the cap allows is refused before anything is stored",
+      tooMany.threw && tooMany.matched &&
+        (await countStored(STORAGE_SCOPES.ATTACHMENTS)) === before);
+
+    // --- a message carrying a file -----------------------------------------
+    const sent = await messages.sendMessage(
+      {
+        tutorProfileId: String(tutorProfile._id),
+        body: "Here's the worksheet.",
+        files: [asFile(fakePdf(2048), "application/pdf", "week 3 homework.pdf")],
+      },
+      learnerActor,
+    );
+    madeConversations.push(new mongoose.Types.ObjectId(sent.conversationId));
+
+    const attachment = sent.message.attachments?.[0];
+    check("a message can carry a file", sent.message.attachments?.length === 1);
+    check("the stored type is the one the bytes proved, not the one claimed",
+      attachment?.contentType === "application/pdf");
+    check("the uploader's filename survives as a label",
+      attachment?.fileName === "week 3 homework.pdf");
+
+    const serialised = JSON.stringify(sent);
+    check("nothing a service returns carries the storage key",
+      !("storageKey" in attachment) && !serialised.includes("storageKey"));
+    check("nor the checksum",
+      !("checksum" in attachment) && !serialised.includes("checksum"));
+    check("what it carries instead is an id and the route that checks the reader",
+      typeof attachment?.id === "string" &&
+        attachment.href === `/api/messages/attachments/${attachment.id}`);
+
+    check("the bytes are in the attachments scope",
+      (await countStored(STORAGE_SCOPES.ATTACHMENTS)) === before + 1);
+    check("and nowhere near the folder holding identity documents",
+      (await countStored(STORAGE_SCOPES.DOCUMENTS)) === 0);
+
+    const raw = await Message.findById(sent.message.id)
+      .select("+attachments.storageKey")
+      .lean();
+    check("the key is stored, but only behind an explicit select",
+      typeof raw?.attachments?.[0]?.storageKey === "string" &&
+        raw.attachments[0].storageKey.endsWith(".pdf"));
+
+    const leanMessage = await Message.findById(sent.message.id).lean();
+    check("an ordinary read of a message does not carry the key",
+      leanMessage.attachments[0].storageKey === undefined);
+
+    // --- a file on its own is a message -------------------------------------
+    const fileOnly = await messages.sendMessage(
+      {
+        conversationId: sent.conversationId,
+        body: "",
+        files: [asFile(fakePng(64, 64, 512), "image/png", "question.png")],
+      },
+      learnerActor,
+    );
+    check("a message may be a file with nothing typed",
+      fileOnly.message.attachments?.length === 1 && !fileOnly.message.body);
+
+    const thread = await Conversation.findById(sent.conversationId).lean();
+    check("and the thread list names the file instead of showing an empty preview",
+      thread.lastMessagePreview?.includes("question.png"),
+      thread.lastMessagePreview);
+
+    const nothing = await throws(
+      () => messages.sendMessage({ conversationId: sent.conversationId, body: "" }, learnerActor),
+      (e) => e.status === 422 || e.status === 400,
+    );
+    check("but a message with neither text nor a file is still nothing",
+      nothing.threw && nothing.matched);
+
+    // --- who may read one ---------------------------------------------------
+    const byRecipient = await messages.readMessageAttachment(attachment.id, tutorActor);
+    check("the other participant can read it",
+      Buffer.isBuffer(byRecipient.buffer) && byRecipient.buffer.length === 2048);
+    check("and it comes back as what it was stored as",
+      byRecipient.contentType === "application/pdf");
+
+    const bySender = await messages.readMessageAttachment(attachment.id, learnerActor);
+    check("so can the person who sent it", bySender.buffer.length === 2048);
+
+    const byStranger = await throws(
+      () => messages.readMessageAttachment(attachment.id, stranger),
+      (e) => e.status === 403,
+    );
+    check("somebody who is not in the thread cannot",
+      byStranger.threw && byStranger.matched);
+
+    const guessed = await throws(
+      () => messages.readMessageAttachment(new mongoose.Types.ObjectId(), learnerActor),
+      (e) => e.status === 404,
+    );
+    check("and an id that is not an attachment resolves to nothing",
+      guessed.threw && guessed.matched);
+
+    const byAdmin = await messages.readMessageAttachment(attachment.id, admin);
+    check("an administrator can, for moderation", byAdmin.buffer.length === 2048);
+
+    const adminRead = await AuditLog.findOne({
+      action: "ATTACHMENT_ADMIN_VIEWED",
+      entityType: "Message",
+      actorId: new mongoose.Types.ObjectId(admin.id),
+    }).lean();
+    check("and an administrator opening somebody's file is recorded", Boolean(adminRead));
+    check("the record names the file without carrying the key",
+      adminRead?.metadata?.fileName === "week 3 homework.pdf" &&
+        !JSON.stringify(adminRead.metadata).includes("storageKey"));
+
+    const writeTrail = await AuditLog.findOne({
+      action: "MESSAGE_ATTACHMENT_ADDED",
+      actorId: new mongoose.Types.ObjectId(learnerActor.id),
+    }).lean();
+    check("sending a file is audited", Boolean(writeTrail));
+    check("and that record carries names and sizes, never bytes or keys",
+      writeTrail?.metadata?.files?.[0]?.fileName === "week 3 homework.pdf" &&
+        !JSON.stringify(writeTrail.metadata).includes("storageKey"));
+
+    // --- homework on a progress report --------------------------------------
+    student = await StudentProfile.create({
+      ownerId: learner._id,
+      firstName: "Homework",
+      lastName: "Testcase",
+      isMinor: true,
+      shareFullNameWithTutor: false,
+    });
+
+    const startAt = new Date("2030-03-04T18:00:00.000Z");
+    const lesson = await Booking.create({
+      reference: `APL-H${randomUUID().replace(/-/g, "").slice(0, 8).toUpperCase()}`,
+      purchaserId: learner._id,
+      studentProfileId: student._id,
+      tutorProfileId: tutorProfile._id,
+      tutorUserId: tutorProfile.userId,
+      courseId: tutorProfile.courseIds?.[0] ?? new mongoose.Types.ObjectId(),
+      courseName: "Advanced Functions",
+      courseCode: "MHF4U",
+      mode: "ONLINE",
+      startAt,
+      endAt: new Date(startAt.getTime() + 3600_000),
+      durationMinutes: 60,
+      status: BOOKING_STATUS.COMPLETED,
+      completedAt: new Date(),
+      price: {
+        hourlyRateCents: 6000, durationMinutes: 60, subtotalCents: 6000,
+        commissionPercent: 15, commissionCents: 900, tutorEarningsCents: 5100, totalCents: 6000,
+      },
+    });
+    madeBookings.push(lesson._id);
+
+    const report = await progress.createProgressReport(
+      { studentProfileId: String(student._id) },
+      tutorActor,
+    );
+    madeReports.push(report.id);
+
+    const notAuthor = await throws(
+      () => progress.addHomeworkAttachments(report.id, [asFile(fakePdf())], learnerActor),
+      (e) => e.status === 403,
+    );
+    check("a family cannot attach homework to their own report",
+      notAuthor.threw && notAuthor.matched);
+
+    const added = await progress.addHomeworkAttachments(
+      report.id,
+      [asFile(fakePdf(1024), "application/pdf", "practice set.pdf")],
+      tutorActor,
+    );
+    check("the tutor who wrote the report can", added.attachments.length === 1);
+    check("and it is addressed through the progress route, not the message one",
+      added.attachments[0].href === `/api/progress/attachments/${added.attachments[0].id}`);
+    check("with no key in sight", !JSON.stringify(added).includes("storageKey"));
+
+    const homeworkId = added.attachments[0].id;
+
+    const draftToFamily = await throws(
+      () => progress.readHomeworkAttachment(homeworkId, learnerActor),
+      (e) => e.status === 404,
+    );
+    check("a draft's files stay with their author, exactly as a draft's text does",
+      draftToFamily.threw && draftToFamily.matched);
+
+    await progress.updateProgressReport(
+      report.id,
+      { summary: "A test summary long enough to submit with." },
+      tutorActor,
+    );
+    await progress.submitProgressReport(report.id, tutorActor);
+
+    const familyReads = await progress.readHomeworkAttachment(homeworkId, learnerActor);
+    check("once shared, the family can download the worksheet",
+      familyReads.buffer.length === 1024);
+
+    const strangerReads = await throws(
+      () => progress.readHomeworkAttachment(homeworkId, stranger),
+      (e) => e.status === 403,
+    );
+    check("another family cannot", strangerReads.threw && strangerReads.matched);
+
+    const shown = await progress.getProgressReport(report.id, learnerActor);
+    check("and the report the family reads carries the file",
+      shown.report.homeworkAttachments?.length === 1);
+    check("still with no key on it",
+      !JSON.stringify(shown.report.homeworkAttachments).includes("storageKey"));
+
+    // --- the cap, applied where two clicks cannot race past it --------------
+    const room = UPLOAD.maxAttachmentsPerReport - 1;
+    await progress.addHomeworkAttachments(
+      report.id,
+      Array.from({ length: room }, (_, i) => asFile(fakePdf(600), "application/pdf", `extra-${i}.pdf`)),
+      tutorActor,
+    );
+    const overCap = await throws(
+      () => progress.addHomeworkAttachments(report.id, [asFile(fakePdf())], tutorActor),
+      (e) => e.code === "TOO_MANY_ATTACHMENTS" || e.status === 409,
+    );
+    check("a report cannot be pushed past its file cap",
+      overCap.threw && overCap.matched, overCap.error?.message);
+
+    const atCap = await ProgressReport.findById(report.id).lean();
+    check("and it is holding exactly the cap, not one more",
+      atCap.homeworkAttachments.length === UPLOAD.maxAttachmentsPerReport);
+
+    // --- removing one from a report the family has already read -------------
+    const storedBeforeRemoval = await countStored(STORAGE_SCOPES.ATTACHMENTS);
+    const revisionsBefore = atCap.revisions.length;
+
+    const afterRemoval = await progress.removeHomeworkAttachment(report.id, homeworkId, tutorActor);
+    check("the author can take a worksheet back off",
+      afterRemoval.attachments.length === UPLOAD.maxAttachmentsPerReport - 1);
+
+    const reloaded = await ProgressReport.findById(report.id).lean();
+    check("removing from a shared report snapshots a revision first",
+      reloaded.revisions.length === revisionsBefore + 1);
+    check("and the revision records the file was there",
+      reloaded.revisions.at(-1).snapshot?.homeworkAttachments?.some(
+        (a) => a.fileName === "practice set.pdf",
+      ));
+    check("without putting a storage key into the audit-visible snapshot",
+      !JSON.stringify(reloaded.revisions.at(-1).snapshot).includes("storageKey"));
+
+    check("the bytes are deleted, not merely unlinked from the document",
+      (await countStored(STORAGE_SCOPES.ATTACHMENTS)) === storedBeforeRemoval - 1,
+      `${await countStored(STORAGE_SCOPES.ATTACHMENTS)} vs ${storedBeforeRemoval - 1}`);
+
+    const goneForGood = await throws(
+      () => progress.readHomeworkAttachment(homeworkId, learnerActor),
+      (e) => e.status === 404,
+    );
+    check("and the family's old link stops resolving",
+      goneForGood.threw && goneForGood.matched);
+
+    const removalTrail = await AuditLog.findOne({
+      action: "PROGRESS_ATTACHMENT_REMOVED",
+      entityId: new mongoose.Types.ObjectId(report.id),
+    }).lean();
+    check("removal is audited", Boolean(removalTrail));
+
+    const addTrail = await AuditLog.findOne({
+      action: "PROGRESS_ATTACHMENT_ADDED",
+      entityId: new mongoose.Types.ObjectId(report.id),
+    }).lean();
+    check("so is attaching", Boolean(addTrail));
+  } finally {
+    const reportIds = madeReports.map((id) => new mongoose.Types.ObjectId(id));
+    await AuditLog.deleteMany({
+      $or: [
+        { entityId: { $in: reportIds } },
+        { action: { $in: ["MESSAGE_ATTACHMENT_ADDED", "ATTACHMENT_ADMIN_VIEWED"] } },
+      ],
+    });
+    await Notification.deleteMany({ entityId: { $in: reportIds } });
+    await ProgressReport.deleteMany({ _id: { $in: reportIds } });
+    await Booking.deleteMany({ _id: { $in: madeBookings } });
+    if (student) await StudentProfile.deleteOne({ _id: student._id });
+    await Message.deleteMany({ conversationId: { $in: madeConversations } });
+    await Conversation.deleteMany({ _id: { $in: madeConversations } });
+    await User.deleteMany({ _id: { $in: madeUsers } });
+
+    for (const [k, v] of Object.entries(savedEnv)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    resetStorageProvider();
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+
+// --- 34. One learner's analytics (§24, §41 Phase 3) -------------------------
+
+/**
+ * Student analytics, and the two things that make them safe to ship.
+ *
+ * The first is arithmetic. Every figure is aggregated in MongoDB from records
+ * that exist for another reason, so the test builds a learner's history with
+ * known contents — four lessons, one of them missed, one of them another
+ * tutor's — and asserts the numbers that come back are the ones a person
+ * would count by hand. A metric that is merely *plausible* is the failure
+ * mode this whole feature has to avoid.
+ *
+ * The second is scope. Three readers see three different things, and the
+ * differences are privacy rules rather than presentation: a tutor must not
+ * learn what a family paid, must not see lessons taught by anybody else, and
+ * must not be handed a minor's surname the family never shared.
+ */
+async function studentAnalyticsTests() {
+  section("Student analytics — aggregation, scoping and privacy");
+
+  const uri = process.env.MONGODB_URI;
+  if (!uri) return skip("student analytics", "MONGODB_URI is not set");
+
+  if (mongoose.connection.readyState !== 1) {
+    try {
+      await mongoose.connect(uri, { serverSelectionTimeoutMS: 2500 });
+    } catch {
+      return skip("student analytics", "MongoDB is not reachable");
+    }
+  }
+
+  const {
+    User, StudentProfile, TutorProfile, Booking, Payment, ProgressReport, Notification, AuditLog,
+  } = await import("@/models");
+  const analytics = await import("@/services/analytics.service");
+  const {
+    ROLES, USER_STATUS, BOOKING_STATUS, PAYMENT_STATUS, PROGRESS_REPORT_STATUS,
+  } = await import("@/constants");
+
+  const tutorProfile = await TutorProfile.findOne({ isSearchable: true }).lean();
+  const otherTutorProfile = await TutorProfile.findOne({
+    isSearchable: true,
+    _id: { $ne: tutorProfile?._id },
+  }).lean();
+  if (!tutorProfile || !otherTutorProfile) {
+    return skip("student analytics", "needs two seeded tutors — run `bun run seed`");
+  }
+
+  const madeUsers = [];
+  const madeBookings = [];
+  const madePayments = [];
+  const madeReports = [];
+  let student = null;
+
+  /** Lessons are dated relative to now so the rolling window always holds them. */
+  const daysAgo = (n) => new Date(Date.now() - n * 24 * 60 * 60 * 1000);
+
+  try {
+    const owner = await User.create({
+      email: `insights-${randomUUID()}@example.invalid`,
+      firstName: "Insight",
+      lastName: "Testcase",
+      role: ROLES.PARENT,
+      status: USER_STATUS.ACTIVE,
+      emailVerifiedAt: new Date(),
+    });
+    madeUsers.push(owner._id);
+
+    student = await StudentProfile.create({
+      ownerId: owner._id,
+      firstName: "Rowan",
+      lastName: "Quintero",
+      gradeName: "Grade 11",
+      isMinor: true,
+      shareFullNameWithTutor: false,
+      learningGoals: [
+        { label: "Insights test goal — achieved", achievedAt: daysAgo(5) },
+        { label: "Insights test goal — open" },
+      ],
+    });
+
+    const ownerActor = { id: String(owner._id), role: ROLES.PARENT };
+    const tutorActor = { id: String(tutorProfile.userId), role: ROLES.TUTOR, emailVerifiedAt: new Date() };
+    const otherTutorActor = { id: String(otherTutorProfile.userId), role: ROLES.TUTOR };
+    const stranger = { id: String(new mongoose.Types.ObjectId()), role: ROLES.PARENT };
+    const admin = { id: String(new mongoose.Types.ObjectId()), role: ROLES.ADMIN };
+
+    const makeLesson = async ({ profile, status, at, minutes = 60 }) => {
+      const booking = await Booking.create({
+        reference: `APL-I${randomUUID().replace(/-/g, "").slice(0, 8).toUpperCase()}`,
+        purchaserId: owner._id,
+        studentProfileId: student._id,
+        tutorProfileId: profile._id,
+        tutorUserId: profile.userId,
+        courseId: profile.courseIds?.[0] ?? new mongoose.Types.ObjectId(),
+        courseName: "Advanced Functions",
+        courseCode: "MHF4U",
+        mode: "ONLINE",
+        startAt: at,
+        endAt: new Date(at.getTime() + minutes * 60_000),
+        durationMinutes: minutes,
+        status,
+        completedAt: status === BOOKING_STATUS.COMPLETED ? at : undefined,
+        price: {
+          hourlyRateCents: 6000, durationMinutes: minutes, subtotalCents: 6000,
+          commissionPercent: 15, commissionCents: 900, tutorEarningsCents: 5100, totalCents: 6000,
+        },
+      });
+      madeBookings.push(booking._id);
+      return booking;
+    };
+
+    // Three completed lessons with our tutor (one of them 90 minutes), one
+    // missed, and one completed lesson with a different tutor entirely.
+    const paid = await makeLesson({ profile: tutorProfile, status: BOOKING_STATUS.COMPLETED, at: daysAgo(20) });
+    await makeLesson({ profile: tutorProfile, status: BOOKING_STATUS.COMPLETED, at: daysAgo(13) });
+    await makeLesson({ profile: tutorProfile, status: BOOKING_STATUS.COMPLETED, at: daysAgo(6), minutes: 90 });
+    await makeLesson({ profile: tutorProfile, status: BOOKING_STATUS.NO_SHOW_STUDENT, at: daysAgo(9) });
+    await makeLesson({ profile: otherTutorProfile, status: BOOKING_STATUS.COMPLETED, at: daysAgo(4) });
+
+    // An abandoned checkout, which must not count as a lesson or as money.
+    await makeLesson({
+      profile: tutorProfile,
+      status: BOOKING_STATUS.PENDING_PAYMENT,
+      at: daysAgo(2),
+    });
+
+    const payment = await Payment.create({
+      bookingId: paid._id,
+      purchaserId: owner._id,
+      tutorUserId: tutorProfile.userId,
+      subtotalCents: 6000,
+      commissionPercent: 15,
+      commissionCents: 900,
+      tutorEarningsCents: 5100,
+      totalCents: 6000,
+      status: PAYMENT_STATUS.PARTIALLY_REFUNDED,
+      refundedCents: 1500,
+      paidAt: daysAgo(20),
+    });
+    madePayments.push(payment._id);
+
+    const report = await ProgressReport.create({
+      reference: `APL-R${randomUUID().replace(/-/g, "").slice(0, 8).toUpperCase()}`,
+      tutorUserId: tutorProfile.userId,
+      tutorProfileId: tutorProfile._id,
+      studentProfileId: student._id,
+      ownerId: owner._id,
+      status: PROGRESS_REPORT_STATUS.SUBMITTED,
+      submittedAt: daysAgo(3),
+      summary: "An analytics fixture.",
+      // Two of the four scales are rated. The other two must come back null.
+      ratings: { understanding: 4, effort: 5 },
+      milestones: [{ label: "Insights milestone", achievedAt: daysAgo(3) }],
+    });
+    madeReports.push(report._id);
+
+    // --- what the family sees ------------------------------------------------
+    const mine = await analytics.studentAnalytics(String(student._id), ownerActor, { days: 90 });
+
+    check("completed lessons are counted from bookings that completed",
+      mine.lessons.completed === 4, String(mine.lessons.completed));
+    check("an abandoned checkout is not counted as a lesson",
+      mine.lessons.total === 5, String(mine.lessons.total));
+    check("a missed lesson is counted as missed",
+      mine.lessons.missed === 1, String(mine.lessons.missed));
+    check("attendance is completed over completed-plus-missed, not over everything",
+      mine.lessons.attendanceRate === 80, String(mine.lessons.attendanceRate));
+    check("hours are summed from the real durations",
+      mine.lessons.hoursLearned === 5, String(mine.lessons.hoursLearned));
+
+    check("the family sees every tutor who taught them",
+      mine.tutors.count === 2, String(mine.tutors.count));
+
+    check("the series buckets add up to the lessons counted",
+      mine.series.reduce((sum, p) => sum + p.lessons, 0) === mine.lessons.total);
+    check("and the course breakdown adds up to the completed ones",
+      mine.courses.reduce((sum, c) => sum + c.lessons, 0) === mine.lessons.completed);
+
+    check("goals come from the learner's own record",
+      mine.goals.total === 2 && mine.goals.achieved === 1 && mine.goals.open === 1,
+      JSON.stringify(mine.goals));
+    check("milestones are counted from shared reports",
+      mine.goals.milestones === 1, String(mine.goals.milestones));
+
+    check("ratings are averaged from reports the family was actually shown",
+      mine.feedback.understanding === 4 && mine.feedback.effort === 5,
+      JSON.stringify(mine.feedback));
+    check("a scale nobody rated comes back null, not zero",
+      mine.feedback.participation === null && mine.feedback.homework === null,
+      JSON.stringify(mine.feedback));
+    check("the number of reports is the number shared in the window",
+      mine.feedback.reports === 1);
+
+    // Money: from Payment on paidAt, net of refunds, never from booking prices.
+    check("spend comes from the payment, not from summing booking prices",
+      mine.spend?.chargedCents === 6000, JSON.stringify(mine.spend));
+    check("and refunds are subtracted",
+      mine.spend?.netCents === 4500, String(mine.spend?.netCents));
+    check("the figure says out loud that it excludes package purchases",
+      mine.spend?.excludesPackagePurchases === true);
+    check("the family sees their learner's full name",
+      mine.learner.displayName === "Rowan Quintero", mine.learner.displayName);
+    check("and the view is marked as the whole picture", mine.scope === "FULL");
+
+    // --- what a tutor sees ---------------------------------------------------
+    const theirs = await analytics.studentAnalytics(String(student._id), tutorActor, { days: 90 });
+
+    check("a tutor sees only the lessons they taught",
+      theirs.lessons.completed === 3, String(theirs.lessons.completed));
+    // 60 + 60 + 90 minutes of their own teaching = 3.5 hours, reported to the
+    // nearest hour. The learner's total across both tutors is five.
+    check("and their own hours, not the learner's total",
+      theirs.lessons.hoursLearned === 4 && mine.lessons.hoursLearned === 5,
+      String(theirs.lessons.hoursLearned));
+    check("a tutor is never shown what the family paid", theirs.spend === null);
+    check("nor which other tutors the family uses", theirs.tutors.count === 0);
+    check("the view is marked as scoped, so the screen can say so",
+      theirs.scope === "TUTOR");
+    check("a minor's surname is still masked from their tutor",
+      theirs.learner.displayName === "Rowan Q.", theirs.learner.displayName);
+
+    // Another tutor's report must not move this tutor's averages.
+    const otherReport = await ProgressReport.create({
+      reference: `APL-R${randomUUID().replace(/-/g, "").slice(0, 8).toUpperCase()}`,
+      tutorUserId: otherTutorProfile.userId,
+      tutorProfileId: otherTutorProfile._id,
+      studentProfileId: student._id,
+      ownerId: owner._id,
+      status: PROGRESS_REPORT_STATUS.SUBMITTED,
+      submittedAt: daysAgo(2),
+      summary: "Another tutor's assessment.",
+      ratings: { understanding: 1, effort: 1 },
+    });
+    madeReports.push(otherReport._id);
+
+    const afterOther = await analytics.studentAnalytics(String(student._id), tutorActor, { days: 90 });
+    check("another tutor's assessment does not move this tutor's averages",
+      afterOther.feedback.understanding === 4 && afterOther.feedback.reports === 1,
+      JSON.stringify(afterOther.feedback));
+
+    const familyAfterOther = await analytics.studentAnalytics(
+      String(student._id), ownerActor, { days: 90 },
+    );
+    check("but the family's average is across both of them",
+      familyAfterOther.feedback.reports === 2 &&
+        familyAfterOther.feedback.understanding === 2.5,
+      JSON.stringify(familyAfterOther.feedback));
+
+    // --- who is refused --------------------------------------------------------
+    const byStranger = await throws(
+      () => analytics.studentAnalytics(String(student._id), stranger, { days: 90 }),
+      (e) => e.status === 403,
+    );
+    check("another family cannot read a learner's analytics",
+      byStranger.threw && byStranger.matched);
+
+    const byUntaughtTutor = await throws(
+      () =>
+        analytics.studentAnalytics(
+          String(student._id),
+          { id: String(new mongoose.Types.ObjectId()), role: ROLES.TUTOR },
+          { days: 90 },
+        ),
+      (e) => e.status === 403,
+    );
+    check("nor can a tutor who has never taught them",
+      byUntaughtTutor.threw && byUntaughtTutor.matched);
+
+    // A future booking is not teaching: the tutor has to have finished one.
+    const futureOnlyTutor = { id: String(otherTutorProfile.userId), role: ROLES.TUTOR };
+    const futureLearner = await StudentProfile.create({
+      ownerId: owner._id,
+      firstName: "Future",
+      lastName: "Only",
+      isMinor: false,
+    });
+    const futureBooking = await Booking.create({
+      reference: `APL-F${randomUUID().replace(/-/g, "").slice(0, 8).toUpperCase()}`,
+      purchaserId: owner._id,
+      studentProfileId: futureLearner._id,
+      tutorProfileId: otherTutorProfile._id,
+      tutorUserId: otherTutorProfile.userId,
+      courseId: otherTutorProfile.courseIds?.[0] ?? new mongoose.Types.ObjectId(),
+      courseName: "Functions",
+      mode: "ONLINE",
+      startAt: new Date(Date.now() + 86_400_000),
+      endAt: new Date(Date.now() + 90_000_000),
+      durationMinutes: 60,
+      status: BOOKING_STATUS.CONFIRMED,
+      price: {
+        hourlyRateCents: 6000, durationMinutes: 60, subtotalCents: 6000,
+        commissionPercent: 15, commissionCents: 900, tutorEarningsCents: 5100, totalCents: 6000,
+      },
+    });
+    madeBookings.push(futureBooking._id);
+
+    const beforeFirstLesson = await throws(
+      () => analytics.studentAnalytics(String(futureLearner._id), futureOnlyTutor, { days: 90 }),
+      (e) => e.status === 403,
+    );
+    check("a booking that has not happened yet is not teaching",
+      beforeFirstLesson.threw && beforeFirstLesson.matched);
+    await StudentProfile.deleteOne({ _id: futureLearner._id });
+
+    const missing = await throws(
+      () => analytics.studentAnalytics(String(new mongoose.Types.ObjectId()), ownerActor, {}),
+      (e) => e.status === 404,
+    );
+    check("a learner that does not exist is a 404, not an empty report",
+      missing.threw && missing.matched);
+
+    // --- an administrator, and an empty window ---------------------------------
+    const byAdmin = await analytics.studentAnalytics(String(student._id), admin, { days: 90 });
+    check("an administrator sees the whole picture",
+      byAdmin.scope === "FULL" && byAdmin.lessons.completed === 4);
+
+    const emptyWindow = await analytics.studentAnalytics(String(student._id), ownerActor, {
+      from: new Date("2020-01-01T00:00:00.000Z").toISOString(),
+      to: new Date("2020-02-01T00:00:00.000Z").toISOString(),
+    });
+    check("a window with no lessons reports zero rather than the lifetime total",
+      emptyWindow.lessons.total === 0 && emptyWindow.lessons.completed === 0);
+    check("and no spend rather than a stale figure",
+      emptyWindow.spend.chargedCents === 0 && emptyWindow.spend.netCents === 0);
+    check("an empty window still names the period it is empty for",
+      typeof emptyWindow.period.from === "string" && typeof emptyWindow.period.to === "string");
+    check("and carries no ratings at all",
+      emptyWindow.feedback.reports === 0 && emptyWindow.feedback.understanding === null);
+  } finally {
+    await AuditLog.deleteMany({ entityId: { $in: madeReports } });
+    await Notification.deleteMany({ entityId: { $in: madeReports } });
+    await ProgressReport.deleteMany({ _id: { $in: madeReports } });
+    await Payment.deleteMany({ _id: { $in: madePayments } });
+    await Booking.deleteMany({ _id: { $in: madeBookings } });
+    if (student) await StudentProfile.deleteOne({ _id: student._id });
+    await StudentProfile.deleteMany({ ownerId: { $in: madeUsers } });
+    await User.deleteMany({ _id: { $in: madeUsers } });
   }
 }
 

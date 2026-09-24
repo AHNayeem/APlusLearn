@@ -14,6 +14,8 @@ import {
   PROGRESS_RATING_SCALE, GOAL_PROGRESS, GOAL_PROGRESS_LABELS,
 } from "@/constants";
 import { formatDate } from "@/lib/utils/format";
+import { UPLOAD } from "@/constants";
+import { AttachmentList, AttachmentPicker } from "@/components/attachments/Attachments";
 
 /**
  * Writing a progress report (§41 Phase 2).
@@ -178,6 +180,14 @@ export function ProgressReportEditor({ report: initial }) {
               disabled={archived}
             />
           </Field>
+
+          <HomeworkFiles
+            reportId={report.id}
+            attachments={report.homeworkAttachments ?? []}
+            onChange={(attachments) => setReport((r) => ({ ...r, homeworkAttachments: attachments }))}
+            disabled={archived}
+            shared={shared}
+          />
         </CardBody>
       </Card>
 
@@ -391,6 +401,113 @@ export function ProgressReportEditor({ report: initial }) {
             </Badge>
           )}
         </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The worksheet that goes with the homework (§41 Phase 3).
+ *
+ * Uploads take effect immediately rather than on the next "Save draft",
+ * because a file is not a form field: it has already been chosen, it is
+ * already being transferred, and leaving it in limbo until an unrelated
+ * button is pressed is how a tutor loses one. The server is therefore the
+ * source of truth for the list, and `onChange` hands its answer back to the
+ * editor so the two do not drift.
+ *
+ * Removing from a report the family has already read is allowed, and says so:
+ * the report's revision history keeps the record that the file was there.
+ */
+function HomeworkFiles({ reportId, attachments, onChange, disabled, shared }) {
+  const toast = useToast();
+  const [files, setFiles] = useState([]);
+  const [removingId, setRemovingId] = useState(null);
+
+  const { submit: upload, pending: uploading, error: uploadError } = useSubmit(async () => {
+    if (!files.length) return undefined;
+    const form = new FormData();
+    for (const file of files) form.append("file", file);
+
+    const result = await api.post(`/api/tutor/progress/${reportId}/attachments`, form);
+    onChange(result.attachments);
+    setFiles([]);
+    toast.success("Attached", "The family can download it from their copy of this report.");
+    return result;
+  });
+
+  const { submit: remove, pending: removing, error: removeError } = useSubmit(async (attachment) => {
+    setRemovingId(attachment.id);
+    try {
+      const result = await api.delete(
+        `/api/tutor/progress/${reportId}/attachments/${attachment.id}`,
+      );
+      onChange(result.attachments);
+      toast.success("Removed", `${attachment.fileName} is no longer attached.`);
+      return result;
+    } finally {
+      setRemovingId(null);
+    }
+  });
+
+  const room = UPLOAD.maxAttachmentsPerReport - attachments.length;
+
+  return (
+    <div className="border-t border-ink-100 pt-5">
+      <h3 className="text-xs font-bold uppercase tracking-wide text-ink-400">
+        Homework files
+      </h3>
+      <p className="mt-1 text-sm text-ink-500">
+        Attach the worksheet, a past paper, or a photo of the questions. The family can
+        download it from their copy of this report.
+      </p>
+
+      {(uploadError || removeError) && (
+        <Alert tone="danger" className="mt-3">
+          {uploadError ?? removeError}
+        </Alert>
+      )}
+
+      {attachments.length > 0 ? (
+        <AttachmentList
+          attachments={attachments}
+          onRemove={disabled ? undefined : remove}
+          removingId={removingId}
+        />
+      ) : (
+        <p className="mt-2 text-sm text-ink-400">No files attached yet.</p>
+      )}
+
+      {shared && attachments.length > 0 && !disabled && (
+        <p className="mt-2 text-xs text-ink-400">
+          Removing a file is recorded in this report&rsquo;s history, because the family has
+          already been shown it.
+        </p>
+      )}
+
+      {!disabled && room > 0 && (
+        <div className="mt-3 flex flex-col gap-2">
+          <AttachmentPicker
+            files={files}
+            onChange={setFiles}
+            max={room}
+            disabled={uploading || removing}
+            hint={`PDF, JPG, PNG or WebP · ${room} more allowed on this report`}
+          />
+          {files.length > 0 && (
+            <div>
+              <Button type="button" size="sm" onClick={upload} loading={uploading}>
+                Attach {files.length} file{files.length === 1 ? "" : "s"}
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {!disabled && room <= 0 && (
+        <p className="mt-2 text-xs text-ink-400">
+          This report is carrying the maximum of {UPLOAD.maxAttachmentsPerReport} files.
+        </p>
       )}
     </div>
   );

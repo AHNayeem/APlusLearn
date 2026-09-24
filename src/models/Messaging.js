@@ -1,6 +1,7 @@
 import mongoose from "mongoose";
 import { REPORT_STATUS } from "../constants/index.js";
 import { ModerationEntrySchema } from "./Engagement.js";
+import { AttachmentSchema } from "./Attachment.js";
 
 /**
  * A conversation is always exactly one learner-side account and one tutor.
@@ -70,26 +71,35 @@ const MessageSchema = new mongoose.Schema(
       index: true,
     },
     senderId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
-    body: { type: String, required: true, trim: true, maxlength: 4000 },
 
     /**
-     * Attachment shape is defined now so Phase 2 file sharing needs no
-     * migration; the MVP never populates it (§21, §41).
+     * Required, unless the message *is* the file.
+     *
+     * "Here's your worksheet" with nothing typed is an ordinary thing to
+     * send, so a message carrying an attachment may have an empty body. The
+     * requirement is expressed as a function rather than dropped, because a
+     * message with neither text nor a file is still nothing at all.
      */
-    attachments: {
-      type: [
-        new mongoose.Schema(
-          {
-            fileName: String,
-            contentType: String,
-            sizeBytes: Number,
-            storageKey: { type: String, select: false },
-          },
-          { _id: true },
-        ),
-      ],
-      default: [],
+    body: {
+      type: String,
+      required: function bodyRequired() {
+        return !this.attachments?.length;
+      },
+      trim: true,
+      maxlength: 4000,
     },
+
+    /**
+     * Files shared in this thread (§21, §41 Phase 3).
+     *
+     * The shape was declared here long before anything populated it, so that
+     * turning file sharing on would need no migration. It now points at the
+     * shared `AttachmentSchema`, which keeps those original four fields and
+     * adds the uploader, the time and a checksum — so a message attachment
+     * and a progress-report attachment are the same thing, validated the same
+     * way and served by the same rules.
+     */
+    attachments: { type: [AttachmentSchema], default: [] },
 
     /** System messages narrate booking events inside the thread. */
     kind: { type: String, enum: ["USER", "SYSTEM"], default: "USER" },

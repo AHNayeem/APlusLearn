@@ -4,6 +4,7 @@ import {
   PROGRESS_RATINGS,
   GOAL_PROGRESS,
 } from "../constants/index.js";
+import { AttachmentSchema } from "./Attachment.js";
 
 /**
  * Where one learning goal stands, as of one report.
@@ -100,6 +101,23 @@ const ProgressReportSchema = new mongoose.Schema(
     strengths: { type: String, trim: true, maxlength: 2000 },
     focusAreas: { type: String, trim: true, maxlength: 2000 },
     homework: { type: String, trim: true, maxlength: 2000 },
+
+    /**
+     * The homework itself, rather than a description of it (§41 Phase 3).
+     *
+     * `homework` has always been the tutor's written instruction; this is the
+     * worksheet that goes with it. It lives on the report rather than in the
+     * message thread because the report is the document a family keeps, and
+     * because the report already knows exactly who may read it — `ownerId`
+     * and `tutorUserId` are the audience, resolved at creation and not from
+     * any request.
+     *
+     * Deliberately *not* here: a due date, a submission, a mark, a status. A
+     * worksheet a tutor shared is a file; an assignment that is handed in and
+     * graded is a domain with rules nobody has written down yet. The learner
+     * returns their work the way they already can — in the thread.
+     */
+    homeworkAttachments: { type: [AttachmentSchema], default: [] },
 
     ratings: {
       type: new mongoose.Schema(

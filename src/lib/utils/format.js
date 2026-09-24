@@ -130,6 +130,26 @@ export function pluralize(count, singular, plural) {
   return Number(count) === 1 ? singular : (plural ?? `${singular}s`);
 }
 
+/**
+ * A file size a person can read.
+ *
+ * Binary units, because that is what a file manager shows and a family
+ * comparing "8 MB" on the upload hint with "8.2 MB" here should not have to
+ * know which of the two meanings of "MB" each one meant.
+ */
+export function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB"];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
+}
+
 export function truncate(text = "", length = 160) {
   if (text.length <= length) return text;
   return `${text.slice(0, text.lastIndexOf(" ", length))}…`;

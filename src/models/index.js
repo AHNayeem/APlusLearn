@@ -13,6 +13,7 @@ export { Availability } from "./Availability.js";
 export { Booking, BookingSlotLock } from "./Booking.js";
 export { Payment, Payout, PayoutAccount } from "./Payment.js";
 export { WebhookEvent } from "./WebhookEvent.js";
+export { AttachmentSchema, toPublicAttachment } from "./Attachment.js";
 export { Conversation, Message } from "./Messaging.js";
 export { TutorRequest, TutorMatch } from "./TutorRequest.js";
 export { Favourite, Review, Notification } from "./Engagement.js";

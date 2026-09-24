@@ -75,6 +75,24 @@ export const PERMISSIONS = {
   PROGRESS_REPORT_WRITE: "PROGRESS_REPORT_WRITE",
   PROGRESS_REPORT_VIEW: "PROGRESS_REPORT_VIEW",
 
+  /**
+   * Read a learner's own analytics (§24, §41 Phase 3).
+   *
+   * Held by families and by tutors, and held apart from PROGRESS_REPORT_VIEW
+   * because they are different questions: a report is one tutor's written
+   * assessment, while this is a computed picture of everything the learner
+   * has done. A deployment that wanted families to read reports but not to be
+   * shown aggregate attendance should be able to say so.
+   *
+   * Like BOOKING_MEETING_MANAGE, the permission opens the door and does not
+   * say *which* learner. Whose analytics an actor may read — and how much of
+   * them — is resolved in `analytics.service` from the stored StudentProfile
+   * and from completed bookings, never from a request field. A tutor holding
+   * this sees only learners they have actually taught, and only their own
+   * teaching of them.
+   */
+  STUDENT_ANALYTICS_VIEW: "STUDENT_ANALYTICS_VIEW",
+
   // Admin
   ADMIN_USER_MANAGE: "ADMIN_USER_MANAGE",
   ADMIN_REQUEST_MODERATE: "ADMIN_REQUEST_MODERATE",
@@ -153,6 +171,7 @@ const LEARNER_PERMISSIONS = [
   PERMISSIONS.DISPUTE_CREATE,
   // Families read progress reports; only the tutor who wrote one may change it.
   PERMISSIONS.PROGRESS_REPORT_VIEW,
+  PERMISSIONS.STUDENT_ANALYTICS_VIEW,
 ];
 
 export const ROLE_PERMISSIONS = {
@@ -181,6 +200,7 @@ export const ROLE_PERMISSIONS = {
     PERMISSIONS.DISPUTE_CREATE,
     PERMISSIONS.PROGRESS_REPORT_WRITE,
     PERMISSIONS.PROGRESS_REPORT_VIEW,
+    PERMISSIONS.STUDENT_ANALYTICS_VIEW,
   ],
 
   [ROLES.ADMIN]: Object.values(PERMISSIONS),

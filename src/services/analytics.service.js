@@ -44,6 +44,8 @@ import {
   CREDIT_REASONS,
 } from "@/constants";
 import { toPlain } from "@/lib/utils/serialize";
+import { learnerDisplayName } from "@/lib/utils/format";
+import { AuthorizationError, NotFoundError } from "@/lib/api/errors";
 import {
   resolveRange,
   dateWindow,
@@ -856,6 +858,350 @@ export async function tutorAnalytics(tutorUserId, options = {}) {
       lessons: c.lessons,
       earningsCents: c.earningsCents,
     })),
+  };
+}
+
+// --- One learner (§24, §41 Phase 3) -----------------------------------------
+
+/**
+ * Who may read a learner's analytics, and how much of them.
+ *
+ * Three answers, resolved from stored records and never from a request:
+ *
+ *   **The owner** — the account that created the learner and pays for the
+ *   lessons. Sees everything, including what the household has spent, because
+ *   it is their own money.
+ *
+ *   **An administrator** — under the permission the route already required.
+ *   Sees everything, for the same support reasons `/admin/progress` exists.
+ *
+ *   **A tutor who has actually taught them** — sees their *own* teaching and
+ *   nothing else. Not the money (that is the family's), not the lessons the
+ *   learner took with anybody else, and not another tutor's assessment. The
+ *   test is a completed booking between this tutor and this learner, which is
+ *   the same definition `progress.service` uses for who may write a report.
+ *
+ * Anyone else gets an authorization error, including a tutor who has only a
+ * future booking: a lesson that has not happened is not teaching yet.
+ */
+async function resolveLearnerAccess(studentProfileId, actor) {
+  const id =
+    typeof studentProfileId === "string"
+      ? new Types.ObjectId(studentProfileId)
+      : studentProfileId;
+
+  const student = await StudentProfile.findById(id)
+    .select("ownerId firstName lastName gradeName gradeLevel isMinor shareFullNameWithTutor learningGoals archivedAt")
+    .lean();
+  if (!student) throw new NotFoundError("That learner no longer exists.");
+
+  if (String(student.ownerId) === String(actor.id)) {
+    return { id, student, scope: { full: true, tutorUserId: null } };
+  }
+
+  if (actor.role === ROLES.ADMIN) {
+    return { id, student, scope: { full: true, tutorUserId: null } };
+  }
+
+  if (actor.role === ROLES.TUTOR) {
+    const taught = await Booking.exists({
+      studentProfileId: id,
+      tutorUserId: new Types.ObjectId(actor.id),
+      status: BOOKING_STATUS.COMPLETED,
+    });
+    if (taught) {
+      return {
+        id,
+        student,
+        scope: { full: false, tutorUserId: new Types.ObjectId(actor.id) },
+      };
+    }
+  }
+
+  throw new AuthorizationError("You do not have access to this learner's progress.");
+}
+
+/**
+ * One learner's own analytics (§24, §41 Phase 3).
+ *
+ * Every figure below is aggregated in MongoDB from a record that already
+ * existed for another reason — a booking that was taught, a payment that
+ * settled, a report a tutor wrote, a goal a family set. Nothing here invents
+ * a metric, estimates one, or fills an empty period with anything other than
+ * zero: a learner who has had no lessons this month has had no lessons this
+ * month, and the screen says so.
+ *
+ * The three rules that hold the admin figures together hold here too —
+ * money comes from `Payment` on `paidAt`, lessons are matched on `startAt`,
+ * and nothing is reduced from a paged array.
+ */
+export async function studentAnalytics(studentProfileId, actor, options = {}) {
+  const range = resolveRange(options);
+  const { id, student, scope } = await resolveLearnerAccess(studentProfileId, actor);
+
+  // The scope is applied as a `$match` fragment carried into every pipeline,
+  // so a tutor's view is narrowed once, here, rather than in eight places
+  // that each have to remember.
+  const mine = { studentProfileId: id };
+  if (!scope.full) mine.tutorUserId = scope.tutorUserId;
+
+  const [lessons, previous, series, courses, tutors, reports, milestones, spend] =
+    await Promise.all([
+      lessonAggregate(range, mine),
+      lessonAggregate(range.previous, mine),
+
+      Booking.aggregate([
+        {
+          $match: {
+            ...mine,
+            status: { $nin: [BOOKING_STATUS.PENDING_PAYMENT, BOOKING_STATUS.EXPIRED] },
+            ...dateWindow("startAt", range),
+          },
+        },
+        {
+          $group: {
+            _id: bucketExpression("startAt", range),
+            lessons: { $sum: 1 },
+            completed: {
+              $sum: { $cond: [{ $eq: ["$status", BOOKING_STATUS.COMPLETED] }, 1, 0] },
+            },
+            minutes: {
+              $sum: {
+                $cond: [{ $eq: ["$status", BOOKING_STATUS.COMPLETED] }, "$durationMinutes", 0],
+              },
+            },
+          },
+        },
+        { $sort: { _id: 1 } },
+      ]),
+
+      // What they are actually working on, by lessons taught.
+      Booking.aggregate([
+        {
+          $match: {
+            ...mine,
+            status: BOOKING_STATUS.COMPLETED,
+            ...dateWindow("startAt", range),
+          },
+        },
+        {
+          $group: {
+            _id: { code: "$courseCode", name: "$courseName" },
+            lessons: { $sum: 1 },
+            minutes: { $sum: "$durationMinutes" },
+          },
+        },
+        { $sort: { lessons: -1, "_id.name": 1 } },
+        { $limit: 8 },
+      ]),
+
+      /**
+       * Who taught them.
+       *
+       * Full scope only. A tutor asking about a learner they teach has no
+       * business learning which *other* tutors that family uses — that is the
+       * household's information, not a fact about this tutor's teaching.
+       */
+      scope.full
+        ? Booking.aggregate([
+            {
+              $match: {
+                ...mine,
+                status: BOOKING_STATUS.COMPLETED,
+                ...dateWindow("startAt", range),
+              },
+            },
+            { $group: { _id: "$tutorUserId", lessons: { $sum: 1 } } },
+            { $sort: { lessons: -1 } },
+            { $limit: 8 },
+          ])
+        : Promise.resolve([]),
+
+      /**
+       * How the tutors who wrote reports rated them.
+       *
+       * Only submitted reports: a draft is the tutor's workspace and is not
+       * something the family has been shown, so it must not move a number the
+       * family is looking at. A tutor's scoped view sees only their own.
+       */
+      ProgressReport.aggregate([
+        {
+          $match: {
+            studentProfileId: id,
+            status: {
+              $in: [PROGRESS_REPORT_STATUS.SUBMITTED, PROGRESS_REPORT_STATUS.ACKNOWLEDGED],
+            },
+            ...(scope.full ? {} : { tutorUserId: scope.tutorUserId }),
+            ...dateWindow("submittedAt", range),
+          },
+        },
+        {
+          $group: {
+            _id: null,
+            reports: { $sum: 1 },
+            acknowledged: {
+              $sum: { $cond: [{ $ifNull: ["$acknowledgedAt", false] }, 1, 0] },
+            },
+            understanding: { $avg: "$ratings.understanding" },
+            effort: { $avg: "$ratings.effort" },
+            participation: { $avg: "$ratings.participation" },
+            homework: { $avg: "$ratings.homework" },
+          },
+        },
+      ]),
+
+      // Milestones are additive and never un-earned, so they are counted over
+      // the window in which they were recorded.
+      ProgressReport.aggregate([
+        {
+          $match: {
+            studentProfileId: id,
+            status: {
+              $in: [PROGRESS_REPORT_STATUS.SUBMITTED, PROGRESS_REPORT_STATUS.ACKNOWLEDGED],
+            },
+            ...(scope.full ? {} : { tutorUserId: scope.tutorUserId }),
+            ...dateWindow("submittedAt", range),
+          },
+        },
+        { $unwind: "$milestones" },
+        { $group: { _id: null, count: { $sum: 1 } } },
+      ]),
+
+      scope.full ? learnerSpend(student.ownerId, id, range) : Promise.resolve(null),
+    ]);
+
+  const ratings = reports[0] ?? {};
+  const goals = student.learningGoals ?? [];
+
+  return {
+    learner: {
+      id: String(student._id),
+      // The tutor's view is masked exactly as it is everywhere else (§35).
+      displayName: scope.full
+        ? `${student.firstName} ${student.lastName ?? ""}`.trim()
+        : learnerDisplayName(student),
+      gradeName: student.gradeName ?? null,
+    },
+    period: describe(range),
+    scope: scope.full ? "FULL" : "TUTOR",
+
+    lessons: {
+      total: lessons.lessons,
+      completed: lessons.completed,
+      completedChange: percentChange(lessons.completed, previous.completed),
+      cancelled: lessons.cancelled,
+      cancelledByUs: lessons.cancelledByStudent,
+      missed: lessons.studentNoShows,
+      /** Of the lessons that were meant to happen, how many did. */
+      attendanceRate: rate(lessons.completed, lessons.completed + lessons.studentNoShows),
+      completionRate: lessons.completionRate,
+      hoursLearned: Math.round(lessons.teachingMinutes / 60),
+      fromPackage: lessons.fromPackage,
+      inGroup: lessons.inGroup,
+    },
+
+    granularity: range.granularity,
+    series: series.map((d) => ({
+      date: d._id,
+      lessons: d.lessons,
+      completed: d.completed,
+      minutes: d.minutes,
+    })),
+
+    courses: courses.map((c) => ({
+      code: c._id.code ?? null,
+      name: c._id.name ?? null,
+      lessons: c.lessons,
+      hours: Math.round((c.minutes / 60) * 10) / 10,
+    })),
+
+    tutors: { count: tutors.length, lessons: tutors.map((t) => t.lessons) },
+
+    feedback: {
+      reports: ratings.reports ?? 0,
+      acknowledged: ratings.acknowledged ?? 0,
+      /** `null`, not `0`, where nobody has rated it — an unrated skill is
+       *  not a skill rated zero, and the screen renders the two differently. */
+      understanding: roundRating(ratings.understanding),
+      effort: roundRating(ratings.effort),
+      participation: roundRating(ratings.participation),
+      homework: roundRating(ratings.homework),
+    },
+
+    goals: {
+      total: goals.length,
+      achieved: goals.filter((g) => g.achievedAt).length,
+      open: goals.filter((g) => !g.achievedAt).length,
+      milestones: milestones[0]?.count ?? 0,
+    },
+
+    /** Absent — not zero — for a tutor, who is never shown the family's money. */
+    spend,
+  };
+}
+
+/** A rating nobody has given is null, not zero. */
+function roundRating(value) {
+  return value == null ? null : Math.round(value * 10) / 10;
+}
+
+/**
+ * What this household paid for one learner's lessons, in one window.
+ *
+ * From `Payment` on `paidAt`, like every other money figure in this file, and
+ * narrowed to the payments that are *for this learner* by joining to the
+ * booking each one settled. The `purchaserId` match comes first so the join
+ * runs over one household's payments rather than the platform's.
+ *
+ * Package purchases are deliberately excluded. A package is bought by the
+ * household and can be drawn down by any of its learners, so attributing one
+ * to a single child would be a guess — and a guess with a dollar sign in
+ * front of it is the kind of number a family would reasonably act on. The
+ * figure is named for what it actually counts.
+ */
+async function learnerSpend(ownerId, studentProfileId, range) {
+  const [row] = await Payment.aggregate([
+    {
+      $match: {
+        purchaserId: typeof ownerId === "string" ? new Types.ObjectId(ownerId) : ownerId,
+        status: { $in: SETTLED_PAYMENT_STATUSES },
+        bookingId: { $ne: null },
+        ...dateWindow("paidAt", range),
+      },
+    },
+    {
+      $lookup: {
+        from: Booking.collection.name,
+        localField: "bookingId",
+        foreignField: "_id",
+        as: "booking",
+      },
+    },
+    { $unwind: "$booking" },
+    { $match: { "booking.studentProfileId": studentProfileId } },
+    {
+      $group: {
+        _id: null,
+        payments: { $sum: 1 },
+        chargedCents: { $sum: "$totalCents" },
+        refundedCents: { $sum: { $ifNull: ["$refundedCents", 0] } },
+        creditAppliedCents: { $sum: { $ifNull: ["$creditAppliedCents", 0] } },
+      },
+    },
+  ]);
+
+  const base = row ?? {
+    payments: 0,
+    chargedCents: 0,
+    refundedCents: 0,
+    creditAppliedCents: 0,
+  };
+
+  return {
+    ...base,
+    netCents: base.chargedCents - base.refundedCents,
+    /** Named so nobody reads it as "everything this family has spent". */
+    excludesPackagePurchases: true,
   };
 }
 

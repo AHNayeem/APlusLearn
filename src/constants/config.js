@@ -641,6 +641,26 @@ export const SESSION = {
 export const UPLOAD = {
   maxDocumentBytes: 8 * 1024 * 1024,
   acceptedDocumentTypes: ["application/pdf", "image/jpeg", "image/png", "image/webp"],
+
+  /**
+   * Shared files — message attachments and the homework a tutor attaches to a
+   * progress report (§21, §41 Phase 3).
+   *
+   * The accepted types are deliberately the *same four* a verification
+   * document may be, and for the same reason: `inspectDocument()` decides the
+   * format by reading the bytes, and it can only vouch for formats it can
+   * actually recognise. Accepting a .docx here would mean accepting a ZIP
+   * whose contents nothing in this application has looked at, so the list
+   * stops where the verification stops. A worksheet is a PDF or a photo.
+   *
+   * The per-parent caps are what keep one upload from becoming a hundred:
+   * every attachment is a stored object somebody else can ask us to stream
+   * back, so the count is bounded at the write, not at the read.
+   */
+  maxAttachmentBytes: 10 * 1024 * 1024,
+  acceptedAttachmentTypes: ["application/pdf", "image/jpeg", "image/png", "image/webp"],
+  maxAttachmentsPerMessage: 4,
+  maxAttachmentsPerReport: 6,
   /**
    * Where file storage writes when no object store is configured (§16, §38).
    *

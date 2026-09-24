@@ -223,6 +223,39 @@ export function safeFileName(name, fallback = "document") {
   return cleaned || fallback;
 }
 
+/**
+ * Extensions for the formats a *document* may be — the four
+ * `UPLOAD.acceptedDocumentTypes`, which is the image set plus PDF.
+ *
+ * Separate from `EXTENSIONS` because that map answers "what kind of image is
+ * this?" and a PDF is not one. Shared rather than kept privately by each
+ * upload surface, because the stored key's extension is what a later operator
+ * sees in a bucket listing, and three copies of this table is three chances
+ * for one of them to start writing extensionless objects.
+ */
+const DOCUMENT_EXTENSIONS = {
+  "application/pdf": ".pdf",
+  [IMAGE_TYPES.JPEG]: ".jpg",
+  [IMAGE_TYPES.PNG]: ".png",
+  [IMAGE_TYPES.WEBP]: ".webp",
+};
+
+export function documentExtensionFor(contentType) {
+  return DOCUMENT_EXTENSIONS[contentType] ?? "";
+}
+
+/**
+ * Name a set of accepted formats for a person: "PDF, JPG, PNG or WebP".
+ *
+ * `describeTypes` reads its names out of the image table, so it cannot name a
+ * PDF. This one reads the document table, which can.
+ */
+export function describeDocumentTypes(types) {
+  const names = types.map((t) => documentExtensionFor(t).replace(".", "").toUpperCase());
+  if (names.length === 1) return `a ${names[0]}`;
+  return `${names.slice(0, -1).join(", ")} or ${names[names.length - 1]}`;
+}
+
 export function describeTypes(types) {
   const names = types.map((t) => extensionFor(t).replace(".", "").toUpperCase());
   if (names.length === 1) return `a ${names[0]}`;

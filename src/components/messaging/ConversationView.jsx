@@ -12,7 +12,8 @@ import {
   useToast, Rating,
 } from "@/components/ui";
 import { formatRelative, formatDate, formatTime } from "@/lib/utils/format";
-import { BOOKING_STATUS_LABELS } from "@/constants";
+import { BOOKING_STATUS_LABELS, UPLOAD } from "@/constants";
+import { AttachmentList, AttachmentPicker } from "@/components/attachments/Attachments";
 
 /**
  * A single conversation (§21).
@@ -25,6 +26,7 @@ export function ConversationView({ conversation, messages: initialMessages, book
   const toast = useToast();
   const [messages, setMessages] = useState(initialMessages);
   const [body, setBody] = useState("");
+  const [files, setFiles] = useState([]);
   const [reportOpen, setReportOpen] = useState(false);
   const endRef = useRef(null);
 
@@ -50,31 +52,62 @@ export function ConversationView({ conversation, messages: initialMessages, book
     }
   }, [conversation.id, conversation.unreadCount, router]);
 
+  /**
+   * Send the message, with or without files.
+   *
+   * Two transports, one behaviour: a plain message is JSON, a message with
+   * files is multipart, and both land in the same service. The optimistic row
+   * shows the chosen filenames so the thread does not appear to swallow them
+   * while a 10 MB scan uploads; it is replaced by the server's version — the
+   * one carrying real attachment ids — as soon as the request returns.
+   *
+   * On failure the text *and* the files go back into the composer, because
+   * re-picking a file is worse than re-typing a sentence.
+   */
   const { submit, pending } = useSubmit(async () => {
     const text = body.trim();
-    if (!text) return undefined;
+    const attached = files;
+    if (!text && !attached.length) return undefined;
 
     const optimistic = {
       id: `pending-${Date.now()}`,
       senderId: viewerId,
       body: text,
+      attachments: attached.map((file, index) => ({
+        id: `pending-file-${index}`,
+        fileName: file.name,
+        contentType: file.type,
+        sizeBytes: file.size,
+        href: null,
+      })),
       createdAt: new Date().toISOString(),
       pending: true,
     };
     setMessages((m) => [...m, optimistic]);
     setBody("");
+    setFiles([]);
 
     try {
-      const result = await api.post("/api/messages", {
-        conversationId: conversation.id,
-        body: text,
-      });
+      let result;
+      if (attached.length) {
+        const form = new FormData();
+        form.set("conversationId", conversation.id);
+        form.set("body", text);
+        for (const file of attached) form.append("file", file);
+        result = await api.post("/api/messages/attachments", form);
+      } else {
+        result = await api.post("/api/messages", {
+          conversationId: conversation.id,
+          body: text,
+        });
+      }
       setMessages((m) => m.map((msg) => (msg.id === optimistic.id ? result.message : msg)));
       router.refresh();
       return result;
     } catch (error) {
       setMessages((m) => m.filter((msg) => msg.id !== optimistic.id));
       setBody(text);
+      setFiles(attached);
       throw error;
     }
   });
@@ -195,7 +228,16 @@ export function ConversationView({ conversation, messages: initialMessages, book
                     message.pending && "opacity-60",
                   )}
                 >
-                  <p className="whitespace-pre-wrap break-words">{message.body}</p>
+                  {message.body && (
+                    <p className="whitespace-pre-wrap break-words">{message.body}</p>
+                  )}
+                  {message.attachments?.length > 0 && (
+                    <AttachmentList
+                      attachments={message.attachments}
+                      tone={mine ? "dark" : "light"}
+                      className={message.body ? undefined : "mt-0"}
+                    />
+                  )}
                   <p
                     className={cn(
                       "mt-1 text-[10px]",
@@ -223,8 +265,15 @@ export function ConversationView({ conversation, messages: initialMessages, book
               e.preventDefault();
               submit();
             }}
-            className="flex items-end gap-2"
+            className="flex flex-col gap-2"
           >
+            <AttachmentPicker
+              files={files}
+              onChange={setFiles}
+              max={UPLOAD.maxAttachmentsPerMessage}
+              disabled={pending}
+            />
+            <div className="flex items-end gap-2">
             <label htmlFor="message-body" className="sr-only">
               Message
             </label>
@@ -248,10 +297,11 @@ export function ConversationView({ conversation, messages: initialMessages, book
               size="icon"
               aria-label="Send message"
               loading={pending}
-              disabled={!body.trim()}
+              disabled={!body.trim() && !files.length}
             >
               <Send className="size-4" />
             </Button>
+            </div>
           </form>
         )}
       </div>

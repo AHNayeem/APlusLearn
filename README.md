@@ -140,7 +140,18 @@ record, never against a request field.
 A learner's surname is masked from tutors unless a parent opts in. An
 in-person address is released only to the two parties, only once the lesson is
 confirmed. Verification documents are stored outside anything publicly
-reachable and served only through an audited admin route.
+reachable and served only through an audited admin route. A learner's
+analytics resolve one of three views — the family's, an administrator's, or a
+tutor's own teaching — from stored records rather than from the request, so a
+tutor is never shown what the household paid or which other tutors it uses.
+
+**A shared file is reached by id, never by key.** Message attachments and the
+worksheets a tutor attaches to a progress report are sub-documents of the
+record that says who may read them, so the file and its audience load
+together. The storage key is `select: false` and never leaves the server: a
+reader asks for an attachment by id, through a route that checks them against
+the conversation or the report. A file's type is decided by reading its bytes,
+not by believing the browser.
 
 **Configuration is not code, and secrets are not configuration.** Everything an
 operator might reasonably change — the application's name, logo, colours,
