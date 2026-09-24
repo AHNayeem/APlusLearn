@@ -2,14 +2,16 @@
 
 import { useId, useState } from "react";
 import {
-  AlertTriangle, CheckCircle2, CircleDashed, CircleSlash, Download, PlugZap,
+  AlertTriangle, Check, CheckCircle2, CircleDashed, CircleSlash, Copy, Download, PlugZap,
   RotateCcw, Save, ShieldAlert, XCircle,
 } from "lucide-react";
 import {
   Alert, Badge, Button, Card, CardBody, CardHeader, Field, FormErrorSummary,
   Input, Select, Switch,
 } from "@/components/ui";
-import { INTEGRATION_STATUS, INTEGRATION_STATUS_LABELS, FIELD_KINDS } from "@/constants";
+import {
+  INTEGRATION_STATUS, INTEGRATION_STATUS_LABELS, FIELD_KINDS, PROVIDER_STATES, PROVIDER_STATE_LABELS,
+} from "@/constants";
 import { formatDateTime } from "@/lib/utils/format";
 import { useIntegrationModule } from "./useIntegrationModule";
 import { SecretField } from "./SecretField";
@@ -43,6 +45,14 @@ const STATUS_PRESENTATION = {
   [INTEGRATION_STATUS.DISABLED]: { tone: "neutral", Icon: CircleSlash },
   [INTEGRATION_STATUS.FAILING]: { tone: "danger", Icon: XCircle },
   [INTEGRATION_STATUS.NEEDS_ATTENTION]: { tone: "warning", Icon: ShieldAlert },
+};
+
+/** The same rule for one platform of a `multi` module: icon and words. */
+const PROVIDER_STATE_PRESENTATION = {
+  [PROVIDER_STATES.ENABLED]: { tone: "success", Icon: CheckCircle2 },
+  [PROVIDER_STATES.DISABLED]: { tone: "neutral", Icon: CircleSlash },
+  [PROVIDER_STATES.NOT_CONFIGURED]: { tone: "neutral", Icon: CircleDashed },
+  [PROVIDER_STATES.MISCONFIGURED]: { tone: "warning", Icon: ShieldAlert },
 };
 
 export function ModuleCard({ module: initial }) {
@@ -142,7 +152,7 @@ export function ModuleCard({ module: initial }) {
         {module.multi ? (
           <Field
             label="Platforms"
-            hint="Tutors choose from whichever of these you turn on. Each needs its own credentials below."
+            hint={module.platformsHint ?? "Each platform you turn on needs its own credentials below."}
           >
             <div className="space-y-2">
               {module.providerOptions.map((option) => (
@@ -156,9 +166,17 @@ export function ModuleCard({ module: initial }) {
                     checked={m.providers.includes(option.value)}
                     onChange={() => m.toggleProvider(option.value)}
                   />
-                  <span>
-                    <span className="block text-sm font-semibold text-ink-900">{option.label}</span>
+                  <span className="min-w-0 flex-1">
+                    <span className="flex flex-wrap items-center gap-2">
+                      <span className="text-sm font-semibold text-ink-900">{option.label}</span>
+                      <ProviderStateBadge
+                        status={module.providerStatus?.find((p) => p.provider === option.value)}
+                      />
+                    </span>
                     <span className="block text-xs text-ink-600">{option.description}</span>
+                    <ProviderStateDetail
+                      status={module.providerStatus?.find((p) => p.provider === option.value)}
+                    />
                   </span>
                 </label>
               ))}
@@ -191,6 +209,7 @@ export function ModuleCard({ module: initial }) {
               <fieldset key={name} className="rounded-xl border border-ink-200 p-4">
                 <legend className="px-2 text-sm font-semibold text-ink-900">{option.label}</legend>
                 <div className="space-y-5">
+                  <RegistrationValues option={option} />
                   {option.fields.map((field) => renderField(field, m))}
                 </div>
               </fieldset>
@@ -284,6 +303,78 @@ export function ModuleCard({ module: initial }) {
         />
       </CardBody>
     </Card>
+  );
+}
+
+function ProviderStateBadge({ status }) {
+  if (!status) return null;
+  const { tone, Icon } =
+    PROVIDER_STATE_PRESENTATION[status.state] ?? PROVIDER_STATE_PRESENTATION[PROVIDER_STATES.NOT_CONFIGURED];
+  return (
+    <Badge tone={tone} size="sm">
+      <Icon className="mr-1 inline size-3" aria-hidden="true" />
+      {PROVIDER_STATE_LABELS[status.state]}
+      {status.state === PROVIDER_STATES.ENABLED && status.verified ? " · validated" : ""}
+    </Badge>
+  );
+}
+
+/** Why a platform needs attention, in the service's words — never a value. */
+function ProviderStateDetail({ status }) {
+  if (!status?.message || status.state !== PROVIDER_STATES.MISCONFIGURED) return null;
+  return <span className="mt-1 block text-xs text-warning-700">{status.message}</span>;
+}
+
+/**
+ * The values an operator pastes into the provider's own console — the
+ * redirect URI, the domain. Read-only, because they are facts about this
+ * deployment rather than settings, and derived from the same URL the server
+ * sends, so what is copied here is what the provider will be shown.
+ */
+function RegistrationValues({ option }) {
+  if (!option.registration?.length) return null;
+  return (
+    <div className="rounded-xl bg-ink-50 p-4">
+      <p className="text-xs font-semibold text-ink-900">Register these with {option.label}</p>
+      <dl className="mt-2 space-y-2">
+        {option.registration.map((entry) => (
+          <div key={entry.label}>
+            <dt className="text-xs text-ink-600">{entry.label}</dt>
+            <dd className="mt-0.5 flex items-center gap-2">
+              <code className="min-w-0 flex-1 truncate rounded-md bg-white px-2 py-1 font-mono text-xs text-ink-800 ring-1 ring-inset ring-ink-200">
+                {entry.value}
+              </code>
+              <CopyButton value={entry.value} label={entry.label} />
+            </dd>
+          </div>
+        ))}
+      </dl>
+    </div>
+  );
+}
+
+function CopyButton({ value, label }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="xs"
+      aria-label={`Copy ${label.toLowerCase()}`}
+      onClick={async () => {
+        try {
+          await navigator.clipboard.writeText(value);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        } catch {
+          // Clipboard refused (insecure context, permissions) — the value is
+          // on screen to select by hand.
+        }
+      }}
+      iconLeft={copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+    >
+      {copied ? "Copied" : "Copy"}
+    </Button>
   );
 }
 
@@ -417,6 +508,9 @@ function SourceNote({ module, onImport, importing }) {
  */
 function TestPanel({ module, dirty, testInput, setTestInput, onTest, pending, error, result }) {
   const shown = result ?? (module.lastTest && !module.lastTest.stale ? module.lastTest : null);
+  const testable = module.enabled || module.testWhileDisabled;
+  const providerLabel = (name) =>
+    module.providerOptions.find((option) => option.value === name)?.label ?? name;
 
   return (
     <div className="rounded-xl bg-ink-50 p-4">
@@ -455,15 +549,15 @@ function TestPanel({ module, dirty, testInput, setTestInput, onTest, pending, er
           variant="secondary"
           onClick={onTest}
           loading={pending}
-          disabled={!module.enabled}
+          disabled={!testable}
           iconLeft={<PlugZap className="size-4" />}
         >
           {module.testLabel}
         </Button>
-        {!module.enabled && (
+        {!testable && (
           <span className="text-xs text-ink-500">Switch the module on and save before testing it.</span>
         )}
-        {dirty && module.enabled && (
+        {dirty && testable && (
           <span className="text-xs text-warning-700">
             Save first — this tests the stored configuration, not what is on screen.
           </span>
@@ -483,7 +577,17 @@ function TestPanel({ module, dirty, testInput, setTestInput, onTest, pending, er
           className="mt-4"
           icon={shown.ok ? <CheckCircle2 className="size-3" /> : <AlertTriangle className="size-3" />}
         >
-          <p>{shown.message}</p>
+          {shown.results?.length > 1 ? (
+            <ul className="space-y-1">
+              {shown.results.map((r) => (
+                <li key={r.provider}>
+                  <strong>{providerLabel(r.provider)}:</strong> {r.message}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p>{shown.message}</p>
+          )}
           {shown.at && (
             <p className="mt-1 text-xs opacity-80">Tested {formatDateTime(shown.at)}</p>
           )}

@@ -105,15 +105,32 @@ export const changePasswordSchema = z
   });
 
 /**
- * OAuth sign-in. The provider's identity payload is verified server-side by
- * the auth provider abstraction before this schema is applied (§9, §38).
+ * Starting a Google or Apple sign-in (§9).
+ *
+ * These arrive on a link the sign-in or registration page builds, so all of
+ * them are under the visitor's control: `role` may never name an
+ * administrator, `next` is reduced to a path on this application, and `from`
+ * only decides which page an error is reported on. They are carried to the
+ * callback inside the encrypted transaction cookie, not trusted from the
+ * provider's redirect.
+ */
+export const oauthStartQuerySchema = z.object({
+  role: z.enum([ROLES.PARENT, ROLES.STUDENT, ROLES.TUTOR]).optional(),
+  next: nextPath,
+  from: z.enum(["login", "register"]).catch("login").default("login"),
+});
+
+/**
+ * The development sign-in identity (§38). Accepted only while
+ * `signInAvailability()` reports a provider in development mode; real Google
+ * and Apple sign-in use the authorization-code flow and never post here.
  */
 export const oauthSignInSchema = z.object({
   provider: z.enum(["GOOGLE", "APPLE"]),
   credential: z.string().min(8, "The sign-in response was incomplete."),
   /**
    * Only honoured when creating a brand-new account. An existing user's role
-   * is never changed by a social sign-in — see `oauthSignIn` (§10).
+   * is never changed by a social sign-in — see `signInWithIdentity` (§10).
    */
   role: z.enum([ROLES.PARENT, ROLES.STUDENT, ROLES.TUTOR]).optional(),
   /**

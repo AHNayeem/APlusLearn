@@ -264,7 +264,7 @@ async function main() {
   // whatever came after it. It is also why this suite wants a development
   // database: the records it removes hold real encrypted credentials, and no
   // endpoint can hand them back — that is the feature working (§36).
-  for (const key of ["email", "payment", "calendar", "sms", "storage"]) {
+  for (const key of ["email", "payment", "calendar", "sms", "storage", "oauth"]) {
     await admin(`/api/admin/integrations/${key}`, { method: "DELETE" });
   }
 
@@ -2557,13 +2557,25 @@ async function main() {
   const connectHook = await anon("/api/webhooks/payments?connect=1", { method: "POST", body: {} });
   check("the Connect webhook endpoint is equally strict", connectHook.status === 400);
 
-  // OAuth. The nonce endpoint is what makes a sign-in attempt single-use.
-  const nonce = await anon("/api/auth/oauth/nonce");
-  check("a sign-in nonce can be minted", nonce.ok && nonce.payload.data.nonce?.length >= 16);
+  // OAuth. Every attempt starts at the server, which mints the state and
+  // nonce that make it single-use; with nothing configured on a development
+  // server the start endpoint refuses rather than inventing a provider.
+  // (The full flow, and its refusals, are the "Social sign-in" section.)
+  const oauthStart = await anon("/api/auth/oauth/google", { raw: true });
+  const oauthStartTarget = oauthStart.headers.get("location") ?? "";
   check(
-    "the nonce response lists providers without exposing secrets",
-    Array.isArray(nonce.payload.data.providers) &&
-      !JSON.stringify(nonce.payload.data).match(/secret|client_secret|sk_|whsec/i),
+    "a sign-in with no real provider configured never reaches a provider",
+    [302, 303, 307].includes(oauthStart.status) && !/accounts\.google\.com/.test(oauthStartTarget),
+    `status ${oauthStart.status} → ${oauthStartTarget}`,
+  );
+  check(
+    "and nothing about it exposes a secret",
+    !oauthStartTarget.match(/secret|client_secret|sk_|whsec/i),
+  );
+  const unknownProvider = await anon("/api/auth/oauth/myspace", { raw: true });
+  check(
+    "an unknown sign-in provider is refused",
+    /oauthError=PROVIDER_DISABLED/.test(unknownProvider.headers.get("location") ?? ""),
   );
 
   const forgedIdentity = await anon("/api/auth/oauth", {
@@ -2737,7 +2749,7 @@ async function main() {
   // Belt and braces: the run already cleared these before its first
   // assertion, and this section is the one that goes on to configure them, so
   // it starts from the same known state whichever way it is reached.
-  for (const key of ["email", "payment", "calendar", "sms", "storage"]) {
+  for (const key of ["email", "payment", "calendar", "sms", "storage", "oauth"]) {
     await admin(`/api/admin/integrations/${key}`, { method: "DELETE" });
   }
 
@@ -2804,7 +2816,7 @@ async function main() {
   check("an administrator can read the module list", modulesList.ok);
   check(
     "every module the platform has is listed",
-    ["email", "payment", "calendar", "sms", "storage"].every((key) =>
+    ["email", "payment", "calendar", "sms", "storage", "oauth"].every((key) =>
       modulesList.payload?.data?.modules?.some((m) => m.module === key),
     ),
   );
@@ -3352,7 +3364,7 @@ async function main() {
 
   // Leave every module as the suite found it, so a second run starts clean and
   // no later section inherits a half-configured provider.
-  for (const key of ["email", "payment", "calendar", "sms", "storage"]) {
+  for (const key of ["email", "payment", "calendar", "sms", "storage", "oauth"]) {
     const cleared = await admin(`/api/admin/integrations/${key}`, { method: "DELETE" });
     check(`the ${key} module is cleared down`, cleared.ok, JSON.stringify(cleared.payload?.error));
   }
@@ -3368,6 +3380,269 @@ async function main() {
     !JSON.stringify(modulesRestored.payload).match(/donotleak/),
   );
 
+
+  // --- Social sign-in ------------------------------------------------------
+  //
+  // Google and Apple are configured, switched on and switched off from the
+  // Social sign-in module and nowhere else (§9, §26). Every assertion here is
+  // against the running server: what the admin API stores and refuses, what
+  // the start and callback endpoints do with a method that is off, what the
+  // sign-in page renders, and what the audit log keeps.
+  section("Social sign-in — admin configuration and runtime gate");
+
+  await admin("/api/admin/integrations/oauth", { method: "DELETE" });
+
+  const SOCIAL_ID = "qa-social-signin.apps.googleusercontent.com";
+  const SOCIAL_SECRET = `GOCSPX-qa-${Date.now()}-donotleak`;
+  const { generateKeyPairSync } = await import("node:crypto");
+  const APPLE_P8 = generateKeyPairSync("ec", { namedCurve: "prime256v1" })
+    .privateKey.export({ type: "pkcs8", format: "pem" });
+  const APPLE_P8_LINE = APPLE_P8.split("\n")[1];
+  const APPLE_CONFIG = {
+    appleServiceId: "ca.apluslearn.qa",
+    appleTeamId: "QA1234TEAM",
+    appleKeyId: "QA1234KEY0",
+  };
+  const devCredential = (email) =>
+    Buffer.from(JSON.stringify({ sub: `qa-${email}`, email, email_verified: true })).toString("base64url");
+  const start = async (provider, query = "") => {
+    const client = createClient();
+    const socialRes = await client(`/api/auth/oauth/${provider}${query}`, { raw: true });
+    return { client, socialRes, location: socialRes.headers.get("location") ?? "", cookie: socialRes.headers.get("set-cookie") ?? "" };
+  };
+  const signInPage = async () => (await (await anon("/login", { raw: true })).text());
+  const hasButton = (html, label) => html.includes(`aria-label="Continue with ${label}"`);
+
+  // With nothing configured, a development server keeps the labelled local
+  // identity so the path stays exercisable; production never does (asserted
+  // in the integration suite, which can set APP_ENV).
+  const unconfiguredPage = await signInPage();
+  check(
+    "with nothing configured, a development server labels its test identity as such",
+    !hasButton(unconfiguredPage, "Google") || unconfiguredPage.includes("Development mode"),
+  );
+
+  // Authorization: only an administrator reaches any of it.
+  for (const [who, client, expected] of [["anonymous", anon, 401], ["a parent", parent, 403], ["a tutor", tutor, 403]]) {
+    const read = await client("/api/admin/integrations/oauth");
+    check(`${who} cannot read the social sign-in configuration`, read.status === expected, `status ${read.status}`);
+    const write = await client("/api/admin/integrations/oauth", {
+      method: "PATCH",
+      body: { enabled: true, providers: ["google"], config: { googleClientId: SOCIAL_ID } },
+    });
+    check(`${who} cannot change it or switch a method on`, write.status === expected, `status ${write.status}`);
+  }
+
+  // --- Google: configured but switched off ------------------------------------
+  const googleSaved = await admin("/api/admin/integrations/oauth", {
+    method: "PATCH",
+    body: {
+      enabled: false,
+      provider: "google",
+      providers: ["google"],
+      config: { googleClientId: SOCIAL_ID },
+      secrets: { googleClientSecret: SOCIAL_SECRET },
+    },
+  });
+  const googleModule = googleSaved.payload?.data?.module;
+  check("an administrator can save Google's credentials", googleSaved.ok, JSON.stringify(googleSaved.payload?.error));
+  check("the client secret is reported as stored and never returned",
+    googleModule?.secrets?.googleClientSecret?.set === true && !JSON.stringify(googleSaved.payload).includes(SOCIAL_SECRET));
+  check("with the module off, Google reads as configured but switched off",
+    googleModule?.providerStatus?.find((p) => p.provider === "google")?.state === "DISABLED",
+    JSON.stringify(googleModule?.providerStatus));
+  check("the redirect URI to register is shown",
+    /\/api\/auth\/oauth\/google\/callback$/.test(
+      googleModule?.providerOptions?.find((o) => o.value === "google")?.registration?.[0]?.value ?? "",
+    ));
+
+  const offStart = await start("google");
+  check("disabled Google: the start endpoint sends the person back, not to Google",
+    /\/login\?oauthError=PROVIDER_DISABLED/.test(offStart.location) && !offStart.location.includes("accounts.google.com"),
+    offStart.location);
+  check("and starts no attempt", !offStart.cookie.includes("aplus_oauth_tx=v1."));
+  const offDev = await anon("/api/auth/oauth", {
+    method: "POST",
+    body: { provider: "GOOGLE", credential: devCredential("qa-social-off@example.com") },
+  });
+  check("disabled Google: the development identity is refused too", offDev.status === 403, `status ${offDev.status}`);
+
+  const bothOffPage = await signInPage();
+  check("with Google off, the sign-in page shows no Google button", !hasButton(bothOffPage, "Google"));
+  check("nor an Apple one", !hasButton(bothOffPage, "Apple"));
+  check("and still offers email and password", bothOffPage.includes('type="password"'));
+  const passwordClient = createClient();
+  const passwordUser = await login(passwordClient, "jennifer.chen@example.com").catch(() => null);
+  check("with every social method off, email and password sign-in still works", Boolean(passwordUser?.id));
+
+  // --- validation: nothing half-configured goes live -------------------------
+  const appleIncomplete = await admin("/api/admin/integrations/oauth", {
+    method: "PATCH",
+    body: { enabled: true, providers: ["google", "apple"], config: { appleServiceId: APPLE_CONFIG.appleServiceId } },
+  });
+  const incompleteErrors = appleIncomplete.payload?.error?.details?.fieldErrors ?? {};
+  check("Apple cannot be switched on half-configured", appleIncomplete.status === 422, `status ${appleIncomplete.status}`);
+  check("and the refusal names each missing field",
+    Boolean(incompleteErrors["config.appleTeamId"] && incompleteErrors["secrets.applePrivateKey"]),
+    JSON.stringify(Object.keys(incompleteErrors)));
+  const badKey = await admin("/api/admin/integrations/oauth", {
+    method: "PATCH",
+    body: {
+      providers: ["google", "apple"],
+      config: APPLE_CONFIG,
+      secrets: { applePrivateKey: "-----BEGIN PRIVATE KEY-----\nnotakey\n-----END PRIVATE KEY-----" },
+    },
+  });
+  check("an unusable Apple private key is refused", badKey.status === 422 &&
+    Boolean(badKey.payload?.error?.details?.fieldErrors?.["secrets.applePrivateKey"]));
+  check("and the refusal does not echo the value", !JSON.stringify(badKey.payload).includes("notakey"));
+
+  // --- Google: switched on -------------------------------------------------------
+  const googleOn = await admin("/api/admin/integrations/oauth", {
+    method: "PATCH",
+    body: { enabled: true, providers: ["google"] },
+  });
+  check("Google can be switched on once complete",
+    googleOn.payload?.data?.module?.providerStatus?.find((p) => p.provider === "google")?.state === "ENABLED",
+    JSON.stringify(googleOn.payload?.error ?? googleOn.payload?.data?.module?.providerStatus));
+
+  const onStart = await start("google", "?role=TUTOR&next=%2Fbookings&from=register");
+  const googleUrl = new URL(onStart.location || "about:blank");
+  check("enabled Google: the start endpoint redirects to Google", googleUrl.origin === "https://accounts.google.com",
+    onStart.location.slice(0, 120));
+  check("with this platform's client ID and redirect URI",
+    googleUrl.searchParams.get("client_id") === SOCIAL_ID &&
+      /\/api\/auth\/oauth\/google\/callback$/.test(googleUrl.searchParams.get("redirect_uri") ?? ""));
+  check("carrying state, nonce and an S256 PKCE challenge",
+    Boolean(googleUrl.searchParams.get("state") && googleUrl.searchParams.get("nonce")) &&
+      googleUrl.searchParams.get("code_challenge_method") === "S256");
+  check("and never the client secret",
+    !onStart.location.includes(SOCIAL_SECRET) && !/client_secret/.test(onStart.location));
+  check("the attempt is held in an httpOnly cookie scoped to the sign-in routes",
+    /aplus_oauth_tx=v1\./.test(onStart.cookie) && /HttpOnly/i.test(onStart.cookie) &&
+      /Path=\/api\/auth\/oauth/i.test(onStart.cookie) && /SameSite=lax/i.test(onStart.cookie),
+    onStart.cookie.replace(/=v1\.[^;]+/, "=v1.…"));
+  check("whose contents are opaque — the state is not readable in it",
+    !onStart.cookie.includes(googleUrl.searchParams.get("state")));
+
+  const googleOnPage = await signInPage();
+  check("the sign-in page now shows Continue with Google", hasButton(googleOnPage, "Google"));
+  check("and still not Apple, which is not configured", !hasButton(googleOnPage, "Apple"));
+  check("and ships no credential to the browser — not even the client ID",
+    !googleOnPage.includes(SOCIAL_SECRET) && !googleOnPage.includes(SOCIAL_ID));
+  const registerPage = await (await anon("/register", { raw: true })).text();
+  check("the registration page offers the same method", hasButton(registerPage, "Google"));
+
+  const liveDev = await anon("/api/auth/oauth", {
+    method: "POST",
+    body: { provider: "GOOGLE", credential: devCredential("qa-social-live@example.com") },
+  });
+  check("a real provider can never be satisfied by a self-asserted identity", liveDev.status === 403,
+    `status ${liveDev.status}`);
+
+  // --- the callback's refusals ----------------------------------------------------
+  const forged = await onStart.client("/api/auth/oauth/google/callback?code=qa-code&state=forged-state", { raw: true });
+  const forgedCookies = forged.headers.get("set-cookie") ?? "";
+  check("a callback whose state does not match is refused (login CSRF)",
+    /\/register\?oauthError=STATE_INVALID/.test(forged.headers.get("location") ?? ""),
+    forged.headers.get("location"));
+  check("and issues no session", !/aplus_session=/.test(forgedCookies));
+  check("and consumes the attempt", /aplus_oauth_tx=;/.test(forgedCookies) || /aplus_oauth_tx=(""|);/.test(forgedCookies));
+  const replayed = await onStart.client(
+    `/api/auth/oauth/google/callback?code=qa-code&state=${googleUrl.searchParams.get("state")}`, { raw: true });
+  check("the same attempt cannot be finished after it was consumed",
+    /oauthError=STATE_INVALID/.test(replayed.headers.get("location") ?? ""));
+
+  const socialStranger = await createClient()(`/api/auth/oauth/google/callback?code=qa-code&state=${googleUrl.searchParams.get("state")}`, { raw: true });
+  check("a callback in a browser that never started the attempt is refused",
+    /oauthError=STATE_INVALID/.test(socialStranger.headers.get("location") ?? "") &&
+      !/aplus_session=/.test(socialStranger.headers.get("set-cookie") ?? ""));
+
+  const socialDeclined = await (await start("google")).client("/api/auth/oauth/google/callback?error=access_denied", { raw: true });
+  check("declining on Google's screen reads as cancelled, not as an error",
+    /oauthError=CANCELLED/.test(socialDeclined.headers.get("location") ?? ""));
+
+  const junk = await anon("/login?oauthError=%3Cscript%3Ealert(1)%3C%2Fscript%3E", { raw: true });
+  const junkHtml = await junk.text();
+  check("an unknown error code in the URL renders fixed copy, never the parameter",
+    !junkHtml.includes("<script>alert(1)") &&
+      /We couldn(&#x27;|&#39;|')t complete that sign-in/.test(junkHtml));
+
+  // --- Apple ---------------------------------------------------------------------
+  const appleOn = await admin("/api/admin/integrations/oauth", {
+    method: "PATCH",
+    body: { enabled: true, providers: ["google", "apple"], config: APPLE_CONFIG, secrets: { applePrivateKey: APPLE_P8 } },
+  });
+  check("Apple's complete credentials can be saved and switched on",
+    appleOn.payload?.data?.module?.providerStatus?.find((p) => p.provider === "apple")?.state === "ENABLED",
+    JSON.stringify(appleOn.payload?.error?.details ?? appleOn.payload?.error));
+  check("the private key is never returned", !JSON.stringify(appleOn.payload).includes(APPLE_P8_LINE));
+
+  const appleStart = await start("apple");
+  const appleUrl = new URL(appleStart.location || "about:blank");
+  check("enabled Apple: the start endpoint redirects to Apple, asking for form_post",
+    appleUrl.origin === "https://appleid.apple.com" && appleUrl.searchParams.get("response_mode") === "form_post",
+    appleStart.location.slice(0, 120));
+  check("Apple's attempt cookie survives Apple's cross-site POST back (SameSite=None; Secure)",
+    /SameSite=none/i.test(appleStart.cookie) && /Secure/i.test(appleStart.cookie));
+  const appleForged = await appleStart.client("/api/auth/oauth/apple/callback", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    rawBody: new URLSearchParams({ code: "qa-code", state: "forged-state" }).toString(),
+    raw: true,
+  });
+  check("an Apple callback with a forged state is refused",
+    /oauthError=STATE_INVALID/.test(appleForged.headers.get("location") ?? "") &&
+      !/aplus_session=/.test(appleForged.headers.get("set-cookie") ?? ""));
+  const appleByGet = await anon("/api/auth/oauth/apple/callback?code=x&state=y", { raw: true });
+  check("Apple's callback accepts only the method Apple uses",
+    /oauthError=FAILED/.test(appleByGet.headers.get("location") ?? ""));
+  const bothOnPage = await signInPage();
+  check("the sign-in page shows both methods once both are on",
+    hasButton(bothOnPage, "Google") && hasButton(bothOnPage, "Apple"));
+
+  // Validation makes real calls to Google and Apple with these made-up
+  // credentials, so the only thing to assert is that they are judged — not
+  // accepted — and that nothing sensitive comes back.
+  const socialTest = await admin("/api/admin/integrations/oauth/test", { method: "POST", body: {} });
+  check("the credentials can be validated from the admin panel", socialTest.ok, JSON.stringify(socialTest.payload?.error));
+  check("each method is judged separately",
+    ["google", "apple"].every((p) => socialTest.payload?.data?.result?.results?.some((r) => r.provider === p)));
+  check("made-up credentials are not reported as working", socialTest.payload?.data?.result?.ok === false);
+  check("and the result carries no credential",
+    !JSON.stringify(socialTest.payload).includes(SOCIAL_SECRET) && !JSON.stringify(socialTest.payload).includes(APPLE_P8_LINE));
+
+  // --- switching one off leaves the other --------------------------------------------
+  await admin("/api/admin/integrations/oauth", { method: "PATCH", body: { enabled: true, providers: ["google"] } });
+  const appleOffStart = await start("apple");
+  check("unticking Apple blocks Apple sign-in at the server",
+    /oauthError=PROVIDER_DISABLED/.test(appleOffStart.location), appleOffStart.location);
+  check("while Google keeps working", (await start("google")).location.startsWith("https://accounts.google.com"));
+  const appleOffPage = await signInPage();
+  check("and the page drops only the Apple button", hasButton(appleOffPage, "Google") && !hasButton(appleOffPage, "Apple"));
+
+  await admin("/api/admin/integrations/oauth", { method: "PATCH", body: { enabled: false } });
+  check("switching the module off blocks Google at the server too",
+    /oauthError=PROVIDER_DISABLED/.test((await start("google")).location));
+  const allOffPage = await signInPage();
+  check("and the page shows no social button at all",
+    !hasButton(allOffPage, "Google") && !hasButton(allOffPage, "Apple") && allOffPage.includes('type="password"'));
+
+  // --- audit -------------------------------------------------------------------------
+  const socialAudit = await admin("/api/admin/audit-logs?entityType=Integration&pageSize=50");
+  const socialEvents = (socialAudit.payload?.data?.events ?? []).filter((e) => e.metadata?.module === "oauth");
+  check("social sign-in changes are in the audit log", socialEvents.length > 0);
+  check("switching Apple off is its own entry",
+    socialEvents.some((e) => e.action === "INTEGRATION_DISABLED" && e.metadata?.provider === "apple"));
+  check("key rotations are recorded by field name",
+    socialEvents.some((e) => e.action === "INTEGRATION_SECRET_ROTATED" &&
+      (e.metadata?.rotated ?? []).includes("applePrivateKey")));
+  check("and no credential appears anywhere in them",
+    !JSON.stringify(socialAudit.payload).includes(SOCIAL_SECRET) &&
+      !JSON.stringify(socialAudit.payload).includes(APPLE_P8_LINE));
+
+  const socialCleared = await admin("/api/admin/integrations/oauth", { method: "DELETE" });
+  check("the social sign-in module is cleared down", socialCleared.ok);
 
   // --- Booking authorization ------------------------------------------------
   //

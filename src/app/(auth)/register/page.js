@@ -3,7 +3,8 @@ import { Suspense } from "react";
 import { RegisterForm } from "@/components/auth/RegisterForm";
 import { Spinner } from "@/components/ui";
 import { getAppConfig } from "@/services/settings.service";
-import { enabledOAuthProviders } from "@/lib/auth/oauth-availability";
+import { connectToDatabase } from "@/lib/db/connect";
+import { offeredSignInMethods } from "@/services/external/oauth-provider";
 
 export async function generateMetadata() {
   const { branding } = await getAppConfig();
@@ -14,8 +15,18 @@ export async function generateMetadata() {
   };
 }
 
+/**
+ * Rendered per request: which social sign-in methods appear is read from the
+ * Social sign-in module on every visit, so an administrator switching Google
+ * or Apple on or off changes this page at once, with no deploy (§26).
+ */
+export const dynamic = "force-dynamic";
+
 export default async function RegisterPage() {
-  const { features } = await getAppConfig();
+  // Without a connection the module resolves from the environment alone,
+  // which is the documented fallback rather than an error.
+  await connectToDatabase().catch(() => {});
+  const oauthProviders = await offeredSignInMethods();
   return (
     <>
       <h1 className="text-2xl font-extrabold tracking-tight text-ink-900 sm:text-3xl">
@@ -29,7 +40,7 @@ export default async function RegisterPage() {
       </p>
 
       <Suspense fallback={<Spinner className="mt-8" />}>
-        <RegisterForm oauthProviders={enabledOAuthProviders(features)} />
+        <RegisterForm oauthProviders={oauthProviders} />
       </Suspense>
     </>
   );

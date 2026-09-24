@@ -134,6 +134,20 @@ const SecretMetaSchema = new mongoose.Schema(
  * adapter it passed against — switching from Resend to SMTP must not leave
  * the module still claiming it is connected.
  */
+/**
+ * One platform's verdict inside a `multi` module's test — Google passed,
+ * Apple did not. Same sanitised shape as the module-level result.
+ */
+const ProviderTestResultSchema = new mongoose.Schema(
+  {
+    provider: { type: String, trim: true, maxlength: 60 },
+    ok: { type: Boolean },
+    code: { type: String, trim: true, maxlength: 60 },
+    message: { type: String, trim: true, maxlength: 400 },
+  },
+  { _id: false },
+);
+
 const LastTestSchema = new mongoose.Schema(
   {
     at: { type: Date },
@@ -142,6 +156,8 @@ const LastTestSchema = new mongoose.Schema(
     code: { type: String, trim: true, maxlength: 60 },
     message: { type: String, trim: true, maxlength: 400 },
     provider: { type: String, trim: true, maxlength: 60 },
+    /** Per platform, for a module that runs several at once. */
+    results: { type: [ProviderTestResultSchema], default: undefined },
     actorId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
   },
   { _id: false },
@@ -169,9 +185,9 @@ const IntegrationSchema = new mongoose.Schema(
     /** Which adapter, for a module that has exactly one live at a time. */
     provider: { type: String, trim: true, maxlength: 60 },
     /**
-     * Every adapter an operator has turned on, for a `multi` module.
-     * Calendar is the only one: §41 lets a tutor connect Google or Outlook,
-     * so both may be live at once.
+     * Every adapter an operator has turned on, for a `multi` module —
+     * calendar (a tutor connects Google or Outlook) and social sign-in
+     * (Google, Apple, or both).
      */
     providers: { type: [String], default: undefined },
 

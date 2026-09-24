@@ -285,6 +285,40 @@ export const PROVIDER_FORMAT_RULES = {
         /^MG[0-9a-f]{32}$/i.test(value) ? null : "A Twilio messaging service SID starts with MG and is 34 characters.",
     },
   },
+  /**
+   * Formats Google and Apple both document. Pasting the Apple *App ID*, or a
+   * Key ID into the Team ID box, is the classic mistake here, and the provider
+   * reports all of them as the same unhelpful `invalid_client`.
+   *
+   * Whether the private key actually parses is checked in the service, which
+   * can use `node:crypto`; this file also has to load in a browser.
+   */
+  oauth: {
+    google: {
+      googleClientId: (value) =>
+        /^[\w-]+\.apps\.googleusercontent\.com$/.test(value)
+          ? null
+          : "A Google OAuth client ID ends with .apps.googleusercontent.com.",
+    },
+    apple: {
+      appleServiceId: (value) =>
+        /^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/.test(value)
+          ? null
+          : "A Services ID is a reverse-domain identifier, like ca.apluslearn.web.",
+      appleTeamId: (value) =>
+        /^[A-Z0-9]{10}$/.test(value)
+          ? null
+          : "An Apple Team ID is exactly 10 capital letters and digits, like A1B2C3D4E5.",
+      appleKeyId: (value) =>
+        /^[A-Z0-9]{10}$/.test(value)
+          ? null
+          : "An Apple Key ID is exactly 10 capital letters and digits, like F6G7H8J9K0.",
+      applePrivateKey: (value) =>
+        /-----BEGIN PRIVATE KEY-----[\s\S]+-----END PRIVATE KEY-----/.test(value)
+          ? null
+          : "Paste the whole .p8 file, including the -----BEGIN PRIVATE KEY----- and -----END PRIVATE KEY----- lines.",
+    },
+  },
 };
 
 /** Which Stripe mode a key belongs to, read from the key itself. */

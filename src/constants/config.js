@@ -60,8 +60,9 @@ export const FEATURES = {
   REVIEWS: "reviews",
   ONLINE_LESSONS: "onlineLessons",
   IN_PERSON_LESSONS: "inPersonLessons",
-  GOOGLE_SIGN_IN: "googleSignIn",
-  APPLE_SIGN_IN: "appleSignIn",
+  // Google and Apple sign-in used to be switched here. They are configured —
+  // credentials and on/off together — in the Social sign-in external module,
+  // so there is one place that decides whether a method is offered.
 };
 
 export const FEATURE_LABELS = {
@@ -71,8 +72,6 @@ export const FEATURE_LABELS = {
   [FEATURES.REVIEWS]: "Reviews",
   [FEATURES.ONLINE_LESSONS]: "Online lessons",
   [FEATURES.IN_PERSON_LESSONS]: "In-person lessons",
-  [FEATURES.GOOGLE_SIGN_IN]: "Google sign-in",
-  [FEATURES.APPLE_SIGN_IN]: "Apple sign-in",
 };
 
 /**
@@ -590,8 +589,6 @@ export const DEFAULT_SETTINGS = {
     reviews: true,
     onlineLessons: true,
     inPersonLessons: true,
-    googleSignIn: true,
-    appleSignIn: true,
   },
 
   notifications: {

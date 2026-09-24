@@ -30,9 +30,23 @@ export const INTEGRATION_MODULES = {
   CALENDAR: "calendar",
   SMS: "sms",
   STORAGE: "storage",
+  OAUTH: "oauth",
 };
 
 export const INTEGRATION_MODULE_KEYS = Object.values(INTEGRATION_MODULES);
+
+/**
+ * Where Google and Apple send a person back after they sign in (§9).
+ *
+ * Derived from the deployment's own URL rather than stored, because it is not
+ * the operator's to choose: it is the route that exists in this build. The
+ * admin panel shows the full address so it can be pasted into the provider's
+ * console, and the adapters send exactly the same string — a redirect URI
+ * that differs by one character is refused by both providers.
+ */
+export function signInCallbackPath(provider) {
+  return `/api/auth/oauth/${String(provider).toLowerCase()}/callback`;
+}
 
 /**
  * Field kinds. `secret` is the only one that changes how a value is handled:
@@ -250,6 +264,8 @@ export const INTEGRATION_REGISTRY = {
     envSelector: "CALENDAR_PROVIDER",
     /** Both adapters may be live at once — a tutor picks (§41 Phase 2). */
     multi: true,
+    platformsHint:
+      "Tutors choose from whichever of these you turn on. Each needs its own credentials below.",
     disableWarning:
       "Busy periods stop being pulled in and lessons stop being written out. Existing tutor connections are kept, not deleted, and resume when this is switched back on.",
     testLabel: "Test credentials",
@@ -398,6 +414,110 @@ export const INTEGRATION_REGISTRY = {
       },
     },
   },
+
+  /**
+   * Sign in with Google and Sign in with Apple (§9).
+   *
+   * Both are OAuth 2.0 authorization-code flows run entirely on the server:
+   * the browser is redirected to the provider, the provider redirects back to
+   * `signInCallbackPath()`, and the code is redeemed there with the secret
+   * below. Nothing on this module ever reaches a browser — not even the client
+   * IDs need to, because no provider script runs on the page.
+   *
+   * `multi` because the two are independent: an operator can run either, both
+   * or neither, and turning one off must not touch the other. The field names
+   * are provider-qualified for the reason the calendar module gives.
+   *
+   * Email and password always keep working, whatever this module says.
+   */
+  [INTEGRATION_MODULES.OAUTH]: {
+    key: INTEGRATION_MODULES.OAUTH,
+    label: "Social sign-in",
+    description:
+      "Continue with Google and Continue with Apple on the sign-in and registration pages. Email and password always remain available.",
+    envSelector: "OAUTH_PROVIDER",
+    multi: true,
+    platformsHint:
+      "A method appears on the sign-in page only when it is ticked here, this module is on, and its credentials are complete.",
+    /**
+     * A sign-in method with half its credentials is a button that fails for
+     * every person who presses it, so the service refuses to switch one on
+     * until everything it needs is present — instead of saving it and letting
+     * the first visitor find out.
+     */
+    requireCompleteToEnable: true,
+    /**
+     * The test is a credential probe against the provider's token endpoint
+     * with a code that cannot succeed. Nothing is sent to anybody and no
+     * session is created, so — unlike "Send test SMS" — there is no reason to
+     * make an operator switch sign-in on for the public before checking it.
+     */
+    testWhileDisabled: true,
+    disableWarning:
+      "Nobody can sign in or sign up with Google or Apple. Email and password keep working, and people who only ever used Google or Apple can still get in with Forgot password.",
+    testLabel: "Validate credentials",
+    testFields: [],
+    providers: {
+      google: {
+        label: "Google",
+        description: "An OAuth 2.0 client of type Web application, from the Google Cloud console.",
+        registration: [
+          { label: "Authorised redirect URI", kind: "callback" },
+        ],
+        fields: [
+          f("googleClientId", "Client ID", FIELD_KINDS.TEXT, {
+            env: "GOOGLE_CLIENT_ID",
+            required: true,
+            placeholder: "1234567890-abc.apps.googleusercontent.com",
+            help: "Google Cloud console → APIs & Services → Credentials → your Web application client.",
+          }),
+          f("googleClientSecret", "Client secret", FIELD_KINDS.SECRET, {
+            env: "GOOGLE_CLIENT_SECRET",
+            required: true,
+            placeholder: "GOCSPX-...",
+            hint: SECRET_HINTS.NONE,
+            help: "Shown beside the client ID. Used only by this server to redeem sign-in codes.",
+          }),
+        ],
+      },
+      apple: {
+        label: "Apple",
+        description:
+          "A Services ID and a Sign in with Apple private key, from Certificates, Identifiers & Profiles in your Apple Developer account.",
+        registration: [
+          { label: "Domain", kind: "domain" },
+          { label: "Return URL", kind: "callback" },
+        ],
+        fields: [
+          f("appleServiceId", "Services ID", FIELD_KINDS.TEXT, {
+            env: "APPLE_CLIENT_ID",
+            required: true,
+            placeholder: "ca.apluslearn.web",
+            help: "The Services ID identifier — not the App ID. This is the client ID Apple checks.",
+          }),
+          f("appleTeamId", "Team ID", FIELD_KINDS.TEXT, {
+            env: "APPLE_TEAM_ID",
+            required: true,
+            placeholder: "A1B2C3D4E5",
+            help: "Ten characters, shown under Membership details in your Apple Developer account.",
+          }),
+          f("appleKeyId", "Key ID", FIELD_KINDS.TEXT, {
+            env: "APPLE_KEY_ID",
+            required: true,
+            placeholder: "F6G7H8J9K0",
+            help: "Ten characters, shown beside the key you created with Sign in with Apple enabled.",
+          }),
+          f("applePrivateKey", "Private key (.p8)", FIELD_KINDS.SECRET, {
+            env: "APPLE_PRIVATE_KEY",
+            required: true,
+            placeholder: "-----BEGIN PRIVATE KEY-----",
+            hint: SECRET_HINTS.NONE,
+            help: "Paste the whole contents of the .p8 file Apple let you download once, including the BEGIN and END lines.",
+          }),
+        ],
+      },
+    },
+  },
 };
 
 /** Every field of one provider, or an empty list for an unknown pair. */
@@ -438,7 +558,9 @@ export function activeProvidersFor(moduleKey, { provider, providers } = {}) {
   const known = providersFor(moduleKey);
   if (isMultiModule(moduleKey)) {
     const listed = (providers ?? []).filter((name) => known.includes(name));
-    if (listed.length) return listed;
+    // A list — even an empty one — is what the operator chose. Only a module
+    // that has never had one falls back to its single `provider`.
+    if (listed.length || Array.isArray(providers)) return listed;
   }
   return known.includes(provider) ? [provider] : [];
 }
@@ -490,6 +612,28 @@ export const INTEGRATION_STATUS_LABELS = {
   CONNECTED: "Connected",
   FAILING: "Failing",
   NEEDS_ATTENTION: "Needs attention",
+};
+
+/**
+ * The state of one platform inside a `multi` module.
+ *
+ * The module badge answers "is this module working"; these answer the
+ * narrower question an operator of social sign-in actually has — is *Google*
+ * on, and if not, why not. Four states, because the four need different
+ * actions: nothing entered, entered but off, live, and entered but wrong.
+ */
+export const PROVIDER_STATES = {
+  NOT_CONFIGURED: "NOT_CONFIGURED",
+  DISABLED: "DISABLED",
+  ENABLED: "ENABLED",
+  MISCONFIGURED: "MISCONFIGURED",
+};
+
+export const PROVIDER_STATE_LABELS = {
+  NOT_CONFIGURED: "Not configured",
+  DISABLED: "Configured, switched off",
+  ENABLED: "Enabled",
+  MISCONFIGURED: "Needs attention",
 };
 
 /** Where a module's live configuration came from. */

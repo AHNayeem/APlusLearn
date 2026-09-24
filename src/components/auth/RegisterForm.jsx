@@ -12,6 +12,7 @@ import {
   Button, Field, Input, Checkbox, OptionCard, FormErrorSummary,
 } from "@/components/ui";
 import { OAuthButtons } from "@/components/layout/OAuthButtons";
+import { OAuthErrorNotice } from "./OAuthErrorNotice";
 import { ROLES } from "@/constants";
 
 const ACCOUNT_TYPES = [
@@ -105,6 +106,7 @@ export function RegisterForm({ oauthProviders }) {
 
   return (
     <div className="mt-8">
+      <OAuthErrorNotice />
       <form
         onSubmit={(e) => {
           e.preventDefault();
@@ -288,7 +290,7 @@ export function RegisterForm({ oauthProviders }) {
         </Button>
       </form>
 
-      <OAuthButtons role={form.role} next={next} providers={oauthProviders} />
+      <OAuthButtons role={form.role} next={next} from="register" providers={oauthProviders} />
     </div>
   );
 }

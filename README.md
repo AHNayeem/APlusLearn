@@ -56,15 +56,15 @@ sitting in the admin review queue.
 | `npm run seed:keep` | Add missing seed data without wiping |
 | `npm run storage:check` | Prove the MinIO credentials open the bucket (`--roundtrip` also writes, reads and deletes) |
 | `npm run storage:migrate` | Copy `.storage/**` into the MinIO bucket (`--dry-run` to preview) |
-| `npm run qa` | End-to-end API test suite against a running dev server (1,085 assertions) |
+| `npm run qa` | End-to-end API test suite against a running dev server (1,149 assertions) |
 | `npm run e2e` | Forgot password in a real browser, against a running dev server — needs Playwright, see [docs/PASSWORD_RESET.md](docs/PASSWORD_RESET.md) |
-| `npm run test:integrations` | Provider adapters and DB-backed service rules (1,620 assertions) — no network, no third party |
+| `npm run test:integrations` | Provider adapters and DB-backed service rules (1,719 assertions) — no network, no third party |
 
 `npm run qa` exercises the full parent, tutor and admin journeys over real
 HTTP — including the authorization checks that must *fail*. Run `npm run dev`
 in one terminal and `npm run qa` in another.
 
-`npm run test:integrations` runs the Stripe, Resend, OAuth, geocoding and Zoom
+`npm run test:integrations` runs the Stripe, Resend, Google/Apple sign-in, geocoding and Zoom
 adapters with `fetch` stubbed, webhooks signed with the real signing scheme and
 OAuth tokens signed by a key pair generated in process — plus the business
 rules only a direct call can reach: the dispute lifecycle, curriculum,
@@ -179,7 +179,7 @@ configures the application without a deployment:
 | Social | Facebook, Instagram, LinkedIn, YouTube, X |
 | Footer | Description, copyright line, social / newsletter / app-badge visibility |
 | Marketplace | Commission, cancellation and no-show policy, booking notice and horizon, rate guard rails, payout hold, search radius, review moderation |
-| Features | Messaging, tutor requests, saved tutors, reviews, online / in-person lessons, Google / Apple sign-in |
+| Features | Messaging, tutor requests, saved tutors, reviews, online / in-person lessons (Google / Apple sign-in are switched in **External modules → Social sign-in**) |
 | Notifications | Master email switch plus booking, application, review, payout and announcement categories |
 
 A few properties worth knowing:
@@ -226,7 +226,7 @@ configuration rather than code.
 |---|---|---|---|
 | Payments | `MockPaymentProvider` — models every state transition | **Stripe** — hosted Checkout + Connect Express | `PAYMENT_PROVIDER` |
 | Email | `ConsoleEmailProvider` — prints to the server log and keeps a development mailbox at `/dev/mail` | **Resend** / SMTP | `EMAIL_PROVIDER` |
-| OAuth | Local identity (non-production only) | **Google / Apple** — verified ID tokens | `OAUTH_PROVIDER` |
+| Social sign-in | Local identity (non-production only) | **Google / Apple** — authorization-code flow, configured in **Admin → External modules → Social sign-in** | none required |
 | Geocoding | Bundled Canadian city & FSA table | **Google Geocoding API** | `GEOCODING_PROVIDER` |
 | Meetings | Deterministic room links | **Zoom** — Server-to-Server OAuth | `MEETING_PROVIDER` |
 | File storage | Private local directory under `.storage/` | **MinIO** — S3-compatible object storage | `STORAGE_PROVIDER` |

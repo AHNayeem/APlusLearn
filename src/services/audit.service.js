@@ -61,6 +61,8 @@ function looksLikeSecretValue(value) {
     /^v\d+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\./.test(value) || // our own AES-GCM envelope
     /^(sk|rk)_(live|test)_/.test(value) || // Stripe secret / restricted key
     /^whsec_/.test(value) || // Stripe webhook signing secret
+    /^GOCSPX-/.test(value) || // Google OAuth client secret
+    /-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(value) || // a PEM private key (Apple .p8)
     /^ey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\./.test(value) // a JWT
   );
 }

@@ -8,6 +8,7 @@ import { api } from "@/lib/api/client";
 import { useSubmit } from "@/hooks/useAsync";
 import { Button, Field, Input, Checkbox, FormErrorSummary, Alert } from "@/components/ui";
 import { OAuthButtons } from "@/components/layout/OAuthButtons";
+import { OAuthErrorNotice } from "./OAuthErrorNotice";
 
 export function LoginForm({ oauthProviders }) {
   const router = useRouter();
@@ -26,6 +27,7 @@ export function LoginForm({ oauthProviders }) {
 
   return (
     <div className="mt-8">
+      <OAuthErrorNotice />
       {params.get("registered") && (
         <Alert tone="success" title="Account created" className="mb-5">
           Check your email for a verification link, then sign in below.

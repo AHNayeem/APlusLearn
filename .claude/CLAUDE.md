@@ -27,7 +27,7 @@ to run one area, comment out `section(...)` blocks.
   (`QA_BASE_URL` points it elsewhere) and asserts both success paths and the authorization
   checks that must **fail**.
 - [scripts/integration-tests.mjs](scripts/integration-tests.mjs) imports `src/` directly
-  through a loader that teaches Node the `@/*` alias, and covers the Stripe/Resend/OAuth/
+  through a loader that teaches Node the `@/*` alias, and covers the Stripe/Resend/Google-Apple sign-in/
   geocoding/meeting/storage adapters plus the booking-hold rules. Sections needing MongoDB
   report as skipped without it.
 
@@ -208,8 +208,9 @@ the boot gate, which must not depend on a database round-trip.
 
 ### Admin-configurable modules
 
-Five integrations are operator-editable at `/admin/settings/integrations`: email (Resend or SMTP),
-payment (Stripe), calendar (Google/Outlook app registration), SMS (Twilio), storage (S3/MinIO).
+Six integrations are operator-editable at `/admin/settings/integrations`: email (Resend or SMTP),
+payment (Stripe), calendar (Google/Outlook app registration), SMS (Twilio), storage (S3/MinIO),
+and social sign-in (Google, Apple).
 
 - **One registry drives everything** — [src/constants/integrations.js](src/constants/integrations.js)
   declares each module, provider, field, kind, secrecy and env fallback. The Zod schemas, the
@@ -226,6 +227,8 @@ payment (Stripe), calendar (Google/Outlook app registration), SMS (Twilio), stor
 - **`enabled` has runtime teeth** — payments refuse checkout, email/SMS record a skip, calendar
   sync no-ops, storage refuses uploads **but still serves reads** (breaking retrieval of identity
   documents is an incident, not a setting).
+- **On a `multi` module a stored `providers` list is authoritative, even empty.** Unticking every
+  platform turns them all off; it does not fall back to the environment.
 - `DELETE` hands a module back to the environment; `POST` imports the environment's values.
 - Permission is `ADMIN_INTEGRATION_MANAGE`, held apart from `ADMIN_SETTINGS_MANAGE`.
 
@@ -234,6 +237,18 @@ Two integrations are shaped slightly differently and it matters:
 - **Meeting links** may have several adapters live at once, because §27 lets a learner pick a
   platform per booking. `MEETING_PROVIDER` takes a comma-separated list and
   `getMeetingProvider(provider)` takes the `MEETING_PROVIDERS` value stored on the booking.
+- **Social sign-in** (`oauth`) is a server-side authorization-code flow, not a browser SDK:
+  `/api/auth/oauth/[provider]` → provider → `/api/auth/oauth/[provider]/callback` (Google GET,
+  Apple form_post POST). `signInAvailability()` in
+  [src/services/external/oauth-provider.js](src/services/external/oauth-provider.js) is the single
+  answer to "is this method offered" for the pages *and* the endpoints; a method is live only when
+  the module is on, the provider is ticked and its fields are complete, and the service refuses to
+  switch one on otherwise. State/nonce/PKCE live in the encrypted, path-scoped `aplus_oauth_tx`
+  cookie; the redirect URI comes from `NEXT_PUBLIC_APP_URL`, never the request. Account rules stay
+  in `signInWithIdentity()` in `auth.service`. `POST /api/auth/oauth` is the development identity
+  only — refused in production and whenever a real provider is configured. The env layer marks
+  `oauth` `additive`, so it can never stop a production boot. See
+  [docs/INTEGRATIONS.md §3](docs/INTEGRATIONS.md).
 - **Storage** has four scopes (`documents`, `branding`, `avatars`, `attachments`) and never
   returns a URL — bytes are fetched server-side and streamed through an authorised route. The
   scope decides the folder, so a key lifted from one addresses nothing in another.

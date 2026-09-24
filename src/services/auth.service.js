@@ -12,7 +12,7 @@ import { createToken, hashToken } from "@/lib/auth/tokens";
 import { AppError, ConflictError, NotFoundError, AuthenticationError } from "@/lib/api/errors";
 import { toPlain } from "@/lib/utils/serialize";
 import { sendEmail, brandedEmailTemplates } from "./external/email-provider";
-import { getOAuthProvider } from "./external/oauth-provider";
+import { DevOAuthProvider } from "./external/oauth-provider";
 import { recordAudit } from "./audit.service";
 import { attributeReferral } from "./referral.service";
 import { renderableImageSrc } from "@/lib/images/remote";
@@ -234,14 +234,13 @@ export async function login({ email, password }, { request } = {}) {
  *   exactly as they are. RBAC stays where it lives (§10).
  * - **Protected fields are not overwritten.** The provider may supply a name
  *   or picture, and they are used only to fill a blank.
+ *
+ * Both ways in end here: the real authorization-code flow
+ * (`oauth-signin.service`) and the development identity below, so there is
+ * exactly one set of account rules for social sign-in.
  */
-export async function oauthSignIn({ provider, credential, role, nonce, profile }, { request } = {}) {
-  const identity = await getOAuthProvider().verifyCredential({
-    provider,
-    credential,
-    expectedNonce: nonce,
-    profile,
-  });
+export async function signInWithIdentity(identity, { role, request } = {}) {
+  const { provider } = identity;
 
   // Look the provider identity up first: it is the strong key.
   let user = await User.findOne({
@@ -355,6 +354,19 @@ export async function oauthSignIn({ provider, credential, role, nonce, profile }
   }
 
   return toPlain({ ...user.toObject(), passwordHash: undefined });
+}
+
+/**
+ * The development sign-in identity (§38).
+ *
+ * The route calls this only when `signInAvailability()` reports a provider in
+ * `development` mode — nothing configured, not production — and the provider
+ * refuses on its own in production as a second guard. Real sign-in never
+ * comes through here.
+ */
+export async function developmentOAuthSignIn({ provider, credential, role, profile }, { request } = {}) {
+  const identity = await new DevOAuthProvider().verifyCredential({ provider, credential, profile });
+  return signInWithIdentity(identity, { role, request });
 }
 
 // Forgot password lives in `password-reset.service.js`: it is a flow of its

@@ -151,6 +151,7 @@ async function runSections() {
   await checkoutReturnTests();
   await emailTests();
   await oauthTests();
+  await socialSignInAdapterTests();
   await geocodingTests();
   await meetingTests();
   await storageTests();
@@ -172,6 +173,7 @@ async function runSections() {
   await avatarFallbackTests();
   await avatarTests();
   await integrationModuleTests();
+  await socialSignInModuleTests();
   await disputeTests();
   await curriculumTests();
   await auditLogTests();
@@ -1758,6 +1760,205 @@ async function oauthTests() {
   );
   check("an unconfigured provider says so instead of trusting the token",
     missing.threw && missing.error.code === "PROVIDER_UNAVAILABLE");
+}
+
+// --- 5b. Social sign-in adapters (§9) --------------------------------------
+
+/**
+ * The Google and Apple authorization-code adapters, against stubbed token
+ * endpoints and an in-process key set.
+ *
+ * What matters: the URL a browser is sent to carries no secret and does carry
+ * state, nonce and (for Google) PKCE; the code is redeemed with the secret and
+ * the verifier; the ID token that comes back is verified with the nonce; the
+ * credential probe reads `invalid_grant` as success and `invalid_client` as
+ * failure; and Apple's client secret is a correctly-formed ES256 JWT.
+ */
+async function socialSignInAdapterTests() {
+  section("Social sign-in — Google and Apple authorization-code adapters");
+
+  const { SignJWT, generateKeyPair, decodeJwt, decodeProtectedHeader, jwtVerify } = await import("jose");
+  const {
+    GoogleSignInProvider, AppleSignInProvider, normalizePrivateKey, checkApplePrivateKey,
+  } = await import("@/services/external/oauth-provider");
+
+  const { publicKey, privateKey } = await generateKeyPair("RS256");
+  const jwks = { GOOGLE: async () => publicKey, APPLE: async () => publicKey };
+  const idToken = (claims, { issuer, audience }) =>
+    new SignJWT({ email: "learner@example.com", email_verified: true, ...claims })
+      .setProtectedHeader({ alg: "RS256" })
+      .setSubject(claims.sub ?? "sub-1")
+      .setIssuer(issuer)
+      .setAudience(audience)
+      .setIssuedAt()
+      .setExpirationTime("10m")
+      .sign(privateKey);
+
+  // --- Google ---------------------------------------------------------------
+  const GOOGLE_ID = "123-abc.apps.googleusercontent.com";
+  const GOOGLE_SECRET = "GOCSPX-integration-test-secret";
+  const REDIRECT = "https://test.apluslearn.ca/api/auth/oauth/google/callback";
+
+  const google = new GoogleSignInProvider({ clientId: GOOGLE_ID, clientSecret: GOOGLE_SECRET, jwks });
+  const authUrl = new URL(google.authorizationUrl({
+    redirectUri: REDIRECT, state: "state-1", nonce: "nonce-1", codeChallenge: "challenge-1",
+  }));
+  check("Google's authorization URL is Google's",
+    authUrl.origin === "https://accounts.google.com");
+  check("it asks for a code, with the exact redirect URI, state and nonce",
+    authUrl.searchParams.get("response_type") === "code" &&
+      authUrl.searchParams.get("redirect_uri") === REDIRECT &&
+      authUrl.searchParams.get("state") === "state-1" &&
+      authUrl.searchParams.get("nonce") === "nonce-1");
+  check("it carries an S256 PKCE challenge",
+    authUrl.searchParams.get("code_challenge") === "challenge-1" &&
+      authUrl.searchParams.get("code_challenge_method") === "S256");
+  check("and never the client secret", !authUrl.toString().includes(GOOGLE_SECRET) &&
+    !/client_secret/.test(authUrl.toString()));
+
+  const googleToken = await idToken({ nonce: "nonce-1", sub: "g-1" }, {
+    issuer: "https://accounts.google.com", audience: GOOGLE_ID,
+  });
+  const googleFetch = stubFetch(() => ({ body: { id_token: googleToken, access_token: "a" } }));
+  const googleLive = new GoogleSignInProvider({
+    clientId: GOOGLE_ID, clientSecret: GOOGLE_SECRET, jwks, fetchImpl: googleFetch,
+  });
+  const identity = await googleLive.exchangeCode({
+    code: "code-1", redirectUri: REDIRECT, codeVerifier: "verifier-1", expectedNonce: "nonce-1",
+  });
+  const sent = new URLSearchParams(googleFetch.calls[0].options.body);
+  check("the code is redeemed at Google's token endpoint",
+    googleFetch.calls[0].url === "https://oauth2.googleapis.com/token");
+  check("with the secret, the verifier and the same redirect URI — server to server",
+    sent.get("client_secret") === GOOGLE_SECRET && sent.get("code_verifier") === "verifier-1" &&
+      sent.get("redirect_uri") === REDIRECT && sent.get("grant_type") === "authorization_code");
+  check("and the verified identity comes back",
+    identity.provider === "GOOGLE" && identity.providerAccountId === "g-1" && identity.emailVerified);
+
+  const wrongNonce = await throws(() => googleLive.exchangeCode({
+    code: "c", redirectUri: REDIRECT, codeVerifier: "v", expectedNonce: "a-different-attempt",
+  }));
+  check("an ID token minted for another attempt is REFUSED (nonce)",
+    wrongNonce.threw && wrongNonce.error.code === "NONCE_MISMATCH");
+
+  const otherAudience = new GoogleSignInProvider({
+    clientId: GOOGLE_ID, clientSecret: GOOGLE_SECRET, jwks,
+    fetchImpl: stubFetch(async () => ({
+      body: { id_token: await idToken({ nonce: "n" }, { issuer: "https://accounts.google.com", audience: "someone-else" }) },
+    })),
+  });
+  const audience = await throws(() => otherAudience.exchangeCode({ code: "c", redirectUri: REDIRECT, codeVerifier: "v", expectedNonce: "n" }));
+  check("a token issued to another client is REFUSED (audience)",
+    audience.threw && audience.error.code === "INVALID_CREDENTIAL");
+
+  const expiredCode = new GoogleSignInProvider({
+    clientId: GOOGLE_ID, clientSecret: GOOGLE_SECRET, jwks,
+    fetchImpl: stubFetch(() => ({ status: 400, body: { error: "invalid_grant", error_description: "Bad Request" } })),
+  });
+  const grant = await throws(() => expiredCode.exchangeCode({ code: "c", redirectUri: REDIRECT, codeVerifier: "v", expectedNonce: "n" }));
+  check("a used or expired code is refused with a retry message, not the provider's text",
+    grant.threw && grant.error.code === "CODE_REJECTED" && !/Bad Request/.test(grant.error.message));
+
+  const badClient = new GoogleSignInProvider({
+    clientId: GOOGLE_ID, clientSecret: "wrong",
+    fetchImpl: stubFetch(() => ({ status: 401, body: { error: "invalid_client" } })),
+  });
+  const misconfigured = await throws(() => badClient.exchangeCode({ code: "c", redirectUri: REDIRECT, codeVerifier: "v", expectedNonce: "n" }));
+  check("rejected client credentials surface as a platform fault, not the visitor's",
+    misconfigured.threw && misconfigured.error.code === "PROVIDER_MISCONFIGURED" && misconfigured.error.status === 503);
+
+  const probeOk = await new GoogleSignInProvider({
+    clientId: GOOGLE_ID, clientSecret: GOOGLE_SECRET,
+    fetchImpl: stubFetch(() => ({ status: 400, body: { error: "invalid_grant" } })),
+  }).verify();
+  check("the Google credential probe reads invalid_grant as ACCEPTED", probeOk.ok && probeOk.code === "OK");
+  check("and says nothing of the secret", !probeOk.message.includes(GOOGLE_SECRET));
+  const probeBad = await badClient.verify();
+  check("and invalid_client as REJECTED", !probeBad.ok && probeBad.code === "INVALID_CREDENTIALS");
+  const probeDown = await new GoogleSignInProvider({
+    clientId: GOOGLE_ID, clientSecret: GOOGLE_SECRET,
+    fetchImpl: async () => { throw new Error("getaddrinfo ENOTFOUND"); },
+  }).verify();
+  check("an unreachable Google is reported as unreachable", !probeDown.ok && probeDown.code === "UNREACHABLE");
+
+  // --- Apple ----------------------------------------------------------------
+  const { privateKey: p8 } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const P8 = p8.export({ type: "pkcs8", format: "pem" });
+  const { privateKey: rsaPrivate } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const RSA_PEM = rsaPrivate.export({ type: "pkcs8", format: "pem" });
+
+  check("a pasted .p8 key round-trips through normalisation", normalizePrivateKey(P8) !== null);
+  check("with its line breaks stripped by a single-line input",
+    checkApplePrivateKey(P8.replace(/\n/g, "")) === null);
+  check("or written with literal \\n from an .env file",
+    checkApplePrivateKey(P8.replace(/\n/g, "\\n")) === null);
+  check("a truncated key is refused with a sentence, not a stack",
+    typeof checkApplePrivateKey(P8.slice(0, 80) + "\n-----END PRIVATE KEY-----") === "string");
+  check("a key that is not P-256 is refused", typeof checkApplePrivateKey(RSA_PEM) === "string");
+  check("and the refusal quotes no part of the key",
+    !checkApplePrivateKey(RSA_PEM).includes(RSA_PEM.split("\n")[1]));
+
+  const SERVICE = "ca.apluslearn.web";
+  const APPLE_REDIRECT = "https://test.apluslearn.ca/api/auth/oauth/apple/callback";
+  const apple = new AppleSignInProvider({
+    serviceId: SERVICE, teamId: "A1B2C3D4E5", keyId: "F6G7H8J9K0", privateKey: P8, jwks,
+  });
+  const appleUrl = new URL(apple.authorizationUrl({ redirectUri: APPLE_REDIRECT, state: "s", nonce: "n" }));
+  check("Apple's authorization URL asks for form_post with name and email",
+    appleUrl.origin === "https://appleid.apple.com" &&
+      appleUrl.searchParams.get("response_mode") === "form_post" &&
+      appleUrl.searchParams.get("scope") === "name email" &&
+      appleUrl.searchParams.get("client_id") === SERVICE);
+  check("and carries no key material", !appleUrl.toString().includes("PRIVATE"));
+
+  const secret = await apple.clientSecret();
+  const header = decodeProtectedHeader(secret);
+  const claims = decodeJwt(secret);
+  check("Apple's client secret is an ES256 JWT naming the Key ID",
+    header.alg === "ES256" && header.kid === "F6G7H8J9K0");
+  check("issued by the Team, for the Services ID, to Apple",
+    claims.iss === "A1B2C3D4E5" && claims.sub === SERVICE && claims.aud === "https://appleid.apple.com");
+  check("and short-lived", claims.exp - claims.iat <= 300);
+  const { createPublicKey } = await import("node:crypto");
+  check("and genuinely signed by the .p8 key",
+    Boolean(await jwtVerify(secret, createPublicKey(p8)).catch(() => null)));
+
+  const appleToken = await idToken({ nonce: "n", sub: "a-1", email_verified: "true", is_private_email: "true" }, {
+    issuer: "https://appleid.apple.com", audience: SERVICE,
+  });
+  const appleFetch = stubFetch(() => ({ body: { id_token: appleToken } }));
+  const appleLive = new AppleSignInProvider({
+    serviceId: SERVICE, teamId: "A1B2C3D4E5", keyId: "F6G7H8J9K0", privateKey: P8, jwks, fetchImpl: appleFetch,
+  });
+  const appleIdentity = await appleLive.exchangeCode({
+    code: "c", redirectUri: APPLE_REDIRECT, expectedNonce: "n", profile: { firstName: "Sam", lastName: "Lee" },
+  });
+  const appleSent = new URLSearchParams(appleFetch.calls[0].options.body);
+  check("Apple's code is redeemed at Apple with a signed client secret",
+    appleFetch.calls[0].url === "https://appleid.apple.com/auth/token" &&
+      appleSent.get("client_secret")?.split(".").length === 3 &&
+      appleSent.get("redirect_uri") === APPLE_REDIRECT);
+  check("the private key itself never leaves the server", !appleFetch.calls[0].options.body.includes("PRIVATE"));
+  check("Apple's identity arrives with its one-time name and relay flag",
+    appleIdentity.provider === "APPLE" && appleIdentity.firstName === "Sam" && appleIdentity.isPrivateRelay);
+
+  const appleProbe = await new AppleSignInProvider({
+    serviceId: SERVICE, teamId: "A1B2C3D4E5", keyId: "F6G7H8J9K0", privateKey: P8,
+    fetchImpl: stubFetch(() => ({ status: 400, body: { error: "invalid_grant" } })),
+  }).verify({ redirectUri: APPLE_REDIRECT });
+  check("the Apple probe reads invalid_grant as ACCEPTED", appleProbe.ok);
+  const appleRejected = await new AppleSignInProvider({
+    serviceId: SERVICE, teamId: "A1B2C3D4E5", keyId: "F6G7H8J9K0", privateKey: P8,
+    fetchImpl: stubFetch(() => ({ status: 400, body: { error: "invalid_client" } })),
+  }).verify({ redirectUri: APPLE_REDIRECT });
+  check("and invalid_client as REJECTED, naming what to check",
+    !appleRejected.ok && appleRejected.code === "INVALID_CREDENTIALS" && /Team ID/.test(appleRejected.message));
+  const appleBadKey = await new AppleSignInProvider({
+    serviceId: SERVICE, teamId: "A1B2C3D4E5", keyId: "F6G7H8J9K0", privateKey: "not a key",
+    fetchImpl: stubFetch(() => { throw new Error("must not be called"); }),
+  }).verify({ redirectUri: APPLE_REDIRECT });
+  check("an unusable key fails before anything is sent to Apple",
+    !appleBadKey.ok && appleBadKey.code === "INVALID_KEY");
 }
 
 // --- 6. Geocoding ----------------------------------------------------------
@@ -8444,6 +8645,326 @@ async function integrationModuleTests() {
 
   // --- the resolver, against a real database --------------------------------
   await integrationResolverTests();
+}
+
+/**
+ * Social sign-in as an operator configures it and a visitor uses it (§9, §26).
+ *
+ * Runs the real services against a real database: the admin save rules
+ * (nothing half-configured can be switched on, a bad key is refused, secrets
+ * are never read back), the runtime gate every surface shares, and the
+ * begin → callback → session flow — including every way the callback must
+ * refuse. Google's token endpoint and key set are stubbed on `fetch`; nothing
+ * leaves this process.
+ */
+async function socialSignInModuleTests() {
+  section("Social sign-in — admin configuration, runtime gate and callback");
+
+  const uri = process.env.MONGODB_URI;
+  if (!uri) return skip("social sign-in module", "MONGODB_URI is not set");
+  try {
+    await mongoose.connect(uri, { serverSelectionTimeoutMS: 2500 });
+  } catch {
+    return skip("social sign-in module", "MongoDB is not reachable");
+  }
+
+  const { SignJWT, generateKeyPair, exportJWK } = await import("jose");
+  const { Integration, User } = await import("@/models");
+  const { invalidateIntegrationCache } = await import("@/lib/config/integrations");
+  const { encryptSecret } = await import("@/lib/security/crypto");
+  const { configurationErrors, configurationWarnings } = await import("@/lib/config/env");
+  const svc = await import("@/services/integration.service");
+  const { signInAvailability } = await import("@/services/external/oauth-provider");
+  const flow = await import("@/services/oauth-signin.service");
+
+  const GOOGLE_ID = "987-social.apps.googleusercontent.com";
+  const GOOGLE_SECRET = "GOCSPX-module-test-secret-value";
+  const SERVICE = "ca.apluslearn.signin";
+  const { privateKey: p8 } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const P8 = p8.export({ type: "pkcs8", format: "pem" });
+  const P8_BODY = P8.split("\n")[1];
+  const APPLE = {
+    config: { appleServiceId: SERVICE, appleTeamId: "A1B2C3D4E5", appleKeyId: "F6G7H8J9K0" },
+    secrets: { applePrivateKey: P8 },
+  };
+  const EMAIL = `social-signin-${randomUUID().slice(0, 8)}@example.test`;
+  const actor = { id: new mongoose.Types.ObjectId() };
+
+  const ENV_KEYS = [
+    "APP_ENV", "OAUTH_PROVIDER", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET",
+    "APPLE_CLIENT_ID", "APPLE_TEAM_ID", "APPLE_KEY_ID", "APPLE_PRIVATE_KEY",
+  ];
+  const savedEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
+  const setEnv = (vars) => {
+    for (const [k, v] of Object.entries(vars)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    invalidateIntegrationCache("oauth");
+  };
+  const withEnv = async (vars, fn) => {
+    const before = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]));
+    setEnv(vars);
+    try {
+      return await fn();
+    } finally {
+      setEnv(before);
+    }
+  };
+  const reset = async () => {
+    await Integration.deleteOne({ module: "oauth" });
+    invalidateIntegrationCache("oauth");
+  };
+  const availability = async () =>
+    Object.fromEntries((await signInAvailability()).map((a) => [a.provider, a]));
+  const statusOf = (module, name) => module.providerStatus.find((p) => p.provider === name);
+  const save = (body) => svc.updateIntegrationModule("oauth", body, actor);
+
+  // A stand-in for Google: its token endpoint and its published key set.
+  const { publicKey, privateKey } = await generateKeyPair("RS256");
+  const jwk = { ...(await exportJWK(publicKey)), kid: "social-test", alg: "RS256", use: "sig" };
+  const realFetch = globalThis.fetch;
+  let tokenCalls = 0;
+  let nextIdToken = null;
+  const googleStub = async (url) => {
+    const target = String(url);
+    const respond = (status, body) => ({ ok: status < 400, status, json: async () => body, text: async () => JSON.stringify(body) });
+    if (target === "https://www.googleapis.com/oauth2/v3/certs") return respond(200, { keys: [jwk] });
+    if (target === "https://oauth2.googleapis.com/token") {
+      tokenCalls += 1;
+      return nextIdToken ? respond(200, { id_token: nextIdToken }) : respond(400, { error: "invalid_grant" });
+    }
+    if (target === "https://appleid.apple.com/auth/token") return respond(400, { error: "invalid_client" });
+    return respond(500, {});
+  };
+  const googleIdToken = (nonce, sub = "google-social-1") =>
+    new SignJWT({ email: EMAIL, email_verified: true, given_name: "Riya", family_name: "Patel", nonce })
+      .setProtectedHeader({ alg: "RS256", kid: "social-test" })
+      .setSubject(sub)
+      .setIssuer("https://accounts.google.com")
+      .setAudience(GOOGLE_ID)
+      .setIssuedAt()
+      .setExpirationTime("5m")
+      .sign(privateKey);
+
+  try {
+    setEnv({
+      APP_ENV: "development", OAUTH_PROVIDER: undefined, GOOGLE_CLIENT_ID: undefined,
+      GOOGLE_CLIENT_SECRET: undefined, APPLE_CLIENT_ID: undefined, APPLE_TEAM_ID: undefined,
+      APPLE_KEY_ID: undefined, APPLE_PRIVATE_KEY: undefined,
+    });
+    await reset();
+
+    // --- nothing configured --------------------------------------------------
+    let a = await availability();
+    check("with nothing configured anywhere, development offers the local test identity",
+      a.GOOGLE.mode === "development" && a.APPLE.mode === "development");
+    await withEnv({ APP_ENV: "production" }, async () => {
+      const prod = await availability();
+      check("production offers NO social sign-in until an administrator configures it",
+        !prod.GOOGLE.available && !prod.APPLE.available && prod.GOOGLE.reason === "NOT_CONFIGURED");
+      check("and an unconfigured social sign-in never stops production from booting",
+        !configurationErrors().some((e) => /Social sign-in/.test(e)));
+    });
+    await withEnv({ APP_ENV: "production", OAUTH_PROVIDER: "google", GOOGLE_CLIENT_ID: GOOGLE_ID }, async () => {
+      check("a half-configured environment is a boot notice, not a boot failure",
+        !configurationErrors().some((e) => /Social sign-in/.test(e)) &&
+          configurationWarnings().some((w) => /GOOGLE_CLIENT_SECRET/.test(w)));
+    });
+
+    // --- Google configuration can be created -------------------------------------
+    const created = await save({
+      enabled: false, provider: "google", providers: ["google"],
+      config: { googleClientId: GOOGLE_ID }, secrets: { googleClientSecret: GOOGLE_SECRET },
+    });
+    check("Google's configuration can be saved from the admin service", created.module.module === "oauth");
+    check("and reads back without its secret anywhere in the payload",
+      !JSON.stringify(created.module).includes(GOOGLE_SECRET));
+    check("only the fact that it is stored", created.module.secrets.googleClientSecret.set === true &&
+      created.module.secrets.googleClientSecret.last4 === null);
+    const raw = await Integration.findOne({ module: "oauth" }).select("+secrets").lean();
+    check("the client secret is encrypted at rest",
+      raw.secrets.googleClientSecret.startsWith("v1.") && !raw.secrets.googleClientSecret.includes(GOOGLE_SECRET));
+    check("with the module off, Google reads as configured but switched off",
+      statusOf(created.module, "google").state === "DISABLED");
+    check("and Apple as not configured", statusOf(created.module, "apple").state === "NOT_CONFIGURED");
+    check("the redirect URI to register is shown, derived from the app URL",
+      created.module.providerOptions.find((o) => o.value === "google").registration[0].value ===
+        "https://test.apluslearn.ca/api/auth/oauth/google/callback");
+    a = await availability();
+    check("a disabled Google is not offered", !a.GOOGLE.available && a.GOOGLE.reason === "DISABLED");
+    check("and once anything is saved, development stops offering the test identity",
+      !a.APPLE.available);
+
+    const refused = await throws(() => flow.beginSignIn("GOOGLE", {}));
+    check("disabled Google BLOCKS a sign-in from starting",
+      refused.threw && refused.error.code === "PROVIDER_DISABLED");
+
+    // --- Google can be enabled ------------------------------------------------------
+    const enabled = await save({ enabled: true, providers: ["google"] });
+    check("enabling Google records it as a change", enabled.changes.enabled?.to === true);
+    a = await availability();
+    check("enabled Google is offered, for real", a.GOOGLE.available && a.GOOGLE.mode === "live");
+    check("and Apple, unticked, is not", !a.APPLE.available);
+    check("Google now reads as enabled", statusOf(enabled.module, "google").state === "ENABLED");
+
+    // --- incomplete or invalid configuration cannot be enabled ------------------
+    const incomplete = await throws(() => save({
+      enabled: true, providers: ["google", "apple"], config: { appleServiceId: SERVICE },
+    }));
+    check("Apple cannot be switched on half-configured",
+      incomplete.threw && incomplete.error.code === "VALIDATION_ERROR");
+    const errors = incomplete.error.details?.fieldErrors ?? {};
+    check("and each missing value is named against its own field",
+      Boolean(errors["config.appleTeamId"] && errors["config.appleKeyId"] && errors["secrets.applePrivateKey"]));
+    a = await availability();
+    check("the refused save changed nothing", a.GOOGLE.available && !a.APPLE.available);
+
+    const badKey = await throws(() => save({
+      enabled: true, providers: ["google", "apple"],
+      config: APPLE.config, secrets: { applePrivateKey: "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----" },
+    }));
+    check("an unusable Apple key is refused at save time",
+      badKey.threw && Boolean(badKey.error.details?.fieldErrors?.["secrets.applePrivateKey"]));
+    const badTeam = await throws(() => save({
+      providers: ["google", "apple"], config: { ...APPLE.config, appleTeamId: "team-1" },
+    }));
+    check("a Team ID in the wrong format is refused",
+      badTeam.threw && Boolean(badTeam.error.details?.fieldErrors?.["config.appleTeamId"]));
+    const badGoogleId = await throws(() => save({ providers: ["google"], config: { googleClientId: "not-a-client-id" } }));
+    check("a Google client ID in the wrong format is refused",
+      badGoogleId.threw && Boolean(badGoogleId.error.details?.fieldErrors?.["config.googleClientId"]));
+
+    // --- Apple configuration, enabled ----------------------------------------------
+    const both = await save({ enabled: true, providers: ["google", "apple"], ...APPLE });
+    check("Apple's complete configuration can be saved and switched on",
+      statusOf(both.module, "apple").state === "ENABLED");
+    check("the audit change names Apple as switched on", both.changes.providersEnabled?.includes("apple"));
+    check("and records the key rotation by name only",
+      both.changes.secretsRotated?.includes("applePrivateKey") && !JSON.stringify(both.changes).includes(P8_BODY));
+    check("the private key never appears in the admin payload", !JSON.stringify(both.module).includes(P8_BODY));
+    check("Apple's domain and return URL are shown to register",
+      both.module.providerOptions.find((o) => o.value === "apple").registration
+        .map((r) => r.value).join(" ") === "test.apluslearn.ca https://test.apluslearn.ca/api/auth/oauth/apple/callback");
+    a = await availability();
+    check("enabled Apple is offered", a.APPLE.available && a.APPLE.mode === "live");
+
+    const appleStart = await flow.beginSignIn("APPLE", { role: "PARENT" });
+    check("an enabled Apple sign-in can start, towards Apple",
+      new URL(appleStart.url).origin === "https://appleid.apple.com");
+
+    // --- disabling one leaves the other ---------------------------------------------
+    const appleOff = await save({ enabled: true, providers: ["google"] });
+    a = await availability();
+    check("unticking Apple disables Apple", !a.APPLE.available && a.APPLE.reason === "DISABLED");
+    check("and leaves Google exactly as it was", a.GOOGLE.available);
+    check("Apple's credentials are kept, reading as configured but off",
+      statusOf(appleOff.module, "apple").state === "DISABLED");
+    check("the audit change names Apple as switched off", appleOff.changes.providersDisabled?.includes("apple"));
+    const appleRefused = await throws(() => flow.beginSignIn("APPLE", {}));
+    check("disabled Apple BLOCKS a sign-in from starting",
+      appleRefused.threw && appleRefused.error.code === "PROVIDER_DISABLED");
+
+    await save({ enabled: true, providers: [] });
+    await withEnv({ OAUTH_PROVIDER: "google", GOOGLE_CLIENT_ID: GOOGLE_ID, GOOGLE_CLIENT_SECRET: "env-secret" }, async () => {
+      const none = await availability();
+      check("unticking everything turns everything off — the environment does not quietly take over",
+        !none.GOOGLE.available && !none.APPLE.available);
+    });
+
+    await save({ enabled: false, providers: ["google"] });
+    a = await availability();
+    check("switching the module off disables every method", !a.GOOGLE.available && !a.APPLE.available);
+
+    // --- validation without a session, while switched off --------------------------
+    await save({ providers: ["google", "apple"], ...APPLE });
+    globalThis.fetch = googleStub;
+    const test = await svc.testIntegrationModule("oauth", {}, actor);
+    check("credentials can be validated before the module is switched on", Array.isArray(test.results));
+    check("Google's probe passes on invalid_grant",
+      test.results.find((r) => r.provider === "google")?.ok === true);
+    check("Apple's fails on invalid_client, and the module result says so",
+      test.results.find((r) => r.provider === "apple")?.ok === false && test.ok === false);
+    const afterTest = await svc.getIntegrationModule("oauth");
+    check("the failing platform reads as needing attention",
+      statusOf(afterTest, "apple").state === "MISCONFIGURED");
+    check("the result never carries a credential",
+      !JSON.stringify(test).includes(GOOGLE_SECRET) && !JSON.stringify(afterTest).includes(P8_BODY));
+    check("validation created no user", (await User.countDocuments({ email: EMAIL })) === 0);
+
+    // --- the flow: state, nonce, PKCE, and the callback's refusals ------------------
+    await save({ enabled: true, providers: ["google"] });
+    const started = await flow.beginSignIn("GOOGLE", { role: "PARENT", next: "/bookings", from: "register" });
+    const startUrl = new URL(started.url);
+    const tx = flow.readSignInTransaction(started.transaction);
+    check("a started sign-in goes to Google with this deployment's redirect URI",
+      startUrl.origin === "https://accounts.google.com" &&
+        startUrl.searchParams.get("redirect_uri") === "https://test.apluslearn.ca/api/auth/oauth/google/callback");
+    check("the transaction carries the state and nonce the URL does",
+      tx?.s === startUrl.searchParams.get("state") && tx?.n === startUrl.searchParams.get("nonce"));
+    check("the PKCE challenge is the S256 of the verifier it keeps",
+      startUrl.searchParams.get("code_challenge") ===
+        (await import("node:crypto")).createHash("sha256").update(tx.v).digest("base64url"));
+    check("the browser's copy is opaque — neither state nor verifier readable in it",
+      !started.transaction.includes(tx.s) && !started.transaction.includes(tx.v));
+    check("and it expires within ten minutes", started.maxAge <= 600);
+    check("a tampered transaction is not accepted",
+      flow.readSignInTransaction(started.transaction.slice(0, -4) + "AAAA") === null);
+    const stale = encryptSecret(JSON.stringify({ ...tx, e: Math.floor(Date.now() / 1000) - 1 }), "aplus:oauth-signin");
+    check("an expired transaction is not accepted", flow.readSignInTransaction(stale) === null);
+    check("a transaction encrypted under another purpose is not accepted",
+      flow.readSignInTransaction(encryptSecret(JSON.stringify(tx), "aplus:integration-secret")) === null);
+
+    const callsBefore = tokenCalls;
+    const forged = await throws(() => flow.completeSignIn("GOOGLE", { transaction: tx, state: "attacker-state", code: "c" }));
+    check("a callback whose state does not match is REFUSED (login CSRF)",
+      forged.threw && forged.error.code === "STATE_INVALID");
+    const noCookie = await throws(() => flow.completeSignIn("GOOGLE", { transaction: null, state: tx.s, code: "c" }));
+    check("a callback this browser never started is REFUSED", noCookie.threw && noCookie.error.code === "STATE_INVALID");
+    const crossed = await throws(() => flow.completeSignIn("APPLE", { transaction: tx, state: tx.s, code: "c" }));
+    check("a Google attempt cannot be finished at Apple's callback",
+      crossed.threw && crossed.error.code === "STATE_INVALID");
+    check("and none of those reached Google's token endpoint", tokenCalls === callsBefore);
+
+    nextIdToken = await googleIdToken("somebody-elses-nonce");
+    const replay = await throws(() => flow.completeSignIn("GOOGLE", { transaction: tx, state: tx.s, code: "c" }));
+    check("an ID token carrying another attempt's nonce is REFUSED",
+      replay.threw && replay.error.code === "NONCE_MISMATCH");
+    check("and created no account", (await User.countDocuments({ email: EMAIL })) === 0);
+
+    nextIdToken = await googleIdToken(tx.n);
+    const done = await flow.completeSignIn("GOOGLE", { transaction: tx, state: tx.s, code: "good-code" });
+    check("an enabled Google sign-in completes and creates the account",
+      done.user.email === EMAIL && done.user.role === "PARENT");
+    check("linked to the Google identity",
+      done.user.oauthAccounts?.some((o) => o.provider === "GOOGLE" && o.providerAccountId === "google-social-1"));
+    check("and returns the person where they were going", done.redirectTo === "/bookings");
+
+    const again = flow.readSignInTransaction((await flow.beginSignIn("GOOGLE", { role: "TUTOR" })).transaction);
+    nextIdToken = await googleIdToken(again.n);
+    const second = await flow.completeSignIn("GOOGLE", { transaction: again, state: again.s, code: "good-code-2" });
+    check("signing in again reaches the same account — no duplicate",
+      String(second.user.id) === String(done.user.id) && (await User.countDocuments({ email: EMAIL })) === 1);
+    check("and a requested role never changes an existing account's role", second.user.role === "PARENT");
+
+    const inFlight = flow.readSignInTransaction((await flow.beginSignIn("GOOGLE", {})).transaction);
+    await save({ enabled: false });
+    nextIdToken = await googleIdToken(inFlight.n);
+    const beforeDisabled = tokenCalls;
+    const cutOff = await throws(() => flow.completeSignIn("GOOGLE", { transaction: inFlight, state: inFlight.s, code: "c" }));
+    check("switching Google off also stops an attempt already in flight",
+      cutOff.threw && cutOff.error.code === "PROVIDER_DISABLED" && tokenCalls === beforeDisabled);
+
+    check("Apple's one-time name is read, and bounded",
+      flow.parseAppleProfile(JSON.stringify({ name: { firstName: "Sam", lastName: "x".repeat(200) } }))?.lastName.length === 60);
+    check("and anything unreadable is ignored rather than trusted",
+      flow.parseAppleProfile("{not json") === undefined);
+  } finally {
+    globalThis.fetch = realFetch;
+    setEnv(savedEnv);
+    await reset();
+    await User.deleteMany({ email: EMAIL });
+  }
 }
 
 /**

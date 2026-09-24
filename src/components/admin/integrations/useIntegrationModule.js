@@ -58,14 +58,31 @@ export function useIntegrationModule(initial) {
   };
 
   const save = useSubmit(async () => {
+    // Only the fields of the platforms that will be live. The server's schema
+    // is strict, so a value still on screen for a platform that was just
+    // unticked (or a provider that was switched away from) would otherwise
+    // be refused as an unknown field. Not sending it leaves it stored.
+    const live = module.multi ? providers : [provider];
+    const liveFields = new Set(
+      module.providerOptions
+        .filter((option) => live.includes(option.value))
+        .flatMap((option) => option.fields.map((field) => field.name)),
+    );
+    const liveConfig = Object.fromEntries(
+      Object.entries(config).filter(([name]) => liveFields.has(name)),
+    );
+    const liveSecrets = Object.fromEntries(
+      Object.entries(secrets).filter(([name]) => liveFields.has(name)),
+    );
+
     const next = await api.patch(`/api/admin/integrations/${module.module}`, {
       enabled,
       provider,
       ...(module.multi ? { providers } : {}),
-      config,
+      config: liveConfig,
       // Omitted entirely when nothing was typed, which is what tells the
       // server to keep every stored credential exactly as it is.
-      ...(Object.keys(secrets).length ? { secrets } : {}),
+      ...(Object.keys(liveSecrets).length ? { secrets: liveSecrets } : {}),
     });
 
     adopt(next.module);

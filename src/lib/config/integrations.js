@@ -217,6 +217,29 @@ export async function resolveIntegrationConfig(moduleKey, { fresh = false } = {}
   const enabled = record.enabled !== false;
   const chosen = chosenProviders(record, registry);
 
+  // Every platform deliberately unticked on a `multi` module. That is an
+  // answer, not an absence: falling through to the environment here would
+  // quietly turn back on the very platform the operator just switched off.
+  if (!chosen.length && registry.multi && Array.isArray(record.providers)) {
+    return {
+      module: moduleKey,
+      label: registry.label,
+      enabled,
+      provider: null,
+      providers: [],
+      source: CONFIG_SOURCES.DATABASE,
+      config: {},
+      secrets: {},
+      secretSources: {},
+      configured: false,
+      missing: [],
+      code: "NO_PROVIDERS",
+      error: `${registry.label}: no platform is turned on.`,
+      usesDevelopment: false,
+      updatedAt: record.updatedAt ?? null,
+    };
+  }
+
   // Nothing chosen and nothing in the environment. The module exists as a row
   // but has never been configured.
   if (!chosen.length) {
@@ -341,7 +364,8 @@ export async function resolveIntegrationConfig(moduleKey, { fresh = false } = {}
 function chosenProviders(record, registry) {
   if (registry.multi) {
     const listed = (record.providers ?? []).filter((name) => registry.providers[name]);
-    if (listed.length) return listed;
+    // A stored list is the operator's answer, including an empty one.
+    if (listed.length || Array.isArray(record.providers)) return listed;
   }
   if (record.provider && registry.providers[record.provider]) return [record.provider];
   if (record.provider === DEVELOPMENT) return [DEVELOPMENT];

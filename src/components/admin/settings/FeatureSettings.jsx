@@ -1,6 +1,7 @@
 "use client";
 
-import { ShieldCheck, Lock } from "lucide-react";
+import Link from "next/link";
+import { ArrowRight, ShieldCheck, Lock } from "lucide-react";
 import { Alert, Card, CardBody, CardHeader, Switch } from "@/components/ui";
 import { FEATURES } from "@/constants";
 import { useSettingsSection } from "./useSettingsSection";
@@ -57,22 +58,6 @@ const GROUPS = [
       },
     ],
   },
-  {
-    title: "Sign-in methods",
-    description: "Email and password always remain available.",
-    items: [
-      {
-        key: FEATURES.GOOGLE_SIGN_IN,
-        label: "Google sign-in",
-        description: "Also requires Google credentials in the deployment environment.",
-      },
-      {
-        key: FEATURES.APPLE_SIGN_IN,
-        label: "Apple sign-in",
-        description: "Also requires Apple credentials in the deployment environment.",
-      },
-    ],
-  },
 ];
 
 export function FeatureSettings({ settings }) {
@@ -112,6 +97,31 @@ export function FeatureSettings({ settings }) {
           </CardBody>
         </Card>
       ))}
+
+      {/*
+        Google and Apple sign-in are configured where their credentials live,
+        so the switch and the thing it switches cannot disagree.
+      */}
+      <Card>
+        <CardHeader
+          title="Sign-in methods"
+          description="Email and password always remain available."
+        />
+        <CardBody>
+          <p className="text-sm text-ink-600">
+            Continue with Google and Continue with Apple are switched on and off, together with
+            their credentials, under{" "}
+            <Link
+              href="/admin/settings/integrations"
+              className="inline-flex items-center gap-1 font-semibold text-brand-600 hover:underline"
+            >
+              External modules → Social sign-in
+              <ArrowRight className="size-3.5" aria-hidden="true" />
+            </Link>
+            .
+          </p>
+        </CardBody>
+      </Card>
 
       <Card>
         <CardHeader

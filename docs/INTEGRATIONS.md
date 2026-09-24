@@ -19,7 +19,7 @@ to one factory.
 |---|---|---|---|
 | Payments | `MockPaymentProvider` | **Stripe** — Checkout + Connect Express | `PAYMENT_PROVIDER` |
 | Email | `ConsoleEmailProvider` | **Resend** | `EMAIL_PROVIDER` |
-| OAuth | `DevOAuthProvider` | **Google**, **Apple** — OIDC ID tokens | `OAUTH_PROVIDER` |
+| Social sign-in | `DevOAuthProvider` (local identity, non-production only) | **Google**, **Apple** — authorization-code flow, configured in the admin panel | optional `OAUTH_PROVIDER` |
 | Geocoding | `LocalTableGeocodingProvider` | **Google Geocoding API** | `GEOCODING_PROVIDER` |
 | Meeting links | `MockMeetingProvider` | **Zoom**, **Google Meet**, **Microsoft Teams** — any combination | `MEETING_PROVIDER` |
 | File storage | `LocalStorageProvider` (automatic fallback) | **MinIO** — S3-compatible object storage | the four `STORAGE_*` credentials |
@@ -42,6 +42,11 @@ email. The other three may be set to `development` deliberately — a coarse
 geocode or a manually-hosted meeting is a degradation, not a fraud — and the
 admin panel at **Admin → Platform settings → Integrations** shows plainly
 which ones are running that way.
+
+Social sign-in is the exception to "every selector must name a provider":
+it is additive and configured from the admin panel, so an unset or incomplete
+`OAUTH_PROVIDER` is reported as a notice and never stops a production boot
+(§3 below).
 
 Validation runs once at start-up from
 [`src/instrumentation.js`](../src/instrumentation.js): a warning in
@@ -245,47 +250,197 @@ any `next build`. See [PASSWORD_RESET.md](PASSWORD_RESET.md).
 
 ---
 
-## 3. OAuth — Google and Apple
+## 3. Social sign-in — Google and Apple
 
-### Model
+**Continue with Google** and **Continue with Apple** are configured, switched
+on and switched off entirely from the admin panel. Rotating a credential or
+turning a method on or off needs no `.env` edit, no code change and no
+redeploy: the change applies to the next sign-in attempt. Email and password
+sign-in always keeps working, whatever this module says.
 
-The browser obtains an **ID token** from the provider's own client library and
-posts it to `/api/auth/oauth`. The server verifies the signature against the
-provider's published JWKS and checks issuer, audience, expiry and nonce. There
-is no authorization-code exchange and therefore no client secret and no
-redirect callback to defend.
+### Where
+
+**Admin → Platform settings → External modules → Social sign-in**
+(`/admin/settings/integrations`). Reaching it — reading, saving, validating
+or clearing — requires `ADMIN_INTEGRATION_MANAGE`, the same permission as
+every other external module; parents and tutors get 403, anonymous callers
+401.
+
+### One-time provider setup (outside APlus Learn)
+
+Done once per provider, by whoever owns the Google Cloud project or the Apple
+Developer account. The admin panel shows the exact redirect URI and domain to
+register, with a copy button, under each provider — they are derived from
+`NEXT_PUBLIC_APP_URL` and are not editable, because they are the routes this
+build serves.
+
+**Google Cloud Console → APIs & Services**
+
+1. **OAuth consent screen**: app name, support email, logo, authorised domain;
+   scopes `openid`, `email`, `profile`. Publish it (a consent screen left in
+   *Testing* only admits the test users you list).
+2. **Credentials → Create credentials → OAuth client ID → Web application.**
+3. **Authorised redirect URIs**: `https://<domain>/api/auth/oauth/google/callback`
+   (copy it from the panel). No JavaScript origin is needed — no Google
+   script runs on the page.
+4. Keep the **Client ID** and **Client secret** for the panel.
+
+**Apple Developer → Certificates, Identifiers & Profiles** (requires a paid
+Apple Developer Program membership)
+
+1. **Identifiers → App IDs**: an App ID with *Sign in with Apple* enabled.
+2. **Identifiers → Services IDs**: create one (e.g. `ca.apluslearn.web`) —
+   this identifier is the *Services ID* the panel asks for, not the App ID.
+   Enable *Sign in with Apple* → Configure → pick the App ID, then add
+   - **Domains and Subdomains**: `<domain>` (no scheme)
+   - **Return URLs**: `https://<domain>/api/auth/oauth/apple/callback`
+3. **Keys → +**: a key with *Sign in with Apple* enabled, bound to that App ID.
+   Download the `.p8` file — Apple lets you download it **once**. Note its
+   **Key ID**.
+4. Your **Team ID** is under *Membership details*.
+
+Apple only redirects to `https://` return URLs on a registered domain, so
+Apple sign-in cannot be completed against `localhost`. Test it on a staging
+host with a real certificate.
+
+### Ongoing configuration (in the admin panel)
+
+| Provider | Field | Secret | Notes |
+|---|---|---|---|
+| Google | Client ID | no | Must end in `.apps.googleusercontent.com` |
+| Google | Client secret | **yes** | Write-only |
+| Apple | Services ID | no | Reverse-domain identifier |
+| Apple | Team ID | no | 10 capital letters/digits |
+| Apple | Key ID | no | 10 capital letters/digits |
+| Apple | Private key (.p8) | **yes** | Paste the whole file including the `BEGIN`/`END` lines; line breaks lost in the paste are rebuilt. It is parsed on save — anything that is not a P-256 key is refused |
+
+**Switching a method on and off.** A method appears on the sign-in and
+registration pages only when *all three* hold:
+
+1. the module switch **Social sign-in is on** is on,
+2. the provider is **ticked** under *Platforms*, and
+3. every required field is present and readable.
+
+Each provider shows its own state: *Not configured*, *Configured, switched
+off*, *Enabled* (with *· validated* after a passing check), or *Needs
+attention* with the reason (missing fields, a credential that no longer
+decrypts, or a failed validation). Unticking a provider switches it off but
+keeps its credentials, so ticking it again restores it; **Remove this
+configuration** destroys the stored credentials.
+
+The server refuses to switch a provider on until its credentials are
+complete — the save fails with the missing fields named against the fields
+themselves. Saving an incomplete provider while the module is off is allowed,
+so credentials can be entered before a method goes live.
+
+**Validate credentials** makes a real, side-effect-free call to each ticked
+provider's token endpoint with a code that cannot succeed: `invalid_grant`
+means the credentials were accepted, `invalid_client` means they were not. For
+Apple this signs a real client secret, so it proves the Services ID, Team ID,
+Key ID and key belong together. It creates no user and no session, and it can
+run while the module is still off. It cannot prove the redirect URI is
+registered — only a real sign-in shows that.
+
+**Rotating a credential**: type the new value into the secret field and save.
+A blank secret field means "keep what is stored". The old value is never
+shown.
+
+### How a sign-in works
 
 ```
-OAUTH_PROVIDER=google
-GOOGLE_CLIENT_ID=….apps.googleusercontent.com
-APPLE_CLIENT_ID=ca.apluslearn.web     # the Services ID, not the App ID
+Browser                       APlus Learn                             Provider
+  │ click "Continue with Google"   │                                      │
+  ├── GET /api/auth/oauth/google ─▶│ module on? ticked? complete?        │
+  │                                │ mint state, nonce, PKCE verifier     │
+  │◀── 302 + encrypted cookie ─────┤                                      │
+  ├──────────────────────── authorize (client_id, redirect_uri, state, nonce, PKCE) ─▶│
+  │◀─────────────────────────────────────────── redirect with code + state ───────────┤
+  ├── GET|POST …/callback ────────▶│ cookie opened, state compared        │
+  │                                │ provider re-checked as still enabled │
+  │                                ├── code + secret (+ verifier) ───────▶│ token endpoint
+  │                                │◀───────────────────────── ID token ──┤
+  │                                │ verify signature (JWKS), iss, aud,   │
+  │                                │ exp, nonce → account rules below     │
+  │◀── 303 + session cookie ───────┤                                      │
 ```
 
-### CSRF and replay protection
+Google returns with a GET. Apple returns with a cross-site POST
+(`response_mode=form_post`, mandatory when asking for name and email). Each
+callback accepts only its provider's method. A failure — cancelled, expired,
+forged, switched off meanwhile — lands back on the sign-in or registration
+page with a fixed message and no session.
 
-`GET /api/auth/oauth/nonce` mints a single-use nonce, returns it for the
-client library, and stores it in an httpOnly cookie. The ID token's `nonce`
-claim must match that cookie. A token captured elsewhere, or replayed later,
-cannot satisfy both. The cookie is consumed whether the attempt succeeds or
-fails.
+### Security
 
-### External configuration
+- **Secrets**: the Google client secret and the Apple private key are
+  AES-256-GCM encrypted under `aplus:integration-secret` in the `Integration`
+  collection (`select: false`), never in `Settings`. No endpoint returns them;
+  the panel shows only whether one is stored and when it changed. Apple's
+  client secret is an ES256 JWT minted per request with a five-minute life.
+- **Nothing reaches the browser**: no provider script runs on the page, so
+  neither secret nor client ID is sent to it. The authorization URL carries
+  only public values. Content-Security-Policy needed no change.
+- **State / CSRF**: the attempt's state, nonce and PKCE verifier live in the
+  `aplus_oauth_tx` cookie — httpOnly, AES-256-GCM encrypted under its own
+  label, scoped to `/api/auth/oauth`, ten-minute life, consumed on success
+  and failure. A callback whose state does not match it is refused before
+  the code is redeemed. Google's is `SameSite=Lax`; Apple's is
+  `SameSite=None; Secure` so it survives Apple's cross-site POST.
+- **Replay**: the ID token must carry the nonce minted for this attempt, and
+  be under ten minutes old.
+- **Redirect URI**: built from `NEXT_PUBLIC_APP_URL`, never from the request,
+  so a forged `Host` header cannot redirect a code.
+- **Enforced server-side**: a method that is off is refused by the start
+  endpoint (no redirect to the provider), again by the callback (so an attempt
+  already in flight is cut off), and by the development-identity endpoint.
+  Hiding the button is presentation only.
+- **Rate limits**: 20 starts and 20 callbacks per client per ten minutes.
+- **Audit**: every save is `INTEGRATION_UPDATED`; each provider switched on or
+  off is its own `INTEGRATION_ENABLED` / `INTEGRATION_DISABLED` entry naming
+  the provider; a new client secret or key is `INTEGRATION_SECRET_ROTATED`
+  naming the field; validations are `INTEGRATION_TESTED`. Values are never
+  recorded, and the audit reader additionally redacts anything shaped like a
+  PEM private key or a Google client secret.
+- **Logs**: provider error bodies are never logged or shown; only the short
+  OAuth error code is used.
 
-**Google Cloud Console → APIs & Services → Credentials → OAuth client ID (Web application)**
+### Environment variables
 
-- Authorised JavaScript origins: `https://<domain>`
-- Authorised redirect URIs: *none needed* — the One Tap / popup flow uses no redirect.
-- Configure the OAuth consent screen (app name, support email, logo, scopes: `openid email profile`).
+**No Google or Apple credential requires `.env`.** Two infrastructure values
+matter, and neither is specific to social sign-in:
 
-**Apple Developer → Certificates, Identifiers & Profiles**
+- `NEXT_PUBLIC_APP_URL` — the public `https://` origin. The redirect URIs are
+  derived from it, so it must be the address users actually visit.
+- `AUTH_SECRET` — the key the stored credentials and the transaction cookie
+  are encrypted under. Rotating it makes stored credentials unreadable; the
+  panel then shows *Needs attention* and they must be entered again.
 
-- Create an **App ID**, then a **Services ID** — the Services ID is `APPLE_CLIENT_ID`.
-- Under the Services ID → Sign in with Apple → Configure:
-  - Domains: `<domain>`
-  - Return URLs: `https://<domain>/login`
-- Apple requires a paid Developer Program membership. `APPLE_TEAM_ID`,
-  `APPLE_KEY_ID` and a private key are needed only for the
-  authorization-code flow, which this integration does not use.
+`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `APPLE_CLIENT_ID`, `APPLE_TEAM_ID`,
+`APPLE_KEY_ID`, `APPLE_PRIVATE_KEY` and `OAUTH_PROVIDER=google,apple` remain an
+**optional bootstrap**, like every other module: the panel's *Import from
+environment* copies them into encrypted storage, after which the panel wins
+field by field. `OAUTH_PROVIDER` is not required in production — social
+sign-in is additive, so an unset or incomplete environment is a boot notice,
+never a boot failure.
+
+### Development
+
+With nothing configured anywhere on a non-production deployment, the buttons
+use a local test identity (a prompt for an email address) and say so under the
+buttons. The moment the module is saved, what was saved is the whole answer —
+a provider left unticked is hidden in development too. The test identity is
+refused in production and whenever a real provider is configured.
+
+### Upgrading from the ID-token flow
+
+Earlier builds used Google Identity Services / Apple JS in the browser with
+only a client ID, and a separate switch under *Settings → Features*. That
+switch is gone — the module is the one control — and the code flow needs the
+Google client secret and the Apple Team ID, Key ID and `.p8` key. A deployment
+with only `GOOGLE_CLIENT_ID` in its environment will show Google as *Needs
+attention — Missing: Client secret* until the secret is added in the panel.
+Register the new redirect URIs above; the old `/login` Apple return URL can be
+removed.
 
 ### Account rules
 
@@ -701,9 +856,8 @@ because the key never encoded which store wrote it.
 ## Secrets
 
 Only `NEXT_PUBLIC_*` values reach the browser, and the only one that exists is
-`NEXT_PUBLIC_APP_URL`. Client identifiers that a browser legitimately needs —
-the Google and Apple client IDs — are served by `/api/auth/oauth/nonce` rather
-than inlined at build time, so rotating one does not require a rebuild.
+`NEXT_PUBLIC_APP_URL`. Social sign-in runs entirely server-side, so not even
+the Google and Apple client IDs are sent to a browser.
 
 Server secrets (`MONGODB_URI`, `AUTH_SECRET`, `STRIPE_*`, `RESEND_API_KEY`,
 `GOOGLE_MAPS_API_KEY`, `ZOOM_*`) are read only inside `server-only` modules.

@@ -1,75 +1,69 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api, ApiError } from "@/lib/api/client";
 import { Button, useToast } from "@/components/ui";
 
 /**
- * Google / Apple sign-in (§9, §36).
+ * Continue with Google / Continue with Apple (§9, §36).
  *
- * Whether real OAuth is available is decided server-side and reported by
- * `/api/auth/oauth/nonce`, which also mints the single-use nonce this attempt
- * must carry. The provider's client library returns an ID token; the token is
- * posted to our API and verified there against the provider's JWKS. Nothing
- * this component produces is trusted — it cannot be.
+ * `providers` is decided on the server, from the Social sign-in module, and
+ * lists only the methods that are switched on and fully configured — so a
+ * method that is off is simply not here. Hiding it is presentation, not
+ * protection: the start and callback endpoints refuse it too (§26).
  *
- * With no provider configured the buttons fall back to a local identity so
- * the flow stays testable in development, and say so plainly in production
- * rather than failing silently (§38).
+ * A live method is a plain navigation to `/api/auth/oauth/<provider>`, which
+ * redirects to the provider and back. No provider script runs on this page and
+ * nothing here holds a credential, so there is nothing for it to leak. A
+ * navigation rather than a Next `<Link>`, because a link would be prefetched
+ * — and prefetching an endpoint that starts a sign-in would start one.
  *
- * `providers` is the operator's switch, resolved on the server and passed in.
- * A method that is off is not rendered here and is refused by the sign-in
- * endpoint as well, so hiding it is presentation, not protection (§26).
+ * `development` mode is the local test identity the server offers only when
+ * nothing is configured on a non-production deployment, and it says so.
  */
-const GOOGLE_SDK = "https://accounts.google.com/gsi/client";
-const APPLE_SDK = "https://appleid.cdn-apple.com/appleauth/static/jsapi/appleid/1/en_US/appleid.auth.js";
-
-export function OAuthButtons({ role, next, className, providers = ["GOOGLE", "APPLE"] }) {
+export function OAuthButtons({ role, next, from = "login", className, providers = [] }) {
   const router = useRouter();
   const toast = useToast();
   const [pending, setPending] = useState(null);
 
-  const finish = async (payload) => {
-    const result = await api.post("/api/auth/oauth", { ...payload, role, next });
-    router.push(result.redirectTo);
-    router.refresh();
+  // Coming back with the browser's Back button restores this page from the
+  // back-forward cache with the spinner still going; clear it.
+  useEffect(() => {
+    const reset = (event) => {
+      if (event.persisted) setPending(null);
+    };
+    window.addEventListener("pageshow", reset);
+    return () => window.removeEventListener("pageshow", reset);
+  }, []);
+
+  const start = (provider) => {
+    setPending(provider);
+    const params = new URLSearchParams({ from });
+    if (role) params.set("role", role);
+    if (next) params.set("next", next);
+    // A full navigation to an endpoint that redirects off-site, not a page:
+    // `router.push` would fetch it as a React Server Component instead.
+    const url = new URL(`/api/auth/oauth/${provider.toLowerCase()}?${params}`, window.location.origin);
+    window.location.assign(url.href);
   };
 
-  const signIn = async (provider) => {
+  const developmentSignIn = async (provider) => {
     setPending(provider);
     try {
-      // One round trip tells us what is configured *and* mints the nonce, so
-      // the client never has to guess at the server's configuration.
-      const session = await api.get("/api/auth/oauth/nonce");
-      const available = session.providers.find((p) => p.provider === provider);
-
-      if (available?.configured) {
-        const credential =
-          provider === "GOOGLE"
-            ? await googleCredential(session.googleClientId, session.nonce)
-            : await appleCredential(session.appleClientId, session.nonce);
-
-        if (!credential) return; // The member closed the provider's dialog.
-        await finish({ provider, ...credential });
-        return;
-      }
-
-      if (process.env.NODE_ENV === "production") {
-        toast.info(
-          `${label(provider)} sign-in isn't available yet`,
-          "Use your email and password instead.",
-        );
-        return;
-      }
-
-      // Development identity — the real flow above replaces this entirely.
       const email = window.prompt(
         `${label(provider)} sign-in is running in development mode.\n\nEnter the email address to sign in with:`,
       );
       if (!email) return;
 
-      await finish({ provider, credential: devCredential(provider, email) });
+      const result = await api.post("/api/auth/oauth", {
+        provider,
+        credential: devCredential(provider, email),
+        role,
+        next,
+      });
+      router.push(result.redirectTo);
+      router.refresh();
     } catch (error) {
       toast.error(
         "Sign-in failed",
@@ -80,11 +74,10 @@ export function OAuthButtons({ role, next, className, providers = ["GOOGLE", "AP
     }
   };
 
-  const showGoogle = providers.includes("GOOGLE");
-  const showApple = providers.includes("APPLE");
+  // Nothing offered: no divider, no empty row — the form simply ends.
+  if (!providers.length) return null;
 
-  // Both switched off: no divider, no empty row — the form simply ends.
-  if (!showGoogle && !showApple) return null;
+  const simulated = providers.some((p) => p.mode === "development");
 
   return (
     <div className={className}>
@@ -97,131 +90,33 @@ export function OAuthButtons({ role, next, className, providers = ["GOOGLE", "AP
         </div>
       </div>
 
-      <div className={`grid gap-2 ${showGoogle && showApple ? "sm:grid-cols-2" : ""}`}>
-        {showGoogle && (
+      <div className={`grid gap-2 ${providers.length > 1 ? "sm:grid-cols-2" : ""}`}>
+        {providers.map(({ provider, mode }) => (
           <Button
+            key={provider}
             variant="secondary"
             size="lg"
-            loading={pending === "GOOGLE"}
-            onClick={() => signIn("GOOGLE")}
-            iconLeft={<GoogleMark />}
+            loading={pending === provider}
+            disabled={Boolean(pending) && pending !== provider}
+            onClick={() => (mode === "live" ? start(provider) : developmentSignIn(provider))}
+            iconLeft={provider === "APPLE" ? <AppleMark /> : <GoogleMark />}
+            aria-label={`Continue with ${label(provider)}`}
           >
-            Google
+            {label(provider)}
           </Button>
-        )}
-        {showApple && (
-          <Button
-            variant="secondary"
-            size="lg"
-            loading={pending === "APPLE"}
-            onClick={() => signIn("APPLE")}
-            iconLeft={<AppleMark />}
-          >
-            Apple
-          </Button>
-        )}
+        ))}
       </div>
+
+      {simulated && (
+        <p className="mt-2 text-center text-xs text-ink-400">
+          Development mode — these buttons sign in with a local test identity, not a real account.
+        </p>
+      )}
     </div>
   );
 }
 
-/** Load a provider script once, and resolve when it is ready. */
-function loadScript(src) {
-  return new Promise((resolve, reject) => {
-    const existing = document.querySelector(`script[src="${src}"]`);
-    if (existing) {
-      if (existing.dataset.loaded === "1") resolve();
-      else {
-        existing.addEventListener("load", () => resolve());
-        existing.addEventListener("error", () => reject(new Error("Provider script failed to load.")));
-      }
-      return;
-    }
-
-    const script = document.createElement("script");
-    script.src = src;
-    script.async = true;
-    script.onload = () => {
-      script.dataset.loaded = "1";
-      resolve();
-    };
-    script.onerror = () => reject(new Error("Provider script failed to load."));
-    document.head.appendChild(script);
-  });
-}
-
-/**
- * Google Identity Services. The `nonce` travels into the signed ID token,
- * where the server checks it against the httpOnly cookie.
- */
-async function googleCredential(clientId, nonce) {
-  await loadScript(GOOGLE_SDK);
-
-  return new Promise((resolve, reject) => {
-    const client = window.google?.accounts?.id;
-    if (!client) {
-      reject(new Error("Google sign-in is unavailable right now."));
-      return;
-    }
-
-    client.initialize({
-      client_id: clientId,
-      nonce,
-      callback: (response) =>
-        resolve(response?.credential ? { credential: response.credential } : null),
-      cancel_on_tap_outside: true,
-      use_fedcm_for_prompt: true,
-    });
-
-    client.prompt((notification) => {
-      // Dismissed without choosing an account: not an error, just a no-op.
-      if (notification?.isSkippedMoment?.() || notification?.isDismissedMoment?.()) {
-        resolve(null);
-      }
-    });
-  });
-}
-
-/**
- * Sign in with Apple, in popup mode so there is no server redirect to guard.
- * Apple sends the member's name only on their very first sign-in, outside the
- * token — it is passed along and used only to fill blanks on a new account.
- */
-async function appleCredential(clientId, nonce) {
-  await loadScript(APPLE_SDK);
-
-  const appleId = window.AppleID?.auth;
-  if (!appleId) throw new Error("Apple sign-in is unavailable right now.");
-
-  appleId.init({
-    clientId,
-    scope: "name email",
-    redirectURI: `${window.location.origin}/login`,
-    nonce,
-    usePopup: true,
-  });
-
-  try {
-    const response = await appleId.signIn();
-    const token = response?.authorization?.id_token;
-    if (!token) return null;
-
-    return {
-      credential: token,
-      profile: response.user?.name
-        ? { firstName: response.user.name.firstName, lastName: response.user.name.lastName }
-        : undefined,
-    };
-  } catch (error) {
-    // Apple reports a closed popup as an error; treat it as a cancellation.
-    if (error?.error === "popup_closed_by_user" || error?.error === "user_cancelled_authorize") {
-      return null;
-    }
-    throw new Error("Apple sign-in could not be completed.");
-  }
-}
-
-/** Development-only identity, inert once a real provider is configured. */
+/** Development-only identity. The server refuses it once a provider is configured. */
 function devCredential(provider, email) {
   return btoa(
     JSON.stringify({

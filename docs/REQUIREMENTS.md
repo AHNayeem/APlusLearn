@@ -88,7 +88,9 @@ exercise upload, retrieval and replacement end to end on this machine.
 | Reset-code abuse limits | 5 guesses per code (burned after), a new code voids the last, 60 s resend cooldown and 5 codes/hour per address, 5 requests and 20 verifications per 15 min per client — all in the shared rate-limit store | Implemented |
 | Reset cannot enumerate accounts | The request handle, cooldown, hourly cap, lockout and expiry are issued and enforced identically for an unknown address; the account lookup and send run in `after()`; delivery errors are logged, never returned | Implemented |
 | Reset without a mail server | `ConsoleEmailProvider` also keeps a development mailbox (`/dev/mail`, `GET /api/dev/mail`) holding the real code. Closed — 404, nothing recorded — unless `NODE_ENV` and `APP_ENV` are both non-production *and* mail is going to the console. Configuring Resend or SMTP needs no code change | Implemented |
-| Google / Apple sign-in | `OpenIdOAuthProvider` — ID token verified against the provider's JWKS (issuer, audience, expiry) with a single-use nonce from `/api/auth/oauth/nonce` | Awaiting credentials |
+| Google / Apple sign-in | Server-side authorization-code flow: `/api/auth/oauth/[provider]` → provider → `/api/auth/oauth/[provider]/callback`. `GoogleSignInProvider` (client secret + PKCE) and `AppleSignInProvider` (per-request ES256 client secret from the `.p8` key); the returned ID token is verified against the provider's JWKS (issuer, audience, expiry, nonce) by `OpenIdOAuthProvider`. Configured, enabled and disabled from **External modules → Social sign-in** — no `.env` required. See [INTEGRATIONS.md §3](INTEGRATIONS.md#3-social-sign-in--google-and-apple) | Awaiting credentials |
+| Social sign-in is admin-configurable | `oauth` module in the integration registry: Google (client ID, client secret) and Apple (Services ID, Team ID, Key ID, private key). Secrets encrypted, write-only; a provider cannot be switched on incomplete; the private key is parsed on save; *Validate credentials* probes each token endpoint without a session; per-provider state (not configured / configured-off / enabled / needs attention); redirect URI and domain shown for registration. `ADMIN_INTEGRATION_MANAGE`; audited per provider | Implemented |
+| Disabled sign-in is refused server-side | `signInAvailability()` is the one answer for the pages and the endpoints. A method that is off is not rendered, is refused by the start endpoint (no redirect to the provider), by the callback (cutting off an attempt in flight), and by the development-identity endpoint | Implemented |
 | OAuth account safety | Email linking requires a provider-verified address; one identity maps to one account; role and protected fields are never changed by a sign-in | Implemented |
 | Password-change security notice | `passwordChanged` template, sent after reset and change; carries no token | Implemented |
 | Secure sessions | JWT (jose) in an httpOnly, SameSite=Lax cookie; `tokenVersion` enables revocation | Implemented |
@@ -335,7 +337,7 @@ taking a page down.
 | Social links | `social.*`; only configured profiles render — no dead icons | Implemented |
 | Footer configuration | `footer.*` — description, copyright (with `{year}` substitution), social/newsletter/app-badge visibility | Implemented |
 | Marketplace configuration | Commission, cancellation policy, no-show refunds, abuse thresholds, booking notice and horizon, rate guard rails, payout hold, search radius, review moderation | Implemented |
-| Feature flags | `features.*` — messaging, tutor requests, favourites, reviews, online/in-person lessons, Google/Apple sign-in | Implemented |
+| Feature flags | `features.*` — messaging, tutor requests, favourites, reviews, online/in-person lessons. Google/Apple sign-in moved to the Social sign-in external module, which holds the switch and the credentials together | Implemented |
 | Flags enforced server-side | `feature` option on `routeHandler` (pipeline position: after permission, before validation); lesson modes enforced in `booking.service.js`; QA asserts a disabled feature returns 403 to a direct API call | Implemented |
 | Platform notification controls | `notifications.*` — master email switch plus booking / application / review / payout / announcement categories, applied in `sendEmail()` | Implemented |
 | Security email cannot be disabled | `EMAIL_CATEGORIES.SECURITY` has no setting and is never consulted against one | Implemented |
@@ -385,11 +387,11 @@ than dropped.
 | Adopting an existing deployment | `POST` imports the environment's values server-side, encrypted on the way in; nothing passes through the browser | Implemented |
 | Configuration is consumed at runtime | The five provider factories became asynchronous and resolve through the merged view. A saved credential takes effect on the next call — both caches are dropped on write | Implemented |
 | Enable/disable has teeth | Payments refuse checkout; email records a skip; SMS records `MODULE_DISABLED` in the delivery log; calendar sync and push no-op without touching existing connections; storage refuses uploads **but still serves reads**, because breaking retrieval of identity documents is an incident, not a setting | Implemented |
-| Connection tests are real | Resend `GET /domains`, SMTP `transport.verify()`, Stripe `accounts.retrieve()`, Twilio `GET /Accounts/{sid}`, Google/Microsoft token-endpoint probe, storage `headBucket()`. A module reaches "Connected" only after a round-trip succeeds, and the result is recorded against the provider it ran for | Implemented |
+| Connection tests are real | Resend `GET /domains`, SMTP `transport.verify()`, Stripe `accounts.retrieve()`, Twilio `GET /Accounts/{sid}`, Google/Microsoft calendar and Google/Apple sign-in token-endpoint probes (Apple with a genuinely signed client secret), storage `headBucket()`. A module reaches "Connected" only after a round-trip succeeds, and the result is recorded against the provider it ran for | Implemented |
 | Test endpoints test what is stored | The body carries a destination only, never credentials, so a pass cannot be manufactured from an unsaved key | Implemented |
 | Stripe mode cannot be got wrong | The key carries its own mode; a declared environment that disagrees is refused, as is switching mode without a matching key | Implemented |
 | Provider errors are safe | Each adapter returns a sanitised verdict; `safeProviderMessage` replaces anything that still looks like a credential | Implemented |
-| Validation | Strict per module *and* provider — a field belonging to another provider is a field error, not a dropped key. E.164 numbers, http(s) URLs, port range, Stripe/Twilio identifier formats, Twilio's either-or sender, SMTP 465-without-TLS | Implemented |
+| Validation | Strict per module *and* provider — a field belonging to another provider is a field error, not a dropped key. E.164 numbers, http(s) URLs, port range, Stripe/Twilio/Google/Apple identifier formats, Twilio's either-or sender, SMTP 465-without-TLS, a Sign in with Apple key that must parse as P-256, and no sign-in method switched on incomplete | Implemented |
 | Authorization | `ADMIN_INTEGRATION_MANAGE`, held apart from `ADMIN_SETTINGS_MANAGE` so a future limited-admin can edit branding without rotating a payment key. QA asserts anonymous → 401 and parent/tutor → 403 on every endpoint and method | Implemented |
 | Audit | `INTEGRATION_UPDATED`, `_ENABLED`, `_DISABLED`, `_PROVIDER_CHANGED`, `_SECRET_ROTATED`, `_TESTED`, `_IMPORTED_FROM_ENV`. A rotation records which field changed and by whom — never a value, masked or otherwise | Implemented |
 | Boot validation | `instrumentation.js` reports the merged view through `integration-report.js`, which cannot decrypt and so keeps `node:crypto` out of the Edge bundle. Stored problems are reported, not asserted — a broken stored record must not stop a deployment whose environment is still valid | Implemented |
@@ -401,7 +403,7 @@ than dropped.
 |---|---|
 | `AUTH_SECRET`, `MONGODB_URI`, `CRON_SECRET`, `NEXT_PUBLIC_APP_URL` | Infrastructure — the application cannot read its own database or verify its own sessions without them |
 | `STORAGE_SSE`, `STORAGE_SESSION_TOKEN`, `STORAGE_TIMEOUT_MS` | Properties of the bucket's deployment, not preferences; getting them wrong fails every write rather than mis-saving one |
-| OAuth sign-in, geocoding, meeting links | Not in this scope. The registry is built to take them without rework |
+| Geocoding, meeting links | Not in this scope. The registry is built to take them without rework — social sign-in has since been added this way |
 | A platform-level calendar connection | No such thing exists: OAuth here binds a *tutor's* account. The module configures the app registration; an admin "Connect" button would be a fake button (§39) |
 
 ## 27. Online / in-person
@@ -507,7 +509,7 @@ than dropped.
 | Secure verification documents | Private storage, audited admin-only access | Implemented |
 | Payment information protected | Hosted Checkout — no PAN ever reaches this application; only brand + last4 are stored, from a verified webhook | Implemented |
 | Webhook signature verification | Checked against the raw request body before any database access; unsigned and unverifiable calls are refused | Implemented |
-| OAuth CSRF / replay protection | Single-use httpOnly nonce, required in the ID token; consumed whether the attempt succeeds or fails | Implemented |
+| OAuth CSRF / replay protection | `state` compared against an httpOnly, AES-256-GCM encrypted, path-scoped, ten-minute transaction cookie before any code is redeemed; nonce required in the ID token; PKCE for Google; redirect URI derived from `NEXT_PUBLIC_APP_URL`, never the request; the cookie is consumed whether the attempt succeeds or fails. Apple's cookie is `SameSite=None; Secure` to survive its form_post | Implemented |
 | OAuth cannot escalate a role | Requested role applies only to a brand-new account; QA asserts an `ADMIN` request is refused | Implemented |
 | No secrets in URLs, logs or responses | Provider API keys travel in headers; `integrationStatus()` reports names only; QA asserts settings carry no credentials | Implemented |
 | Geocoding privacy | Coordinates coarsened to ~1 km before storage; failure diagnostics log no addresses | Implemented |
@@ -531,7 +533,7 @@ and webhook endpoints.
 |---|---|---|---|
 | Payment abstraction | `MockPaymentProvider` | `StripePaymentProvider` — hosted Checkout, Connect Express, refunds, transfers, signed webhooks | Awaiting credentials |
 | Email abstraction | `ConsoleEmailProvider` | `ResendEmailProvider` + 13 branded responsive templates | Awaiting credentials |
-| Auth providers | `DevOAuthProvider` | `OpenIdOAuthProvider` — Google and Apple ID tokens | Awaiting credentials |
+| Auth providers | `DevOAuthProvider` (only when nothing is configured, never in production) | `GoogleSignInProvider`, `AppleSignInProvider` — authorization-code flow, ID token verified by `OpenIdOAuthProvider` | Awaiting credentials |
 | Geocoding | `LocalTableGeocodingProvider` | `GoogleGeocodingProvider`, country-filtered, coarsened, with table fallback | Awaiting credentials |
 | Video meetings | `MockMeetingProvider` | `ZoomMeetingProvider`, `GoogleMeetProvider`, `MicrosoftTeamsMeetingProvider` — create / move / tear down; several may be live at once. A deployment with no credentials for the platform a learner chose now has a first-class fallback rather than only a development link: an authorised human enters the room they already own, and it is labelled as such everywhere | Awaiting credentials |
 | File storage | `LocalStorageProvider` — a real store under `.storage/`, used automatically whenever the four `STORAGE_*` credentials are not all present | `ObjectStorageProvider` — **MinIO**; SigV4 over `fetch`, also S3, R2, B2, Spaces. Selected automatically once endpoint, bucket, access key and secret key are all set | Implemented, both modes |
@@ -636,8 +638,8 @@ audit is
 | Database connectivity | `databaseStatus()` on the admin dashboard | Healthy |
 | Route checks | 99 pages, 158 API route handlers | All reachable |
 | Authorization checks | Anonymous 401, wrong-role 403, cross-account 403 | Enforced |
-| Journey checks | `bun run qa` | 1,003 / 1,003 |
-| Integration adapters | `bun run test:integrations` | 1,459 / 1,459 (1 skipped — the live object-store round trip, which needs credentials) |
+| Journey checks | `bun run qa` | 1,149 / 1,149 |
+| Integration adapters | `bun run test:integrations` | 1,719 / 1,719 (1 skipped — the live object-store round trip, which needs credentials) |
 
 Both suites own the `integrations` collection for their duration, and `qa`
 leaves it cleared, so run it against a development database. See
@@ -662,6 +664,8 @@ so it is safe to run in CI.
 | Storage | SigV4 reproduces AWS's published vector; upload/read/head/replace/delete round-trip; the uploader's filename never becomes a key; scopes cannot read each other; a traversal key is flattened; no URL is ever returned; no per-object SSE by default; credentials are redacted from provider errors; bad credentials, missing objects, unreachable hosts and timeouts are each named distinctly |
 | Email | Key travels in a header not a URL; both HTML and text parts are sent; delivery is idempotent; a provider rejection surfaces its reason; an outage does not throw into the calling service; all 13 templates render; template input is HTML-escaped; a security notice carries no token |
 | OAuth | A valid token verifies; wrong audience, wrong issuer, tampered signature and a mismatched nonce are all rejected; Apple's string booleans and one-time name are handled; an unconfigured provider refuses rather than trusting |
+| Social sign-in adapters | The authorization URL carries state, nonce and S256 PKCE and never a secret; the code is redeemed with the secret, verifier and exact redirect URI; a foreign nonce or audience is refused; `invalid_grant` / `invalid_client` / unreachable are each reported distinctly; Apple's client secret is an ES256 JWT (kid, iss = team, sub = Services ID, aud = Apple, ≤ 5 min) genuinely signed by the `.p8`; pasted keys are normalised and non-P-256 keys refused without echoing them |
+| Social sign-in module | Saving, enabling and disabling each provider; incomplete or malformed credentials cannot be switched on; secrets are encrypted and never read back; unticking everything does not fall back to the environment; production offers nothing until configured and never fails to boot over it; validation runs while switched off and creates no user; a forged, foreign, crossed, expired or tampered attempt is refused before the token endpoint is called; a completed sign-in creates and links one account, a second reaches the same one, and switching off cuts off an attempt in flight |
 | Geocoding | A rooftop coordinate is coarsened before it leaves the module; an unknown location, a rejected key and a network failure all degrade to `null`; an outage falls back to the bundled table; distance maths is correct and symmetric |
 | Meetings | Server-to-Server auth; correct start time, duration and safety settings; the host `start_url` is never returned or stored; a reschedule PATCHes rather than re-creates; the token is cached; cancellation deletes the room |
 | Disputes | Raising is refused for a non-party and before the lesson ends; a second dispute cannot open while one runs; every one of the four decisions is terminal and a later decision of any kind is refused with a conflict; two simultaneous decisions produce one accepted, one refused, one refund and one audit record; a refund the ledger refuses releases the claim so the dispute stays decidable; disputes on one lesson never add up to more than the ledger returned; the booking, the payment and the notifications are asserted from the database, not from the return value |
@@ -680,7 +684,7 @@ Deliberately separated by *why* each one is still open.
 ### Implemented and verified
 
 Everything above marked **Implemented** runs end to end and is covered by
-`bun run qa` (1,003 assertions) or `bun run test:integrations` (1,459).
+`bun run qa` (1,149 assertions) or `bun run test:integrations` (1,719).
 
 ### Implemented, awaiting credentials
 
@@ -696,7 +700,9 @@ and one online booking end to end.
 configuration each one needs.
 
 Apple additionally requires a paid Developer Program membership to create the
-Services ID that `APPLE_CLIENT_ID` refers to.
+Services ID and the Sign in with Apple key, and only returns to an `https://`
+URL on a registered domain — so an Apple sign-in cannot be smoke-tested on
+`localhost`.
 
 ### Known open items
 

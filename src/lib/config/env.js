@@ -61,12 +61,33 @@ export const INTEGRATIONS = {
     },
   },
   oauth: {
-    label: "OAuth",
+    label: "Social sign-in",
     selector: "OAUTH_PROVIDER",
-    // Social sign-in is additive: email + password still works without it.
     fakeAllowedInProduction: true,
+    /**
+     * Social sign-in is additive: email and password work without it, and
+     * the admin panel is where it is normally configured (§26). So nothing
+     * about it — an unset selector, or a provider named without its
+     * credentials — may stop a production deployment from booting. It is
+     * reported as a notice instead, and the sign-in page simply does not
+     * offer a method that is not ready.
+     *
+     * These variables remain only as an optional bootstrap that the admin
+     * panel can import from; none of them is required.
+     */
+    additive: true,
+    multi: true,
     providers: {
-      google: { label: "Google", required: ["GOOGLE_CLIENT_ID"], optional: ["APPLE_CLIENT_ID"] },
+      google: {
+        label: "Google",
+        required: ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"],
+        optional: [],
+      },
+      apple: {
+        label: "Apple",
+        required: ["APPLE_CLIENT_ID", "APPLE_TEAM_ID", "APPLE_KEY_ID", "APPLE_PRIVATE_KEY"],
+        optional: [],
+      },
     },
   },
   geocoding: {
@@ -305,6 +326,19 @@ export function resolveIntegration(key) {
     };
   }
 
+  // Nothing requested, for an integration the platform works without. Not a
+  // guess and not a failure: it is simply off until an operator configures it.
+  if (production && integration.additive) {
+    return {
+      name: DEVELOPMENT,
+      names: [],
+      label: "Off",
+      configured: true,
+      missing: [],
+      error: null,
+    };
+  }
+
   // Nothing requested. Production never guesses — unless the integration
   // declares somewhere to fall back to, which is a decision this file already
   // recorded rather than a guess made per request.
@@ -444,6 +478,9 @@ export function integrationStatus() {
       providerLabel: resolved.label,
       mode: resolved.name === DEVELOPMENT ? "development" : "production",
       ok: resolved.configured,
+      // An additive integration's problem is worth reading, never worth
+      // refusing to start over.
+      additive: Boolean(INTEGRATIONS[key].additive),
       // Working, but not on the external service it would prefer. Distinct
       // from both "ok" and "broken", because it is neither.
       fellBack: Boolean(resolved.fellBack),
@@ -477,7 +514,7 @@ function baseConfigurationErrors() {
 export function configurationErrors() {
   return [
     ...baseConfigurationErrors(),
-    ...integrationStatus().filter((s) => !s.ok).map((s) => s.error),
+    ...integrationStatus().filter((s) => !s.ok && !s.additive).map((s) => s.error),
   ];
 }
 
@@ -489,9 +526,13 @@ export function configurationErrors() {
  * the point — it is not a reason to refuse to start.
  */
 export function configurationWarnings() {
-  return integrationStatus()
-    .filter((s) => s.fellBack && s.warning)
-    .map((s) => s.warning);
+  const status = integrationStatus();
+  return [
+    ...status.filter((s) => s.fellBack && s.warning).map((s) => s.warning),
+    // Social sign-in named in the environment without its credentials: the
+    // method is unavailable until it is completed here or in the admin panel.
+    ...status.filter((s) => !s.ok && s.additive).map((s) => s.error),
+  ];
 }
 
 /**

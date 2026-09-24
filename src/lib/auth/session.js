@@ -49,21 +49,40 @@ export async function verifySessionToken(token) {
   }
 }
 
-export async function createSessionCookie(user) {
-  const token = await signSessionToken({
-    userId: user._id ?? user.id,
-    role: user.role,
-    tokenVersion: user.tokenVersion ?? 0,
-  });
-  const store = await cookies();
-  store.set(SESSION.cookieName, token, {
+function sessionCookieOptions() {
+  return {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
     sameSite: "lax",
     path: "/",
     maxAge: SESSION.maxAgeSeconds,
+  };
+}
+
+function sessionTokenFor(user) {
+  return signSessionToken({
+    userId: user._id ?? user.id,
+    role: user.role,
+    tokenVersion: user.tokenVersion ?? 0,
   });
+}
+
+export async function createSessionCookie(user) {
+  const token = await sessionTokenFor(user);
+  const store = await cookies();
+  store.set(SESSION.cookieName, token, sessionCookieOptions());
   return token;
+}
+
+/**
+ * The same session cookie, set on a response the caller built.
+ *
+ * For the social sign-in callback, which answers with a redirect: setting the
+ * cookie on that response object is explicit about which response carries it,
+ * rather than relying on the framework to merge `cookies()` into a redirect.
+ */
+export async function applySessionCookie(response, user) {
+  response.cookies.set(SESSION.cookieName, await sessionTokenFor(user), sessionCookieOptions());
 }
 
 export async function destroySessionCookie() {
@@ -78,39 +97,53 @@ export async function readSessionToken() {
 }
 
 /**
- * Single-use sign-in nonce for OAuth (§9, §36).
+ * One social sign-in attempt, held by the browser that started it (§9, §36).
  *
- * The value is handed to the provider's client library and comes back inside
- * the signed ID token; the copy in this httpOnly cookie is what the server
- * compares it against. An ID token captured from another site, or replayed
- * later, will not have a matching cookie — which is the CSRF and replay
- * protection for a flow that has no redirect to carry `state`.
+ * The value is the encrypted transaction `oauth-signin.service` builds — the
+ * `state` the callback must echo, the `nonce` the ID token must carry, and
+ * Google's PKCE verifier. The callback refuses any attempt whose `state` does
+ * not match this cookie, which is what makes a sign-in link crafted by
+ * somebody else (login CSRF) or a code intercepted in transit useless.
+ *
+ * Scoped to the OAuth routes, so it is never sent anywhere else, and consumed
+ * by the callback whether the attempt succeeds or fails.
+ *
+ * Apple returns the person with a cross-site *POST* (`response_mode=form_post`
+ * is mandatory when asking for a name or email), and a `SameSite=Lax` cookie
+ * is not sent on one — so Apple's attempts use `SameSite=None`, which browsers
+ * accept only with `Secure`. Google returns with a GET, which Lax allows.
  */
-const OAUTH_NONCE_COOKIE = "aplus_oauth_nonce";
-const OAUTH_NONCE_MAX_AGE = 10 * 60;
+export const OAUTH_TRANSACTION_COOKIE = "aplus_oauth_tx";
+const OAUTH_COOKIE_PATH = "/api/auth/oauth";
 
-export async function issueOAuthNonce() {
-  const nonce = crypto.randomUUID().replace(/-/g, "");
-  const store = await cookies();
-  store.set(OAUTH_NONCE_COOKIE, nonce, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "lax",
-    path: "/",
-    maxAge: OAUTH_NONCE_MAX_AGE,
+function oauthTransactionOptions({ crossSitePost }) {
+  return crossSitePost
+    ? { httpOnly: true, secure: true, sameSite: "none", path: OAUTH_COOKIE_PATH }
+    : {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "lax",
+        path: OAUTH_COOKIE_PATH,
+      };
+}
+
+export function setOAuthTransactionCookie(response, value, { crossSitePost = false, maxAge }) {
+  response.cookies.set(OAUTH_TRANSACTION_COOKIE, value, {
+    ...oauthTransactionOptions({ crossSitePost }),
+    maxAge,
   });
-  return nonce;
 }
 
-export async function readOAuthNonce() {
-  const store = await cookies();
-  return store.get(OAUTH_NONCE_COOKIE)?.value ?? null;
+export function readOAuthTransactionCookie(request) {
+  return request.cookies.get(OAUTH_TRANSACTION_COOKIE)?.value ?? null;
 }
 
-/** Consume it: a nonce is good for exactly one sign-in attempt. */
-export async function clearOAuthNonce() {
-  const store = await cookies();
-  store.delete(OAUTH_NONCE_COOKIE);
+/** One attempt, one use — cleared on success and on failure alike. */
+export function clearOAuthTransactionCookie(response, { crossSitePost = false } = {}) {
+  response.cookies.set(OAUTH_TRANSACTION_COOKIE, "", {
+    ...oauthTransactionOptions({ crossSitePost }),
+    maxAge: 0,
+  });
 }
 
 /**

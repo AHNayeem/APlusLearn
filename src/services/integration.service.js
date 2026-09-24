@@ -14,6 +14,7 @@ import {
   INTEGRATION_MODULES,
   INTEGRATION_MODULE_KEYS,
   INTEGRATION_STATUS,
+  PROVIDER_STATES,
   SECRET_HINTS,
   FIELD_KINDS,
   CONFIG_SOURCES,
@@ -22,13 +23,15 @@ import {
   fieldsForProviders,
   isMultiModule,
   providersFor,
+  signInCallbackPath,
 } from "@/constants/integrations";
 import {
   validateModulePatch,
   PROVIDER_FORMAT_RULES,
   stripeModeOf,
 } from "@/lib/validation/integrations";
-import { CALENDAR_CONNECTION_STATUS } from "@/constants";
+import { AUTH_PROVIDERS, CALENDAR_CONNECTION_STATUS } from "@/constants";
+import { envBaseUrl } from "@/lib/config/base-url";
 import { buildEmailProvider, resetEmailProvider } from "./external/email-provider";
 import { buildPaymentProvider, resetPaymentProvider } from "./external/payment-provider";
 import { buildSmsProvider, resetSmsProvider } from "./external/sms-provider";
@@ -39,6 +42,11 @@ import {
   resetStorageProvider,
   STORAGE_MODES,
 } from "./external/storage-provider";
+import {
+  buildSignInProvider,
+  checkApplePrivateKey,
+  signInProviderFromKey,
+} from "./external/oauth-provider";
 
 /**
  * External module administration (§26, §36, §38, §39).
@@ -107,7 +115,10 @@ export async function getIntegrationModule(moduleKey) {
     label: registry.label,
     description: registry.description,
     multi: Boolean(registry.multi),
+    platformsHint: registry.platformsHint ?? null,
     disableWarning: registry.disableWarning ?? null,
+    /** A side-effect-free test may be run before the module is switched on. */
+    testWhileDisabled: Boolean(registry.testWhileDisabled),
 
     enabled: resolved.enabled,
     provider,
@@ -121,6 +132,10 @@ export async function getIntegrationModule(moduleKey) {
     usesDevelopment: resolved.usesDevelopment,
 
     status: deriveStatus(resolved, record),
+    /** Per platform, for a `multi` module — is *Google* on, and if not, why. */
+    providerStatus: registry.multi
+      ? providersFor(moduleKey).map((name) => deriveProviderState(moduleKey, name, resolved, record))
+      : null,
 
     /** Non-secret values only. Every secret field is absent from this object. */
     config: publicConfig(moduleKey, active, resolved.config),
@@ -135,6 +150,12 @@ export async function getIntegrationModule(moduleKey) {
           provider: record.lastTest.provider ?? null,
           /** A pass against a provider you have since left proves nothing. */
           stale: record.lastTest.provider !== (provider ?? null),
+          results: (record.lastTest.results ?? []).map((r) => ({
+            provider: r.provider ?? null,
+            ok: Boolean(r.ok),
+            code: r.code ?? null,
+            message: r.message ?? null,
+          })),
         }
       : null,
 
@@ -143,6 +164,8 @@ export async function getIntegrationModule(moduleKey) {
       value: name,
       label: registry.providers[name].label,
       description: registry.providers[name].description,
+      /** Values the operator must copy into the provider's own console. */
+      registration: registrationValues(registry.providers[name].registration, name),
       fields: fieldsFor(moduleKey, name).map((field) => ({
         name: field.name,
         label: field.label,
@@ -196,6 +219,82 @@ function deriveStatus(resolved, record) {
     return test.ok ? INTEGRATION_STATUS.CONNECTED : INTEGRATION_STATUS.FAILING;
   }
   return INTEGRATION_STATUS.CONFIGURED;
+}
+
+/**
+ * One platform's state inside a `multi` module.
+ *
+ *   NOT_CONFIGURED — none of its required values is present anywhere
+ *   DISABLED       — complete, but unticked or the module is off
+ *   ENABLED        — complete, ticked, module on
+ *   MISCONFIGURED  — partly filled in, unreadable, or its last test failed
+ *
+ * Presence is read from the stored record and the environment rather than
+ * from the resolved config, because an unticked platform is not resolved at
+ * all — and "you entered Google's credentials and then switched it off" is
+ * exactly what an operator needs this to say. No value is returned; only
+ * which labels are missing.
+ */
+function deriveProviderState(moduleKey, name, resolved, record) {
+  const registry = INTEGRATION_REGISTRY[moduleKey];
+  const label = registry.providers[name].label;
+  const required = fieldsFor(moduleKey, name).filter((field) => field.required);
+
+  const present = (field) => {
+    const stored =
+      field.kind === FIELD_KINDS.SECRET
+        ? Boolean(record?.secretMeta?.[field.name]?.set)
+        : isSetValue(record?.config?.[field.name]);
+    return stored || Boolean(field.env && process.env[field.env]?.trim());
+  };
+
+  const missing = required.filter((field) => !present(field)).map((field) => field.label);
+  const live = !resolved.usesDevelopment && (resolved.providers ?? []).includes(name);
+  const active = resolved.enabled && live;
+  const test = record?.lastTest?.results?.find((r) => r.provider === name);
+
+  const state = (value, message) => ({ provider: name, label, state: value, missing, message: message ?? null });
+
+  if (live && resolved.code === "SECRET_UNREADABLE") {
+    return state(PROVIDER_STATES.MISCONFIGURED, resolved.error);
+  }
+  if (missing.length === required.length && required.length > 0) {
+    return active
+      ? state(PROVIDER_STATES.MISCONFIGURED, `Ticked, but nothing is entered for ${label}.`)
+      : state(PROVIDER_STATES.NOT_CONFIGURED);
+  }
+  if (missing.length) {
+    return state(PROVIDER_STATES.MISCONFIGURED, `Missing: ${missing.join(", ")}.`);
+  }
+  if (test && !test.ok) {
+    return state(PROVIDER_STATES.MISCONFIGURED, test.message ?? "The last validation failed.");
+  }
+  if (active) {
+    return { ...state(PROVIDER_STATES.ENABLED), verified: Boolean(test?.ok) };
+  }
+  return state(PROVIDER_STATES.DISABLED);
+}
+
+function isSetValue(value) {
+  return value !== undefined && value !== null && value !== "";
+}
+
+/**
+ * The redirect URI and domain an operator registers with a provider.
+ *
+ * Derived from `NEXT_PUBLIC_APP_URL`, which is what the adapters send, so the
+ * value on screen and the value on the wire cannot disagree.
+ */
+function registrationValues(entries, providerName) {
+  if (!entries?.length) return [];
+  const base = envBaseUrl();
+  return entries.map((entry) => ({
+    label: entry.label,
+    value:
+      entry.kind === "domain"
+        ? new URL(base).host
+        : `${base}${signInCallbackPath(providerName)}`,
+  }));
 }
 
 /**
@@ -308,7 +407,9 @@ export async function updateIntegrationModule(moduleKey, body, actor) {
   // made a second platform impossible to configure.
   const active = activeProvidersFor(moduleKey, {
     provider,
-    providers: body.providers ?? existing?.providers ?? [],
+    // Undefined when neither the patch nor the record has a list, which is
+    // what lets a module that never had one keep its single provider.
+    providers: body.providers ?? existing?.providers,
   });
 
   const validated = validateModulePatch(moduleKey, provider, body, active);
@@ -319,7 +420,7 @@ export async function updateIntegrationModule(moduleKey, body, actor) {
   const formatErrors = checkProviderFormats(moduleKey, active, config, secrets);
   if (Object.keys(formatErrors).length) throw new ValidationError({ fieldErrors: formatErrors });
 
-  await checkProviderRules(moduleKey, provider, { config, secrets, existing });
+  await checkProviderRules(moduleKey, provider, { config, secrets, existing, body, active });
 
   const update = { $set: { module: moduleKey, provider, updatedBy: actor?.id ?? null }, $unset: {} };
 
@@ -495,7 +596,11 @@ function checkProviderFormats(moduleKey, providers, config, secrets) {
  * These are the ones a schema cannot express, because half the information is
  * already in the database.
  */
-async function checkProviderRules(moduleKey, provider, { config, secrets, existing }) {
+async function checkProviderRules(moduleKey, provider, { config, secrets, existing, body, active }) {
+  if (moduleKey === INTEGRATION_MODULES.OAUTH) {
+    await checkSignInRules({ config, secrets, existing, body, active });
+  }
+
   if (moduleKey === INTEGRATION_MODULES.PAYMENT && provider === "stripe") {
     await checkStripeMode({ config, secrets, existing });
   }
@@ -527,6 +632,71 @@ async function checkProviderRules(moduleKey, provider, { config, secrets, existi
         },
       });
     }
+  }
+}
+
+/**
+ * Social sign-in: a method may not be switched on half-configured (§9).
+ *
+ * A ticked provider on an enabled module is a button on the public sign-in
+ * page, so every value it needs must be present once this patch lands —
+ * counting what the patch sets or clears, what is already stored, and what
+ * the environment still answers for. The error names each missing field
+ * against the field itself, so the form can point at it.
+ *
+ * Saving while the module is *off* is allowed incomplete: entering
+ * credentials before turning a method on is the normal order.
+ *
+ * The private key is parsed, not pattern-matched, whenever a new one is
+ * supplied — a truncated paste is refused here rather than on somebody's
+ * first sign-in.
+ */
+async function checkSignInRules({ config, secrets, existing, body, active }) {
+  const fieldErrors = {};
+
+  if (secrets.applePrivateKey) {
+    const problem = checkApplePrivateKey(secrets.applePrivateKey);
+    if (problem) fieldErrors["secrets.applePrivateKey"] = [problem];
+  }
+
+  const willBeEnabled =
+    body.enabled ??
+    (existing ? existing.enabled !== false : await currentlyEnabled(INTEGRATION_MODULES.OAUTH));
+
+  if (willBeEnabled) {
+    for (const name of active) {
+      const providerLabel = INTEGRATION_REGISTRY[INTEGRATION_MODULES.OAUTH].providers[name].label;
+      for (const field of fieldsFor(INTEGRATION_MODULES.OAUTH, name)) {
+        if (!field.required) continue;
+        const isSecretField = field.kind === FIELD_KINDS.SECRET;
+        const patched = isSecretField ? secrets[field.name] : config[field.name];
+
+        const present =
+          patched !== undefined
+            ? isSetValue(patched)
+            : isSecretField
+              ? Boolean(existing?.secretMeta?.[field.name]?.set) ||
+                Boolean(field.env && process.env[field.env]?.trim())
+              : isSetValue(existing?.config?.[field.name]) ||
+                Boolean(field.env && process.env[field.env]?.trim());
+
+        if (!present) {
+          const path = `${isSecretField ? "secrets" : "config"}.${field.name}`;
+          (fieldErrors[path] ??= []).push(
+            `${field.label} is required before ${providerLabel} sign-in can be switched on.`,
+          );
+        }
+      }
+    }
+  }
+
+  if (Object.keys(fieldErrors).length) {
+    throw new ValidationError(
+      { fieldErrors },
+      willBeEnabled
+        ? "A sign-in method can only be switched on once its credentials are complete."
+        : undefined,
+    );
   }
 }
 
@@ -627,7 +797,7 @@ export async function testIntegrationModule(moduleKey, input, actor) {
 
   const resolved = await resolveIntegrationConfig(moduleKey, { fresh: true });
 
-  if (!resolved.enabled) {
+  if (!resolved.enabled && !registry.testWhileDisabled) {
     throw new BusinessRuleError(
       `${registry.label} is switched off. Turn the module on and save before testing it.`,
     );
@@ -659,6 +829,17 @@ export async function testIntegrationModule(moduleKey, input, actor) {
           // second guard against a provider returning an essay.
           message: String(result.message ?? "").slice(0, 400),
           provider: resolved.provider,
+          // Per platform, so the panel can say *which* one failed.
+          ...(result.results
+            ? {
+                results: result.results.map((r) => ({
+                  provider: r.provider,
+                  ok: Boolean(r.ok),
+                  code: r.code,
+                  message: String(r.message ?? "").slice(0, 400),
+                })),
+              }
+            : {}),
           actorId: actor?.id ?? null,
         },
       },
@@ -684,6 +865,8 @@ async function runTest(moduleKey, resolved, input) {
       return testCalendar(resolved);
     case INTEGRATION_MODULES.STORAGE:
       return testStorage(resolved);
+    case INTEGRATION_MODULES.OAUTH:
+      return testSignIn(resolved);
     default:
       return { ok: false, code: "NOT_SUPPORTED", message: "That module cannot be tested." };
   }
@@ -806,6 +989,54 @@ async function testCalendar(resolved) {
 }
 
 /**
+ * Every ticked sign-in method, each probed against its provider's token
+ * endpoint with a code that cannot succeed (§9, §39).
+ *
+ * This validates the credentials as a set — Apple's Team ID, Key ID and key
+ * are only meaningful together — without redirecting anybody or creating a
+ * session. What it cannot prove is that the redirect URI is registered: only
+ * a real sign-in shows that, and the result says so.
+ */
+async function testSignIn(resolved) {
+  const names = (resolved.providers ?? []).filter((name) =>
+    providersFor(INTEGRATION_MODULES.OAUTH).includes(name),
+  );
+  if (!names.length) {
+    return {
+      ok: false,
+      code: "NOT_CONFIGURED",
+      message: "Neither Google nor Apple is ticked. Tick one, complete its credentials and save first.",
+    };
+  }
+
+  const results = await Promise.all(
+    names.map(async (name) => {
+      const provider = signInProviderFromKey(name);
+      const adapter = buildSignInProvider(provider, resolved);
+      try {
+        const verdict = await adapter.verify({ redirectUri: `${envBaseUrl()}${signInCallbackPath(name)}` });
+        return { provider: name, ...verdict };
+      } catch (error) {
+        return {
+          provider: name,
+          ok: false,
+          code: error?.code ?? "PROVIDER_ERROR",
+          message: safeProviderMessage(error, "The credentials could not be checked."),
+        };
+      }
+    }),
+  );
+
+  const label = (name) => (signInProviderFromKey(name) === AUTH_PROVIDERS.APPLE ? "Apple" : "Google");
+  const failed = results.filter((r) => !r.ok);
+  const summary = results.map((r) => `${label(r.provider)}: ${r.ok ? "credentials accepted" : r.message}`).join(" · ");
+
+  return failed.length
+    ? { ok: false, code: failed[0].code, message: summary, results }
+    : { ok: true, code: "OK", message: summary, results };
+}
+
+/**
  * The storage adapter throws on failure rather than returning a verdict — it
  * predates this panel and its other caller is a CLI that wants the stack.
  * Normalised here rather than changed there.
@@ -850,7 +1081,7 @@ async function testStorage(resolved) {
 function safeProviderMessage(error, fallback) {
   const message = String(error?.message ?? "");
   if (!message) return fallback;
-  if (/sk_(test|live)|whsec_|Bearer |AC[0-9a-f]{32}|password|authToken/i.test(message)) return fallback;
+  if (/sk_(test|live)|whsec_|Bearer |AC[0-9a-f]{32}|password|authToken|GOCSPX-|PRIVATE KEY|client_secret/i.test(message)) return fallback;
   return message.slice(0, 300);
 }
 
@@ -874,7 +1105,16 @@ function describeChanges({ existing, body, provider, config, rotated, cleared })
     changes.provider = { from: existing.provider, to: provider };
   }
   if (body.providers) {
-    changes.providers = { from: existing?.providers ?? [], to: body.providers };
+    const before = existing?.providers ?? [];
+    const turnedOn = body.providers.filter((name) => !before.includes(name));
+    const turnedOff = before.filter((name) => !body.providers.includes(name));
+    // Recorded only when something actually moved, and as named platforms,
+    // so "when was Apple sign-in switched off, and by whom" is one filter.
+    if (turnedOn.length || turnedOff.length) {
+      changes.providers = { from: before, to: body.providers };
+      if (turnedOn.length) changes.providersEnabled = turnedOn;
+      if (turnedOff.length) changes.providersDisabled = turnedOff;
+    }
   }
 
   const configChanges = {};

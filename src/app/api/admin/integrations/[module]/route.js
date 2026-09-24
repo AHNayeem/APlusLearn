@@ -59,6 +59,23 @@ export const PATCH = routeHandler(
       });
     }
 
+    // One record per platform switched on or off inside a `multi` module —
+    // "Google sign-in enabled" is its own line, not a diff to decode.
+    for (const [list, action] of [
+      [changes.providersEnabled, AUDIT_ACTIONS.INTEGRATION_ENABLED],
+      [changes.providersDisabled, AUDIT_ACTIONS.INTEGRATION_DISABLED],
+    ]) {
+      for (const provider of list ?? []) {
+        await recordAudit({
+          actor: user,
+          action,
+          entityType: "Integration",
+          request,
+          metadata: { module: params.module, provider },
+        });
+      }
+    }
+
     if (changes.provider) {
       await recordAudit({
         actor: user,
