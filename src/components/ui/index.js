@@ -1,7 +1,7 @@
 export { Button, IconButton } from "./Button";
 export { Spinner } from "./Spinner";
 export {
-  Field, Input, Textarea, Select, Checkbox, Radio, Switch, OptionCard, FormErrorSummary,
+  Field, Input, PasswordInput, Textarea, Select, Checkbox, Radio, Switch, OptionCard, FormErrorSummary,
 } from "./Field";
 export { Card, CardHeader, CardBody, CardFooter, StatCard } from "./Card";
 export { Badge, CountBadge } from "./Badge";

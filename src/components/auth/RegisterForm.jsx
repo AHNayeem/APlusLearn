@@ -9,7 +9,7 @@ import { useSubmit } from "@/hooks/useAsync";
 import { passwordIssues } from "@/lib/auth/password-policy";
 import { internalPath } from "@/lib/utils/url";
 import {
-  Button, Field, Input, Checkbox, OptionCard, FormErrorSummary,
+  Button, Field, Input, PasswordInput, Checkbox, OptionCard, FormErrorSummary,
 } from "@/components/ui";
 import { OAuthButtons } from "@/components/layout/OAuthButtons";
 import { OAuthErrorNotice } from "./OAuthErrorNotice";
@@ -182,9 +182,8 @@ export function RegisterForm({ oauthProviders }) {
         </Field>
 
         <Field label="Password" htmlFor="reg-password" error={fieldErrors.password} required>
-          <Input
+          <PasswordInput
             id="reg-password"
-            type="password"
             autoComplete="new-password"
             required
             value={form.password}
@@ -224,9 +223,8 @@ export function RegisterForm({ oauthProviders }) {
           error={fieldErrors.confirmPassword}
           required
         >
-          <Input
+          <PasswordInput
             id="confirmPassword"
-            type="password"
             autoComplete="new-password"
             required
             value={form.confirmPassword}

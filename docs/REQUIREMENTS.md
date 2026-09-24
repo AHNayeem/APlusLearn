@@ -94,6 +94,7 @@ exercise upload, retrieval and replacement end to end on this machine.
 | OAuth account safety | Email linking requires a provider-verified address; one identity maps to one account; role and protected fields are never changed by a sign-in | Implemented |
 | Password-change security notice | `passwordChanged` template, sent after reset and change; carries no token | Implemented |
 | Secure sessions | JWT (jose) in an httpOnly, SameSite=Lax cookie; `tokenVersion` enables revocation | Implemented |
+| "Keep me signed in" | Ticked (the default): a 14-day persistent cookie. Unticked: a browser-session cookie with no Max-Age, whose token expires in 12 hours so a browser that restores session cookies cannot keep it longer. The choice rides in the token (`rm`), so reissuing the cookie after a password change keeps it. `SESSION` in `src/constants/config.js` | Implemented |
 | Logout | `/api/auth/logout` clears the cookie and audits | Implemented |
 
 ## 10. RBAC

@@ -24,14 +24,18 @@ function secretKey() {
   return new TextEncoder().encode(secret);
 }
 
-export async function signSessionToken({ userId, role, tokenVersion }) {
-  return new SignJWT({ role, tv: tokenVersion ?? 0 })
+function sessionLifetime(remember) {
+  return remember ? SESSION.maxAgeSeconds : SESSION.transientMaxAgeSeconds;
+}
+
+export async function signSessionToken({ userId, role, tokenVersion, remember = true }) {
+  return new SignJWT({ role, tv: tokenVersion ?? 0, rm: remember })
     .setProtectedHeader({ alg: "HS256" })
     .setSubject(String(userId))
     .setIssuer(ISSUER)
     .setAudience(AUDIENCE)
     .setIssuedAt()
-    .setExpirationTime(`${SESSION.maxAgeSeconds}s`)
+    .setExpirationTime(`${sessionLifetime(remember)}s`)
     .sign(secretKey());
 }
 
@@ -43,35 +47,57 @@ export async function verifySessionToken(token) {
       issuer: ISSUER,
       audience: AUDIENCE,
     });
-    return { userId: payload.sub, role: payload.role, tokenVersion: payload.tv ?? 0 };
+    return {
+      userId: payload.sub,
+      role: payload.role,
+      tokenVersion: payload.tv ?? 0,
+      // Tokens issued before the claim existed were all persistent.
+      remember: payload.rm ?? true,
+    };
   } catch {
     return null;
   }
 }
 
-function sessionCookieOptions() {
+/**
+ * An unremembered session omits Max-Age, which makes it a browser-session
+ * cookie; its token's own expiry is the backstop.
+ */
+function sessionCookieOptions(remember) {
   return {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
     sameSite: "lax",
     path: "/",
-    maxAge: SESSION.maxAgeSeconds,
+    ...(remember ? { maxAge: SESSION.maxAgeSeconds } : {}),
   };
 }
 
-function sessionTokenFor(user) {
+function sessionTokenFor(user, remember) {
   return signSessionToken({
     userId: user._id ?? user.id,
     role: user.role,
     tokenVersion: user.tokenVersion ?? 0,
+    remember,
   });
 }
 
-export async function createSessionCookie(user) {
-  const token = await sessionTokenFor(user);
+/** `remember: false` is "Keep me signed in" unticked at sign-in. */
+export async function createSessionCookie(user, { remember = true } = {}) {
+  const token = await sessionTokenFor(user, remember);
   const store = await cookies();
-  store.set(SESSION.cookieName, token, sessionCookieOptions());
+  store.set(SESSION.cookieName, token, sessionCookieOptions(remember));
   return token;
+}
+
+/**
+ * Reissue the current session for a changed user record (a password change
+ * bumps tokenVersion), keeping the choice made at sign-in — an unremembered
+ * session must not become a 14-day one because its owner changed a password.
+ */
+export async function reissueSessionCookie(user) {
+  const current = await verifySessionToken(await readSessionToken());
+  return createSessionCookie(user, { remember: current?.remember ?? true });
 }
 
 /**
@@ -82,7 +108,7 @@ export async function createSessionCookie(user) {
  * rather than relying on the framework to merge `cookies()` into a redirect.
  */
 export async function applySessionCookie(response, user) {
-  response.cookies.set(SESSION.cookieName, await sessionTokenFor(user), sessionCookieOptions());
+  response.cookies.set(SESSION.cookieName, await sessionTokenFor(user, true), sessionCookieOptions(true));
 }
 
 export async function destroySessionCookie() {

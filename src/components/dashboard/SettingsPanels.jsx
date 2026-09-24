@@ -7,7 +7,7 @@ import { cn } from "@/lib/utils/cn";
 import { api } from "@/lib/api/client";
 import { useSubmit } from "@/hooks/useAsync";
 import {
-  Alert, Button, Card, CardBody, CardHeader, Field, Input, Select, Switch,
+  Alert, Button, Card, CardBody, CardHeader, Field, Input, PasswordInput, Select, Switch,
   Modal, FormErrorSummary, useToast,
 } from "@/components/ui";
 import { CANADIAN_TIMEZONES } from "@/lib/utils/time";
@@ -354,9 +354,8 @@ function PasswordPanel() {
             error={fieldErrors.currentPassword}
             required
           >
-            <Input
+            <PasswordInput
               id="current-password"
-              type="password"
               autoComplete="current-password"
               value={form.currentPassword}
               onChange={set("currentPassword")}
@@ -366,9 +365,8 @@ function PasswordPanel() {
           </Field>
 
           <Field label="New password" htmlFor="new-pw" error={fieldErrors.password} required>
-            <Input
+            <PasswordInput
               id="new-pw"
-              type="password"
               autoComplete="new-password"
               value={form.password}
               onChange={set("password")}
@@ -383,9 +381,8 @@ function PasswordPanel() {
             error={fieldErrors.confirmPassword}
             required
           >
-            <Input
+            <PasswordInput
               id="confirm-pw"
-              type="password"
               autoComplete="new-password"
               value={form.confirmPassword}
               onChange={set("confirmPassword")}
@@ -476,9 +473,8 @@ function DangerPanel({ user }) {
           </Field>
 
           <Field label="Your password" htmlFor="delete-password" error={fieldErrors.password}>
-            <Input
+            <PasswordInput
               id="delete-password"
-              type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               error={fieldErrors.password}

@@ -655,10 +655,19 @@ export const AVAILABILITY_WINDOWS = [
   { value: "WEEKEND", label: "Weekends", days: [0, 6], from: 8, to: 21 },
 ];
 
-/** Session cookie name and lifetime. */
+/**
+ * Session cookie name and lifetime.
+ *
+ * "Keep me signed in" chooses between the two. A remembered session is a
+ * persistent cookie; an unremembered one is a browser-session cookie (no
+ * Max-Age), so it goes when the browser closes. Browsers that restore session
+ * cookies on relaunch would otherwise keep it indefinitely, so its token
+ * carries its own, shorter expiry.
+ */
 export const SESSION = {
   cookieName: "aplus_session",
   maxAgeSeconds: 60 * 60 * 24 * 14, // 14 days
+  transientMaxAgeSeconds: 60 * 60 * 12, // 12 hours
 };
 
 export const UPLOAD = {

@@ -9,7 +9,7 @@ import { api, ApiError } from "@/lib/api/client";
 import { useSubmit } from "@/hooks/useAsync";
 import { passwordIssues } from "@/lib/auth/password-policy";
 import {
-  Alert, Button, Field, Input, FormErrorSummary, Spinner, SuccessState,
+  Alert, Button, Field, Input, PasswordInput, FormErrorSummary, Spinner, SuccessState,
 } from "@/components/ui";
 
 /**
@@ -388,10 +388,9 @@ function NewPasswordStep({ token, onDone, onRestart }) {
       <FormErrorSummary error={error} fieldErrors={fieldErrors} />
 
       <Field label="New password" htmlFor="new-password" error={fieldErrors.password} required>
-        <Input
+        <PasswordInput
           id="new-password"
           name="password"
-          type="password"
           autoComplete="new-password"
           autoFocus
           required
@@ -427,10 +426,9 @@ function NewPasswordStep({ token, onDone, onRestart }) {
         error={fieldErrors.confirmPassword ?? (mismatch ? "Passwords do not match." : undefined)}
         required
       >
-        <Input
+        <PasswordInput
           id="confirm-new-password"
           name="confirmPassword"
-          type="password"
           autoComplete="new-password"
           required
           value={confirmPassword}

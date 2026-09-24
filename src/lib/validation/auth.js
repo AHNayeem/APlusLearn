@@ -55,6 +55,8 @@ export const loginSchema = z.object({
   email,
   password: z.string().min(1, "Enter your password."),
   next: nextPath,
+  // "Keep me signed in". Omitted means remembered, which is the checkbox's default.
+  remember: z.boolean().default(true),
 });
 
 export const forgotPasswordSchema = z.object({ email });

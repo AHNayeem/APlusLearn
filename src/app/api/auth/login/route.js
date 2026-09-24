@@ -13,7 +13,7 @@ export const POST = routeHandler(
     await enforceRateLimit(`login:${body.email}`, { limit: 6, windowMs: 10 * 60_000 });
 
     const user = await login(body, { request });
-    await createSessionCookie(user);
+    await createSessionCookie(user, { remember: body.remember });
 
     return ok({
       user: { id: user.id, firstName: user.firstName, role: user.role, email: user.email },

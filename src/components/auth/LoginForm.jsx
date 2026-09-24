@@ -6,7 +6,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Mail, Lock } from "lucide-react";
 import { api } from "@/lib/api/client";
 import { useSubmit } from "@/hooks/useAsync";
-import { Button, Field, Input, Checkbox, FormErrorSummary, Alert } from "@/components/ui";
+import { Button, Field, Input, PasswordInput, Checkbox, FormErrorSummary, Alert } from "@/components/ui";
 import { OAuthButtons } from "@/components/layout/OAuthButtons";
 import { OAuthErrorNotice } from "./OAuthErrorNotice";
 
@@ -17,9 +17,15 @@ export function LoginForm({ oauthProviders }) {
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [remember, setRemember] = useState(true);
 
   const { submit, pending, error, fieldErrors } = useSubmit(async () => {
-    const result = await api.post("/api/auth/login", { email, password, next: next ?? undefined });
+    const result = await api.post("/api/auth/login", {
+      email,
+      password,
+      remember,
+      next: next ?? undefined,
+    });
     router.push(result.redirectTo);
     router.refresh();
     return result;
@@ -64,10 +70,9 @@ export function LoginForm({ oauthProviders }) {
         </Field>
 
         <Field label="Password" htmlFor="password" error={fieldErrors.password} required>
-          <Input
+          <PasswordInput
             id="password"
             name="password"
-            type="password"
             autoComplete="current-password"
             required
             value={password}
@@ -79,7 +84,12 @@ export function LoginForm({ oauthProviders }) {
         </Field>
 
         <div className="flex items-center justify-between">
-          <Checkbox label="Keep me signed in" name="remember" defaultChecked />
+          <Checkbox
+            label="Keep me signed in"
+            name="remember"
+            checked={remember}
+            onChange={(e) => setRemember(e.target.checked)}
+          />
           <Link
             href="/forgot-password"
             className="text-sm font-semibold text-brand-600 hover:underline"

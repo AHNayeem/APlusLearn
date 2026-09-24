@@ -1,6 +1,6 @@
 "use client";
 
-import { useId } from "react";
+import { useId, useState } from "react";
 import { cn } from "@/lib/utils/cn";
 
 /**
@@ -84,6 +84,68 @@ export function Input({ className, error, iconLeft, ...props }) {
         {iconLeft}
       </span>
       {control}
+    </div>
+  );
+}
+
+/**
+ * A password input with a show/hide toggle. The toggle is a real button with
+ * a label that names the action and `aria-pressed` for its state, so it is
+ * reachable and announced like any other control.
+ */
+export function PasswordInput({ className, disabled, ...props }) {
+  const [visible, setVisible] = useState(false);
+  const generated = useId();
+  const inputId = props.id ?? generated;
+
+  return (
+    <div className="relative">
+      <Input
+        {...props}
+        id={inputId}
+        type={visible ? "text" : "password"}
+        disabled={disabled}
+        className={cn("pr-10", className)}
+      />
+      <button
+        type="button"
+        onClick={() => setVisible((v) => !v)}
+        disabled={disabled}
+        aria-label={visible ? "Hide password" : "Show password"}
+        aria-pressed={visible}
+        aria-controls={inputId}
+        className={cn(
+          "absolute inset-y-0 right-0 flex items-center rounded-r-xl px-3 text-ink-400",
+          "transition-colors hover:text-ink-700 focus-visible:text-ink-700",
+          "focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-brand-500",
+          "disabled:cursor-not-allowed disabled:hover:text-ink-400",
+        )}
+      >
+        <svg
+          aria-hidden="true"
+          viewBox="0 0 24 24"
+          className="size-4"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          {visible ? (
+            <>
+              <path d="M10.7 5.1A10.7 10.7 0 0 1 12 5c7 0 10 7 10 7a13.2 13.2 0 0 1-1.7 2.7" />
+              <path d="M6.6 6.6A13.5 13.5 0 0 0 2 12s3 7 10 7a9.7 9.7 0 0 0 5.4-1.6" />
+              <path d="M9.9 9.9a3 3 0 1 0 4.2 4.2" />
+              <path d="m2 2 20 20" />
+            </>
+          ) : (
+            <>
+              <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z" />
+              <circle cx="12" cy="12" r="3" />
+            </>
+          )}
+        </svg>
+      </button>
     </div>
   );
 }
