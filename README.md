@@ -38,6 +38,13 @@ All use the password `AplusLearn2024!`
 | Student (self-serve) | `nadia.petrov@example.com` |
 | Tutor awaiting approval | `james.oconnor@example.com` |
 
+In development the sign-in page shows a button per account that fills the form
+([src/lib/auth/dev-accounts.js](src/lib/auth/dev-accounts.js)); it never renders in production.
+
+The first sign-in from a browser an account has not trusted asks for an emailed six-digit
+code. In development the code is shown on the code screen (and kept in `/dev/mail`), so no
+mail server is needed; once entered, that browser is remembered for 90 days.
+
 The seed creates 12 approved tutors, 38 real Ontario courses, 54 bookings, 18
 written reviews, live conversations, an open tutor request and one application
 sitting in the admin review queue.

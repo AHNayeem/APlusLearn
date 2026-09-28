@@ -181,10 +181,16 @@ export async function resendVerification(email) {
 }
 
 /**
- * Credentials login. The same generic message is returned for an unknown
- * email and a wrong password so neither can be probed.
+ * Check a password, and nothing more. The same generic message is returned
+ * for an unknown email and a wrong password so neither can be probed.
+ *
+ * Deliberately free of side effects: a right password is not yet a sign-in.
+ * From a browser the account has not trusted it only earns a new-device code
+ * (`login-verification.service`), and `recordSignIn` runs once a session is
+ * actually issued — so `lastLoginAt` and the `USER_LOGIN` audit row mean
+ * "signed in", not "knew the password".
  */
-export async function login({ email, password }, { request } = {}) {
+export async function authenticateWithPassword({ email, password }) {
   const user = await User.findOne({ email }).select("+passwordHash");
 
   if (!user || user.deletedAt) {
@@ -203,18 +209,21 @@ export async function login({ email, password }, { request } = {}) {
     );
   }
 
-  user.lastLoginAt = new Date();
-  await user.save();
+  return toPlain({ ...user.toObject(), passwordHash: undefined });
+}
 
+/** A session was issued for a password sign-in: stamp it and audit it. */
+export async function recordSignIn(user, { request, metadata } = {}) {
+  const userId = user._id ?? user.id;
+  await User.updateOne({ _id: userId }, { $set: { lastLoginAt: new Date() } });
   await recordAudit({
     actor: user,
     action: AUDIT_ACTIONS.USER_LOGIN,
     entityType: "User",
-    entityId: user._id,
+    entityId: userId,
+    metadata,
     request,
   });
-
-  return toPlain({ ...user.toObject(), passwordHash: undefined });
 }
 
 /**

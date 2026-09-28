@@ -47,8 +47,22 @@ function section(title) {
  */
 const RUN_IP = `203.0.113.${Math.floor(Math.random() * 200) + 10}`;
 
+/**
+ * The browser this run is, as far as new-device sign-in is concerned.
+ *
+ * A right password from an untrusted browser earns an emailed code, not a
+ * session, and every client below has its own cookie jar. Were each jar its
+ * own browser, every role login would spend a code, and a few runs an hour
+ * would reach the per-account cap. So clients share the one `aplus_device`
+ * cookie the first verification set — one machine, several sessions, which is
+ * what a QA run is. The section that tests the step itself opts out with
+ * `createClient({ shareDevice: false })`.
+ */
+let runDevice = null;
+const DEVICE_COOKIE = "aplus_device";
+
 /** Minimal cookie-jar client so each role keeps its own session. */
-function createClient() {
+function createClient({ shareDevice = true } = {}) {
   const cookies = new Map();
 
   return async function request(
@@ -62,8 +76,10 @@ function createClient() {
       "x-forwarded-for": RUN_IP,
       ...extraHeaders,
     };
-    if (cookies.size) {
-      headers.Cookie = [...cookies].map(([k, v]) => `${k}=${v}`).join("; ");
+    const sent = new Map(cookies);
+    if (shareDevice && runDevice && !sent.has(DEVICE_COOKIE)) sent.set(DEVICE_COOKIE, runDevice);
+    if (sent.size) {
+      headers.Cookie = [...sent].map(([k, v]) => `${k}=${v}`).join("; ");
     }
 
     const response = await fetch(`${BASE}${path}`, {
@@ -79,7 +95,12 @@ function createClient() {
       if (key.toLowerCase() !== "set-cookie") continue;
       const [pair] = value.split(";");
       const idx = pair.indexOf("=");
-      if (idx > 0) cookies.set(pair.slice(0, idx).trim(), pair.slice(idx + 1).trim());
+      if (idx > 0) {
+        const name = pair.slice(0, idx).trim();
+        const value = pair.slice(idx + 1).trim();
+        cookies.set(name, value);
+        if (shareDevice && name === DEVICE_COOKIE && value) runDevice = value;
+      }
     }
 
     if (raw) return response;
@@ -95,11 +116,11 @@ function createClient() {
   };
 }
 
-async function login(client, email) {
-  let res = await client("/api/auth/login", {
-    method: "POST",
-    body: { email, password: PASSWORD },
-  });
+/** POST a password sign-in, backing off once if the limiter says so. */
+async function postLogin(client, email, { password = PASSWORD, headers, next } = {}) {
+  const send = () =>
+    client("/api/auth/login", { method: "POST", body: { email, password, next }, headers });
+  let res = await send();
 
   // The login limiter is deliberately strict. Repeated QA runs from one IP can
   // trip it, which is the limiter working — back off once rather than failing.
@@ -107,7 +128,27 @@ async function login(client, email) {
     const wait = 1000 * ((res.payload.error.message.match(/(\d+) seconds/)?.[1] ?? 60) * 1 + 2);
     console.log(`    (rate limited — waiting ${Math.round(wait / 1000)}s)`);
     await new Promise((resolve) => setTimeout(resolve, wait));
-    res = await client("/api/auth/login", { method: "POST", body: { email, password: PASSWORD } });
+    res = await send();
+  }
+  return res;
+}
+
+/**
+ * Finish a new-device challenge with the code the server issued. A dev server
+ * puts it in the response; anywhere else it is read from the development
+ * mailbox, and a server with neither cannot be driven by this suite.
+ */
+async function completeLoginVerification(client, res, { headers } = {}) {
+  const email = res.payload?.data?.maskedEmail;
+  const code = res.payload?.data?.devCode;
+  if (!code) throw new Error(`sign-in needs a device code and the server did not show one (${email})`);
+  return client("/api/auth/login/verify", { method: "POST", body: { code }, headers });
+}
+
+async function login(client, email) {
+  let res = await postLogin(client, email);
+  if (res.ok && res.payload.data.verificationRequired) {
+    res = await completeLoginVerification(client, res);
   }
 
   if (!res.ok) throw new Error(`login failed for ${email}: ${JSON.stringify(res.payload)}`);
@@ -4905,12 +4946,17 @@ async function main() {
     check("the old password no longer signs in", oldLogin.status === 401, `status ${oldLogin.status}`);
 
     const signIn = createClient();
-    const newLogin = await signIn("/api/auth/login", {
+    let newLogin = await signIn("/api/auth/login", {
       method: "POST",
       body: { email: newEmail, password: RESET_TO },
       headers: loginFrom,
     });
     check("the new password signs in", newLogin.ok, JSON.stringify(newLogin.payload?.error));
+    // This account has never verified a browser, so the password alone is
+    // not yet a session (the step itself is tested in its own section).
+    if (newLogin.payload?.data?.verificationRequired) {
+      newLogin = await completeLoginVerification(signIn, newLogin, { headers: loginFrom });
+    }
     check("and the session is real",
       (await signIn("/api/auth/session")).payload?.data?.user?.email === newEmail);
 
@@ -4929,6 +4975,130 @@ async function main() {
       `${lockedOut.status} ${lockedOut.payload?.error?.code}`);
   }
 
+
+  // --- New-device sign-in ---------------------------------------------------
+  //
+  // A right password from a browser the account has not trusted earns an
+  // emailed code, not a session (§9, §36). Run on an account registered here,
+  // from its own address, so neither the registration window nor the
+  // per-account code cap is shared with the rest of the suite — and in
+  // isolated cookie jars, because the point is what a *new* browser sees.
+  section("Sign-in — new-device verification, trust and revocation");
+
+  const DEVICE_FROM = { "x-forwarded-for": `192.0.2.${Math.floor(Math.random() * 200) + 10}` };
+  const deviceEmail = `qa-device-${Date.now()}@example.com`;
+  const DEVICE_PASSWORD_2 = "QaDevicePass2024";
+  const isolated = () => createClient({ shareDevice: false });
+  const devicePost = (client, path, body) =>
+    client(path, { method: "POST", body, headers: DEVICE_FROM });
+  const wrongDeviceCode = (code) => (code === "000000" ? "111111" : "000000");
+
+  const deviceSignup = await devicePost(isolated(), "/api/auth/register", {
+    email: deviceEmail,
+    password: PASSWORD,
+    confirmPassword: PASSWORD,
+    firstName: "Quinn",
+    lastName: "Device",
+    role: "PARENT",
+    provinceCode: "ON",
+    city: "Toronto",
+    acceptTerms: true,
+  });
+  check("an account for the device checks registers", deviceSignup.ok,
+    JSON.stringify(deviceSignup.payload?.error));
+
+  if (deviceSignup.ok) {
+    const laptop = isolated();
+    const first = await postLogin(laptop, deviceEmail, { headers: DEVICE_FROM, next: "/bookings" });
+    const challenge = first.payload?.data ?? {};
+    check("a right password from a new browser asks for a code",
+      first.ok && challenge.verificationRequired === true && challenge.redirectTo === "/login/verify",
+      JSON.stringify(first.payload));
+    check("and signs nobody in yet",
+      (await laptop("/api/auth/session")).payload?.data?.user == null);
+    check("nothing about the account is handed out before the code",
+      challenge.user === undefined && challenge.maskedEmail === "q***@example.com",
+      JSON.stringify(challenge));
+    check("a development server shows the code on screen", /^\d{6}$/.test(challenge.devCode ?? ""));
+
+    let mailed = null;
+    for (let i = 0; i < 25 && !mailed; i += 1) {
+      const res = await laptop(`/api/dev/mail?to=${encodeURIComponent(deviceEmail)}`);
+      mailed = res.payload?.data?.messages
+        ?.find((m) => /sign-in code/i.test(m.subject))
+        ?.text.match(/^\s+(\d{6})\s*$/m)?.[1] ?? null;
+      if (!mailed) await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    check("the code on screen is the code that was emailed", mailed === challenge.devCode,
+      `${mailed} vs ${challenge.devCode}`);
+
+    const wrong = await devicePost(laptop, "/api/auth/login/verify", { code: wrongDeviceCode(challenge.devCode) });
+    check("a wrong code is refused against the code field",
+      wrong.status === 422 && Boolean(wrong.payload?.error?.details?.fieldErrors?.code),
+      `${wrong.status} ${JSON.stringify(wrong.payload?.error)}`);
+
+    const early = await devicePost(laptop, "/api/auth/login/resend");
+    check("resending inside the cooldown is refused with the wait",
+      early.status === 429 && early.payload?.error?.code === "RESEND_COOLDOWN" &&
+        early.payload?.error?.details?.retryAfterSeconds > 0,
+      `${early.status} ${early.payload?.error?.code}`);
+
+    const verified = await devicePost(laptop, "/api/auth/login/verify", {
+      code: `${challenge.devCode.slice(0, 3)} ${challenge.devCode.slice(3)}`,
+    });
+    check("the right code — pasted with a space — signs in",
+      verified.ok && verified.payload?.data?.user?.email === deviceEmail,
+      JSON.stringify(verified.payload?.error));
+    check("and lands where the sign-in form was asked to go",
+      verified.payload?.data?.redirectTo === "/bookings", verified.payload?.data?.redirectTo);
+    check("the session is real",
+      (await laptop("/api/auth/session")).payload?.data?.user?.email === deviceEmail);
+
+    const replay = await devicePost(laptop, "/api/auth/login/verify", { code: challenge.devCode });
+    check("the code opens one session and no more", replay.status === 410,
+      `${replay.status} ${replay.payload?.error?.code}`);
+
+    await devicePost(laptop, "/api/auth/logout");
+    const again = await postLogin(laptop, deviceEmail, { headers: DEVICE_FROM });
+    check("the verified browser is recognised after signing out",
+      again.ok && !again.payload?.data?.verificationRequired &&
+        again.payload?.data?.user?.email === deviceEmail,
+      JSON.stringify(again.payload));
+
+    const phone = isolated();
+    const other = await postLogin(phone, deviceEmail, { headers: DEVICE_FROM });
+    check("trust belongs to that browser — another one is still asked",
+      other.payload?.data?.verificationRequired === true, JSON.stringify(other.payload));
+    const otherCode = other.payload?.data?.devCode;
+    for (let i = 0; i < 4; i += 1) {
+      await devicePost(phone, "/api/auth/login/verify", { code: wrongDeviceCode(otherCode) });
+    }
+    const locked = await devicePost(phone, "/api/auth/login/verify", { code: wrongDeviceCode(otherCode) });
+    check("the fifth wrong code burns it",
+      locked.status === 429 && locked.payload?.error?.code === "TOO_MANY_ATTEMPTS",
+      `${locked.status} ${locked.payload?.error?.code}`);
+    const tooLate = await devicePost(phone, "/api/auth/login/verify", { code: otherCode });
+    check("after which even the right code is refused", tooLate.status === 410,
+      `${tooLate.status} ${tooLate.payload?.error?.code}`);
+    check("and nobody was signed in on that browser",
+      (await phone("/api/auth/session")).payload?.data?.user == null);
+
+    // Changing the password ends every session but this one — and every
+    // device's trust with them, the laptop's included.
+    const changed = await laptop("/api/auth/password", {
+      method: "PATCH",
+      headers: DEVICE_FROM,
+      body: { currentPassword: PASSWORD, password: DEVICE_PASSWORD_2, confirmPassword: DEVICE_PASSWORD_2 },
+    });
+    check("the password can be changed", changed.ok, JSON.stringify(changed.payload?.error));
+    await devicePost(laptop, "/api/auth/logout");
+    const afterChange = await postLogin(laptop, deviceEmail, {
+      password: DEVICE_PASSWORD_2,
+      headers: DEVICE_FROM,
+    });
+    check("a changed password ends the trust a browser had",
+      afterChange.payload?.data?.verificationRequired === true, JSON.stringify(afterChange.payload));
+  }
 
   // --- Meeting management ---------------------------------------------------
   //

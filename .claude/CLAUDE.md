@@ -155,6 +155,16 @@ ad-hoc JSON responses, and never let a raw driver error reach the client.
   authorisation. Development differs only in transport: `ConsoleEmailProvider` keeps a mailbox at
   `/dev/mail` (and `GET /api/dev/mail`), locked unless `NODE_ENV` *and* `APP_ENV` are non-production and
   mail really goes to the console. There is no "any code works" mode — don't add one.
+- **A right password from an unrecognised browser is not a session.**
+  [src/services/login-verification.service.js](src/services/login-verification.service.js): password →
+  signed httpOnly challenge (`aplus_login_challenge`) + emailed six-digit code → `/login/verify` → trusted
+  device + session. `authenticateWithPassword()` has no side effects; `recordSignIn()` (`lastLoginAt`,
+  `USER_LOGIN`) runs only when a session is issued. A browser is recognised by a `TrustedDevice` row keyed
+  on the hash of the random `aplus_device` cookie and stamped with the account's `tokenVersion`, so
+  anything that ends every session ends every device's trust — don't add a second revocation path. The
+  code is shown on screen only when `NODE_ENV=development` and `APP_ENV` is not production; it is still
+  emailed and checked. Social sign-in is not gated. `bun run qa` clients share one device cookie per run
+  (`createClient({ shareDevice: false })` opts out) and complete the step from `devCode`.
 - **Risk detects; it never punishes.** [src/services/risk.service.js](src/services/risk.service.js) is the only place fraud logic lives. Every signal carries a `dedupeKey` derived from the event, so replays record once, and every call site uses `safelyRecordRiskSignal` so detection can never break the action being taken. No score restricts an account — an administrator does, from user management.
 - **The client supplies intent, never state.** Amounts, commission and statuses are derived server-side from stored data. `bun run qa` asserts an injected `price` or `status` is ignored.
 - **Ownership is checked against the loaded DB record**, never a request field (`requireOwnership`, `requireParticipant`, `ownsOrAdmin`).

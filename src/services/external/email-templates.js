@@ -195,6 +195,28 @@ export function emailTemplatesFor(brand = DEFAULT_EMAIL_BRAND) {
           `This code expires in ${expiresInMinutes} minutes and can be used once. Never share it — ${brand.appName} will never ask you for it. If you didn't request this, nothing has changed and you can safely ignore this email.`,
       }),
 
+    /**
+     * New-device sign-in code (§9, §36). Only ever sent after the password
+     * was right, so it names the device asking: an owner who did not just
+     * sign in learns that somebody else has their password.
+     */
+    loginVerificationCode: ({ firstName, code, expiresInMinutes, deviceLabel, whenLabel }) =>
+      email(`Your ${brand.appName} sign-in code`, {
+        preheader: "Confirm it's you signing in on a new device.",
+        heading: "Confirm it's you",
+        body: [
+          `Hi ${firstName},`,
+          "Someone signed in to your account with your password from a device we don't recognise. If that was you, enter this code to finish signing in:",
+        ],
+        code,
+        details: [
+          ...(deviceLabel ? [["Device", deviceLabel]] : []),
+          ...(whenLabel ? [["When", whenLabel]] : []),
+        ],
+        footnote:
+          `This code expires in ${expiresInMinutes} minutes and can be used once. Never share it — ${brand.appName} will never ask you for it. If this wasn't you, your password is known to someone else: reset it now and contact ${brand.supportEmail}.`,
+      }),
+
     /** Security notification — sent after the fact, never carries a token. */
     passwordChanged: ({ firstName, whenLabel }) =>
       email(`Your ${brand.appName} password was changed`, {

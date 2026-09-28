@@ -5,7 +5,8 @@
  * that the link on the sign-in page leads somewhere, that each screen hands
  * over to the next, that the code box accepts a code and refuses a wrong one,
  * that a refresh does not throw the request away, and that the password
- * chosen at the end is the one that signs in.
+ * chosen at the end is the one that signs in — through the new-device code
+ * screen, which a browser that has never verified always meets.
  *
  *   bun run dev                 # in one terminal, no mail server configured
  *   bun run e2e                 # in another
@@ -216,9 +217,31 @@ async function main() {
 
     await page.locator("#password").fill(NEW_PASSWORD);
     await page.getByRole("button", { name: "Sign in", exact: true }).click();
-    // Wait on the address leaving /login, not on a selector: the auth layout
-    // has landmarks that would match on the sign-in page itself.
-    await page.waitForURL((url) => url.pathname !== "/login", { timeout: 20_000 });
+
+    // 8. This browser has never been trusted — and a reset would have ended
+    //    any trust it had — so the right password earns a code, not a session.
+    await page.waitForURL("**/login/verify", { timeout: 20_000 });
+    await page.getByRole("heading", { name: "Confirm it’s you" }).waitFor();
+    check("a new browser is asked to confirm it's you", true);
+    const devCode = (await page.getByLabel("Development sign-in code").textContent())?.trim();
+    check("a development server shows the sign-in code on screen", /^\d{6}$/.test(devCode ?? ""));
+    await shot("new-device");
+
+    const signInCode = page.locator("input[name=code]");
+    await signInCode.fill(devCode === "000000" ? "111111" : "000000");
+    const wrongSignIn = page.getByText("That code isn't right. Check the email and try again.").first();
+    await wrongSignIn.waitFor();
+    check("a wrong sign-in code is refused on screen", await wrongSignIn.isVisible());
+
+    await page.reload();
+    const stillThere = await page.getByRole("heading", { name: "Confirm it’s you" })
+      .waitFor({ timeout: 10_000 }).then(() => true, () => false);
+    check("a refresh keeps the sign-in attempt", stillThere);
+
+    await page.getByRole("button", { name: "Use this code" }).click();
+    // Wait on the address leaving the auth pages, not on a selector: the auth
+    // layout has landmarks that would match on the code screen itself.
+    await page.waitForURL((url) => !url.pathname.startsWith("/login"), { timeout: 20_000 });
     const session = await page.request.get(`${BASE}/api/auth/session`);
     const user = (await session.json())?.data?.user;
     check("the new password signs in, and the session is real", user?.email === email,

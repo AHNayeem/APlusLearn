@@ -203,3 +203,62 @@ export async function clearPasswordResetCookie() {
   const store = await cookies();
   store.delete(PASSWORD_RESET_COOKIE);
 }
+
+/**
+ * The browser's handle on a new-device sign-in (§9, §36).
+ *
+ * Signed by `login-verification.service`: it names the account whose password
+ * was just checked, the challenge the emailed code belongs to, and the choices
+ * made on the sign-in form ("keep me signed in", where to land). It is not a
+ * session and opens nothing on its own — only a correct code checked against
+ * it does. httpOnly so page script never holds it; a refreshed code screen
+ * resumes because the server read it.
+ */
+const LOGIN_CHALLENGE_COOKIE = "aplus_login_challenge";
+
+export async function setLoginChallengeCookie(value, maxAgeSeconds) {
+  const store = await cookies();
+  store.set(LOGIN_CHALLENGE_COOKIE, value, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    path: "/",
+    maxAge: maxAgeSeconds,
+  });
+}
+
+export async function readLoginChallengeCookie() {
+  const store = await cookies();
+  return store.get(LOGIN_CHALLENGE_COOKIE)?.value ?? null;
+}
+
+export async function clearLoginChallengeCookie() {
+  const store = await cookies();
+  store.delete(LOGIN_CHALLENGE_COOKIE);
+}
+
+/**
+ * This browser's device identifier (§9, §36).
+ *
+ * A random value, meaningful only as the key of a `TrustedDevice` row (which
+ * stores its hash). It survives sign-out on purpose — signing out of a trusted
+ * laptop should not make the next sign-in ask for a code — and it is not a
+ * credential: without the password it gets nobody anywhere.
+ */
+const DEVICE_COOKIE = "aplus_device";
+
+export async function setDeviceCookie(value, maxAgeSeconds) {
+  const store = await cookies();
+  store.set(DEVICE_COOKIE, value, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    path: "/",
+    maxAge: maxAgeSeconds,
+  });
+}
+
+export async function readDeviceCookie() {
+  const store = await cookies();
+  return store.get(DEVICE_COOKIE)?.value ?? null;
+}

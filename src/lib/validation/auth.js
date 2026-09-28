@@ -62,16 +62,23 @@ export const loginSchema = z.object({
 export const forgotPasswordSchema = z.object({ email });
 
 /**
- * The emailed reset code. Spaces and dashes are forgiven — people paste
+ * An emailed six-digit code. Spaces and dashes are forgiven — people paste
  * "123 456" out of a mail client — anything else is refused before the
  * service counts it as a guess.
  */
-export const verifyResetCodeSchema = z.object({
-  code: z
-    .string()
-    .transform((value) => value.replace(/[\s-]/g, ""))
-    .pipe(z.string().regex(/^\d{6}$/, "Enter the 6-digit code we sent you.")),
-});
+const emailedCode = z
+  .string()
+  .transform((value) => value.replace(/[\s-]/g, ""))
+  .pipe(z.string().regex(/^\d{6}$/, "Enter the 6-digit code we sent you."));
+
+export const verifyResetCodeSchema = z.object({ code: emailedCode });
+
+/**
+ * The new-device sign-in code. Only the code: which account, which challenge
+ * and whether to remember the session all come from the signed handle the
+ * server set, never from this body.
+ */
+export const verifyLoginCodeSchema = z.object({ code: emailedCode });
 
 /**
  * Choosing the new password. `token` is the single-use authorisation a

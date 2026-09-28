@@ -5,6 +5,7 @@ import { Spinner } from "@/components/ui";
 import { getAppConfig } from "@/services/settings.service";
 import { connectToDatabase } from "@/lib/db/connect";
 import { offeredSignInMethods } from "@/services/external/oauth-provider";
+import { devSignInAccounts } from "@/lib/auth/dev-accounts";
 
 export async function generateMetadata() {
   const { branding } = await getAppConfig();
@@ -40,7 +41,7 @@ export default async function LoginPage() {
       </p>
 
       <Suspense fallback={<Spinner className="mt-8" />}>
-        <LoginForm oauthProviders={oauthProviders} />
+        <LoginForm oauthProviders={oauthProviders} devAccounts={devSignInAccounts()} />
       </Suspense>
     </>
   );

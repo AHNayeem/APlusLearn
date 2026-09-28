@@ -4,6 +4,7 @@
  */
 export { User } from "./User.js";
 export { AuthToken, AUTH_TOKEN_PURPOSE } from "./AuthToken.js";
+export { TrustedDevice } from "./TrustedDevice.js";
 export { Province, Grade, Subject, Course } from "./Curriculum.js";
 export { TutorProfile } from "./TutorProfile.js";
 export { TutorApplication, ONBOARDING_STEPS, ONBOARDING_STEP_META } from "./TutorApplication.js";

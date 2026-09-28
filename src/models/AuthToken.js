@@ -10,6 +10,11 @@ export const AUTH_TOKEN_PURPOSE = {
    * proves the proof happened, so the browser never has to be believed.
    */
   PASSWORD_RESET_AUTHORIZATION: "PASSWORD_RESET_AUTHORIZATION",
+  /**
+   * The six-digit code emailed when a correct password arrives from a browser
+   * the account has not trusted. `subject` is the sign-in challenge id.
+   */
+  LOGIN_VERIFICATION: "LOGIN_VERIFICATION",
   /** Six-digit code texted to a mobile number before it is trusted (§41 Phase 2). */
   PHONE_VERIFICATION: "PHONE_VERIFICATION",
 };

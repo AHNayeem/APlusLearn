@@ -181,6 +181,7 @@ async function runSections() {
   await bookingSlotLockTests();
   await rateLimitTests();
   await passwordResetTests();
+  await loginVerificationTests();
   await attachmentTests();
   await studentAnalyticsTests();
 }
@@ -12409,6 +12410,222 @@ async function passwordResetTests() {
   } finally {
     await clearWindows();
     mailbox.clearDevMail();
+    await AuthToken.deleteMany({ userId: { $in: made } });
+    await AuditLog.deleteMany({ entityId: { $in: made } });
+    await User.deleteMany({ _id: { $in: made } });
+  }
+}
+
+async function loginVerificationTests() {
+  section("New-device sign-in — code, trust, revocation and single use");
+
+  const uri = process.env.MONGODB_URI;
+  if (!uri) return skip("new-device sign-in", "MONGODB_URI is not set");
+  if (mongoose.connection.readyState !== 1) {
+    try {
+      await mongoose.connect(uri, { serverSelectionTimeoutMS: 2500 });
+    } catch {
+      return skip("new-device sign-in", "MongoDB is not reachable");
+    }
+  }
+
+  const { User, AuthToken, AUTH_TOKEN_PURPOSE, AuditLog, RateLimitWindow, TrustedDevice } =
+    await import("@/models");
+  const { AUDIT_ACTIONS, LOGIN_VERIFICATION } = await import("@/constants");
+  const lv = await import("@/services/login-verification.service");
+  const { authenticateWithPassword } = await import("@/services/auth.service");
+  const { hashPassword } = await import("@/lib/auth/password");
+  const { verifyLoginCodeSchema } = await import("@/lib/validation/auth");
+  const { createHash } = await import("node:crypto");
+
+  // The code comes back on screen only in a development build, which this
+  // process is not unless told; each step that needs it says so.
+  const withNodeEnv = async (vars, fn) => {
+    const saved = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]));
+    for (const [k, v] of Object.entries(vars)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    try {
+      return await fn();
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  };
+  const inDevelopment = (fn) => withNodeEnv({ NODE_ENV: "development", APP_ENV: undefined }, fn);
+  const clearWindows = () => RateLimitWindow.deleteMany({ _id: /^login-code:/ });
+  const refused = (fn, code) => throws(fn, (e) => e.code === code);
+  const wrong = (code) => (code === "000000" ? "111111" : "000000");
+
+  const PASSWORD = "AplusLearn2024!";
+  const made = [];
+  const makeUser = async (label) => {
+    const user = await User.create({
+      email: `device-${label}-${randomUUID()}@example.com`,
+      passwordHash: await hashPassword(PASSWORD),
+      firstName: "Device",
+      lastName: "Tester",
+      role: "PARENT",
+      status: "ACTIVE",
+      emailVerifiedAt: new Date(),
+      acceptedTermsAt: new Date(),
+    });
+    made.push(user._id);
+    return user;
+  };
+  const signedInAs = async (email) => authenticateWithPassword({ email, password: PASSWORD });
+  const start = (user, options) => inDevelopment(() => lv.startLoginChallenge(user, options));
+
+  try {
+    await clearWindows();
+    const alice = await makeUser("alice");
+    const bob = await makeUser("bob");
+
+    // --- pure pieces ---------------------------------------------------------
+    check("a pasted code with a space reads as six digits",
+      verifyLoginCodeSchema.parse({ code: "123 456" }).code === "123456");
+    check("anything but six digits is refused before it counts as a guess",
+      !verifyLoginCodeSchema.safeParse({ code: "12345" }).success);
+    check("a User-Agent reads as a browser and a system",
+      lv.deviceLabel("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36") === "Chrome on macOS" &&
+        lv.deviceLabel("Mozilla/5.0 (iPad; CPU OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1") === "Safari on iOS" &&
+        lv.deviceLabel("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36 Edg/140.0") === "Edge on Windows");
+    check("the on-screen code is a development-build feature only",
+      (await inDevelopment(() => lv.codeShownOnScreen())) &&
+        !(await withNodeEnv({ NODE_ENV: "production", APP_ENV: undefined }, () => lv.codeShownOnScreen())) &&
+        !(await withNodeEnv({ NODE_ENV: "development", APP_ENV: "production" }, () => lv.codeShownOnScreen())) &&
+        !(await withNodeEnv({ NODE_ENV: "test", APP_ENV: undefined }, () => lv.codeShownOnScreen())));
+
+    // --- a right password is not yet a sign-in -------------------------------
+    const aliceUser = await signedInAs(alice.email);
+    check("checking the password stamps no sign-in",
+      !(await User.findById(alice._id).lean()).lastLoginAt &&
+        (await AuditLog.countDocuments({ entityId: alice._id, action: AUDIT_ACTIONS.USER_LOGIN })) === 0);
+    check("an unknown browser is not trusted", !(await lv.isTrustedDevice(aliceUser, null)));
+    check("nor is a malformed device value", !(await lv.isTrustedDevice(aliceUser, "not-a-device")));
+
+    const first = await start(aliceUser, { remember: false, next: "/bookings", ip: "203.0.113.4" });
+    check("a challenge carries what the code screen shows",
+      typeof first.challengeToken === "string" && first.maskedEmail.startsWith("d***@") &&
+        first.expiresInMinutes === LOGIN_VERIFICATION.codeTtlMinutes && /^\d{6}$/.test(first.devCode));
+    check("outside development the code stays off the screen",
+      lv.describeLoginChallenge(first.challengeToken).devCode === undefined);
+    check("in development a refreshed screen still shows it",
+      (await inDevelopment(() => lv.describeLoginChallenge(first.challengeToken))).devCode === first.devCode);
+
+    const stored = await AuthToken.findOne({ userId: alice._id, purpose: AUTH_TOKEN_PURPOSE.LOGIN_VERIFICATION, consumedAt: null }).lean();
+    check("the code is stored keyed, never plain or plainly hashed",
+      stored && stored.tokenHash !== first.devCode &&
+        stored.tokenHash !== createHash("sha256").update(first.devCode).digest("hex"));
+    const handle = JSON.parse(Buffer.from(first.challengeToken.split(".")[0], "base64url").toString());
+    check("the handle names no address and carries no readable code",
+      !JSON.stringify(handle).includes(alice.email) && !JSON.stringify(handle).includes(first.devCode));
+
+    const tampered = `${Buffer.from(JSON.stringify({ ...handle, uid: String(bob._id) })).toString("base64url")}.${first.challengeToken.split(".")[1]}`;
+    check("a handle edited to name another account is refused",
+      (await refused(() => lv.verifyLoginCode({ challengeToken: tampered, code: first.devCode }), "LOGIN_CHALLENGE_EXPIRED")).matched);
+
+    const miss = await refused(
+      () => lv.verifyLoginCode({ challengeToken: first.challengeToken, code: wrong(first.devCode) }),
+      "VALIDATION_ERROR",
+    );
+    check("a wrong code is a field error, and counted",
+      miss.matched && (await AuthToken.findById(stored._id).lean()).attempts === 1);
+
+    const early = await refused(() => lv.resendLoginCode(first.challengeToken), "RESEND_COOLDOWN");
+    check("a resend inside the cooldown is refused with the wait",
+      early.matched && early.error.details?.retryAfterSeconds > 0);
+
+    // --- the right code -------------------------------------------------------
+    const granted = await lv.verifyLoginCode(
+      { challengeToken: first.challengeToken, code: first.devCode, deviceToken: null },
+      { ip: "203.0.113.4", userAgent: "Mozilla/5.0 (X11; Linux x86_64; rv:130.0) Gecko/20100101 Firefox/130.0" },
+    );
+    check("the right code signs in with the form's choices",
+      String(granted.user.id) === String(alice._id) && granted.remember === false && granted.next === "/bookings");
+    check("and the user it hands back carries no password hash", granted.user.passwordHash === undefined);
+    const trusted = await TrustedDevice.findOne({ userId: alice._id }).lean();
+    check("the browser is trusted by the hash of a fresh device value",
+      /^[A-Za-z0-9_-]{43}$/.test(granted.deviceToken) && trusted?.deviceHash ===
+        createHash("sha256").update(granted.deviceToken).digest("hex") && trusted.label === "Firefox on Linux");
+    check("the sign-in is stamped and audited as a new device",
+      Boolean((await User.findById(alice._id).lean()).lastLoginAt) &&
+        (await AuditLog.countDocuments({ entityId: alice._id, action: AUDIT_ACTIONS.USER_DEVICE_TRUSTED })) === 1 &&
+        (await AuditLog.countDocuments({ entityId: alice._id, action: AUDIT_ACTIONS.USER_LOGIN, "metadata.newDevice": true })) === 1);
+    check("the same code cannot open a second session",
+      (await refused(() => lv.verifyLoginCode({ challengeToken: first.challengeToken, code: first.devCode }), "CODE_EXPIRED")).matched);
+    check("the browser is recognised from now on", await lv.isTrustedDevice(aliceUser, granted.deviceToken));
+    check("but only by the account that verified on it",
+      !(await lv.isTrustedDevice(await signedInAs(bob.email), granted.deviceToken)));
+
+    // A second account on the same browser keeps the browser's identifier.
+    await clearWindows();
+    const bobFirst = await start(await signedInAs(bob.email));
+    const bobGrant = await lv.verifyLoginCode({
+      challengeToken: bobFirst.challengeToken, code: bobFirst.devCode, deviceToken: granted.deviceToken,
+    });
+    check("one browser stays one device across the accounts that verify on it",
+      bobGrant.deviceToken === granted.deviceToken &&
+        (await TrustedDevice.countDocuments({ deviceHash: trusted.deviceHash })) === 2);
+
+    // --- a new code voids the last; five misses burn one ---------------------
+    await clearWindows();
+    const second = await start(aliceUser);
+    await clearWindows();
+    const resent = await inDevelopment(() => lv.resendLoginCode(second.challengeToken));
+    // The challenge is the same one, so the old code is now simply a wrong
+    // guess at the new code — and counted as one.
+    const stale = second.devCode === resent.devCode
+      ? { matched: true } // one chance in a million; nothing to tell apart
+      : await refused(
+          () => lv.verifyLoginCode({ challengeToken: resent.challengeToken, code: second.devCode }),
+          "VALIDATION_ERROR",
+        );
+    check("a resent code replaces the one before it", stale.matched);
+    for (let i = 0; i < LOGIN_VERIFICATION.maxAttempts - 2; i += 1) {
+      await refused(() => lv.verifyLoginCode({ challengeToken: resent.challengeToken, code: wrong(resent.devCode) }));
+    }
+    const burned = await refused(
+      () => lv.verifyLoginCode({ challengeToken: resent.challengeToken, code: wrong(resent.devCode) }),
+      "TOO_MANY_ATTEMPTS",
+    );
+    check("the fifth wrong code burns it", burned.matched);
+    check("after which the right code is refused too",
+      (await refused(() => lv.verifyLoginCode({ challengeToken: resent.challengeToken, code: resent.devCode }), "CODE_EXPIRED")).matched);
+
+    // --- revocation rides on tokenVersion ------------------------------------
+    await clearWindows();
+    const pending = await start(aliceUser);
+    await User.updateOne({ _id: alice._id }, { $inc: { tokenVersion: 1 } });
+    const bumped = await User.findById(alice._id).lean();
+    check("ending every session ends every device's trust",
+      !(await lv.isTrustedDevice(bumped, granted.deviceToken)));
+    check("and spends a challenge issued before it",
+      (await refused(() => lv.verifyLoginCode({ challengeToken: pending.challengeToken, code: pending.devCode }), "LOGIN_CHALLENGE_EXPIRED")).matched);
+
+    await TrustedDevice.updateOne({ userId: bob._id }, { $set: { expiresAt: new Date(Date.now() - 1000) } });
+    check("lapsed trust is not recognised",
+      !(await lv.isTrustedDevice(await signedInAs(bob.email), granted.deviceToken)));
+
+    await User.updateOne({ _id: bob._id }, { $set: { status: "SUSPENDED" } });
+    await clearWindows();
+    const bobLate = await start({ ...(await User.findById(bob._id).lean()), id: String(bob._id) });
+    check("a suspension between password and code refuses the code",
+      (await refused(() => lv.verifyLoginCode({ challengeToken: bobLate.challengeToken, code: bobLate.devCode }), "LOGIN_CHALLENGE_EXPIRED")).matched);
+
+    // --- the hourly cap ------------------------------------------------------
+    await clearWindows();
+    const carol = await makeUser("carol");
+    const carolUser = await signedInAs(carol.email);
+    for (let i = 0; i < LOGIN_VERIFICATION.maxCodesPerHour; i += 1) await start(carolUser);
+    check("an account is sent a bounded number of codes an hour",
+      (await refused(() => start(carolUser), "RATE_LIMITED")).matched);
+  } finally {
+    await clearWindows();
+    await TrustedDevice.deleteMany({ userId: { $in: made } });
     await AuthToken.deleteMany({ userId: { $in: made } });
     await AuditLog.deleteMany({ entityId: { $in: made } });
     await User.deleteMany({ _id: { $in: made } });

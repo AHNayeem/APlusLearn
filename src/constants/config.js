@@ -269,6 +269,31 @@ export const PASSWORD_RESET = {
   requestTtlMinutes: 60,
 };
 
+/**
+ * New-device sign-in verification (§9, §36).
+ *
+ * A correct password from a browser the account has not trusted before earns
+ * a six-digit emailed code, not a session. The numbers mirror forgot-password
+ * and for the same reasons — five guesses per code, a new code voids the
+ * last, a sixty-second resend cooldown (see `PASSWORD_RESET` on why it may not
+ * go lower) — except the hourly cap, which is higher because every code here
+ * is issued only *after* the password was right: it bounds mail to an account
+ * owner, not guesses by a stranger.
+ *
+ * `challengeTtlMinutes` outlives the code for the same reason the reset
+ * request does: the browser should hear "that code expired, send another",
+ * not "start again". `trustedDeviceDays` is how long a verified browser skips
+ * the step before it is asked once more.
+ */
+export const LOGIN_VERIFICATION = {
+  codeTtlMinutes: 10,
+  maxAttempts: 5,
+  resendCooldownSeconds: 60,
+  maxCodesPerHour: 10,
+  challengeTtlMinutes: 30,
+  trustedDeviceDays: 90,
+};
+
 export const DEFAULT_SETTINGS = {
   /** Platform commission taken from each lesson, as a percentage. */
   commissionPercent: 15,

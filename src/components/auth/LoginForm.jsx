@@ -10,7 +10,7 @@ import { Button, Field, Input, PasswordInput, Checkbox, FormErrorSummary, Alert 
 import { OAuthButtons } from "@/components/layout/OAuthButtons";
 import { OAuthErrorNotice } from "./OAuthErrorNotice";
 
-export function LoginForm({ oauthProviders }) {
+export function LoginForm({ oauthProviders, devAccounts = null }) {
   const router = useRouter();
   const params = useSearchParams();
   const next = params.get("next");
@@ -26,8 +26,10 @@ export function LoginForm({ oauthProviders }) {
       remember,
       next: next ?? undefined,
     });
+    // A browser this account has not trusted is sent to the code screen
+    // (`verificationRequired`); nobody is signed in yet, so nothing to refresh.
     router.push(result.redirectTo);
-    router.refresh();
+    if (!result.verificationRequired) router.refresh();
     return result;
   });
 
@@ -53,6 +55,17 @@ export function LoginForm({ oauthProviders }) {
         className="space-y-5"
       >
         <FormErrorSummary error={error} fieldErrors={fieldErrors} />
+
+        {devAccounts?.length > 0 && (
+          <DevAccountPicker
+            accounts={devAccounts}
+            selectedEmail={email}
+            onPick={(account) => {
+              setEmail(account.email);
+              setPassword(account.password);
+            }}
+          />
+        )}
 
         <Field label="Email address" htmlFor="email" error={fieldErrors.email} required>
           <Input
@@ -104,6 +117,36 @@ export function LoginForm({ oauthProviders }) {
       </form>
 
       <OAuthButtons next={next} providers={oauthProviders} />
+    </div>
+  );
+}
+
+/**
+ * Development-only shortcut: fills the form with a seeded account. The page
+ * passes no accounts outside development (see lib/auth/dev-accounts.js), so
+ * this never renders in production.
+ */
+function DevAccountPicker({ accounts, selectedEmail, onPick }) {
+  return (
+    <div className="rounded-xl border border-dashed border-ink-300 bg-ink-50 p-3">
+      <p className="text-xs font-semibold uppercase tracking-wide text-ink-500">
+        Development &middot; fill a seeded account
+      </p>
+      <div className="mt-2 flex flex-wrap gap-2">
+        {accounts.map((account) => (
+          <Button
+            key={account.email}
+            type="button"
+            size="xs"
+            variant={selectedEmail === account.email ? "subtle" : "secondary"}
+            aria-pressed={selectedEmail === account.email}
+            title={account.email}
+            onClick={() => onPick(account)}
+          >
+            {account.role}
+          </Button>
+        ))}
+      </div>
     </div>
   );
 }
