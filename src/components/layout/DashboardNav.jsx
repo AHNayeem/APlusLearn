@@ -36,14 +36,23 @@ export function DashboardNav({ items, user, badges = {}, branding }) {
     };
   }, [open]);
 
-  const isActive = (href) =>
+  // A link owns the path it names and everything under it, except where a
+  // longer link claims the deeper path: `/admin/settings/integrations`
+  // belongs to External modules, not also to Settings. Exactly one item is
+  // ever current — the longest that matches. `/dashboard` owns only itself,
+  // because the parent area's other pages are siblings, not children of it.
+  const matches = (href) =>
     pathname === href || (href !== "/dashboard" && pathname.startsWith(`${href}/`));
+  const activeHref = items
+    .map((item) => item.href)
+    .filter(matches)
+    .reduce((best, href) => (best && best.length >= href.length ? best : href), null);
 
   const links = (
     <nav aria-label="Dashboard" className="space-y-1">
       {items.map((item) => {
         const Icon = Icons[item.icon] ?? Icons.Circle;
-        const active = isActive(item.href);
+        const active = item.href === activeHref;
         const count = item.badge ? badges[item.badge] : 0;
 
         return (

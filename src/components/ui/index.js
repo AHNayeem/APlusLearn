@@ -13,7 +13,7 @@ export {
 } from "./States";
 export { Modal, ConfirmModal } from "./Modal";
 export { Dropdown, DropdownItem, DropdownDivider, DropdownLabel } from "./Dropdown";
-export { Tabs, LinkTabs } from "./Tabs";
+export { Tabs, SideTabs, LinkTabs } from "./Tabs";
 export { Alert, InlineNote } from "./Alert";
 export { Tooltip, InfoHint } from "./Tooltip";
 export { Table, THead, TH, TBody, TR, TD, TableEmpty } from "./Table";

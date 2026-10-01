@@ -31,10 +31,11 @@ export const dynamic = "force-dynamic";
  * this screen cannot change: which providers the *deployment* offers, and
  * which are running their development implementation.
  */
-export default async function AdminIntegrationsPage() {
+export default async function AdminIntegrationsPage({ searchParams }) {
   await enforceRole(ROLES.ADMIN, "/admin/settings/integrations");
   await connectToDatabase();
 
+  const { module: requestedModule } = await searchParams;
   const [{ modules }, webhooks] = await Promise.all([
     listIntegrationModules(),
     recentWebhookEvents({ limit: 10 }),
@@ -63,7 +64,10 @@ export default async function AdminIntegrationsPage() {
         application&rsquo;s own URL stay in the environment and are deliberately not editable here.
       </Alert>
 
-      <IntegrationsWorkspace modules={toPlain(modules)} />
+      <IntegrationsWorkspace
+        modules={toPlain(modules)}
+        initialModule={typeof requestedModule === "string" ? requestedModule : undefined}
+      />
 
       <div className="mt-8 max-w-3xl">
         <IntegrationHealth

@@ -21,7 +21,7 @@ export const dynamic = "force-dynamic";
  * page being unreachable is a convenience; `ADMIN_SETTINGS_MANAGE` on the API
  * is the control.
  *
- * Integration health sits below the tabs rather than inside them because it is
+ * Integration health sits below the sections rather than inside them because it is
  * not a setting: it reports what the deployment environment provides, and
  * nothing on *this* page can change it.
  *
@@ -32,10 +32,11 @@ export const dynamic = "force-dynamic";
  * components as branding, so a credential kept here would be one careless
  * prop away from a browser.
  */
-export default async function AdminSettingsPage() {
+export default async function AdminSettingsPage({ searchParams }) {
   await enforceRole(ROLES.ADMIN, "/admin/settings");
   await connectToDatabase();
 
+  const { section } = await searchParams;
   const [settings, webhooks] = await Promise.all([
     getSettings({ fresh: true }),
     recentWebhookEvents({ limit: 10 }),
@@ -58,6 +59,7 @@ export default async function AdminSettingsPage() {
         settings={adminSettingsView(settings)}
         assetRules={BRANDING_ASSET_RULES}
         smsProvider={smsProvider}
+        initialSection={typeof section === "string" ? section : undefined}
       />
 
       <Alert tone="info" title="Credentials live on their own screen" className="mt-8 max-w-3xl">

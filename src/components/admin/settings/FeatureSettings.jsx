@@ -112,7 +112,7 @@ export function FeatureSettings({ settings }) {
             Continue with Google and Continue with Apple are switched on and off, together with
             their credentials, under{" "}
             <Link
-              href="/admin/settings/integrations"
+              href="/admin/settings/integrations?module=oauth"
               className="inline-flex items-center gap-1 font-semibold text-brand-600 hover:underline"
             >
               External modules → Social sign-in
