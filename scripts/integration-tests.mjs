@@ -184,6 +184,7 @@ async function runSections() {
   await loginVerificationTests();
   await attachmentTests();
   await studentAnalyticsTests();
+  await realtimeTests();
 }
 
 /**
@@ -12643,3 +12644,458 @@ main()
     // way of hiding work still in flight.
     process.exit(process.exitCode ?? 0);
   });
+
+/** Resolve once `condition()` is truthy, or after `timeout` ms with its last value. */
+async function waitFor(condition, timeout = 4000, every = 50) {
+  const until = Date.now() + timeout;
+  let value = condition();
+  while (!value && Date.now() < until) {
+    await new Promise((resolve) => setTimeout(resolve, every));
+    value = condition();
+  }
+  return value;
+}
+
+/** A subscriber that records what the hub sends it. */
+function recordingSubscriber(userId) {
+  const events = [];
+  return {
+    userId: String(userId),
+    events,
+    closed: [],
+    send(event, data) {
+      events.push({ event, data });
+    },
+    close(reason) {
+      this.closed.push(reason);
+    },
+    of(event) {
+      return events.filter((e) => e.event === event);
+    },
+  };
+}
+
+/**
+ * Realtime delivery (docs/REALTIME.md).
+ *
+ * What has to hold: an event reaches exactly the people the stored document
+ * names, carries no content, is not duplicated by a poll that re-reads its
+ * overlap, and a send retried under the same `clientId` is one message — one
+ * notification, one unread — however the retry arrives. And because events
+ * can always be missed, the catch-up read has to recover what they would have
+ * said, behind the same participant check as every other read.
+ *
+ * The change-stream source needs a replica set, which a default local install
+ * is not; point `REALTIME_REPLSET_URI` at one (docs/REALTIME.md shows a
+ * throwaway single-node set) and that half runs too.
+ */
+async function realtimeTests() {
+  section("Realtime — scoping, merging, sources, idempotency and recovery");
+
+  // Pure rules first; these need no database.
+  process.env.REALTIME_POLL_MS = "250";
+  const { eventsForChange } = await import("@/services/realtime.service");
+  const { REALTIME_EVENTS } = await import("@/lib/realtime/events");
+  const { mergeMessages, newClientId, newestStoredAt } = await import(
+    "@/components/messaging/thread"
+  );
+
+  const a = new mongoose.Types.ObjectId();
+  const b = new mongoose.Types.ObjectId();
+  const notificationEvents = eventsForChange({
+    collection: "notifications",
+    op: "insert",
+    doc: { _id: new mongoose.Types.ObjectId(), userId: a, createdAt: new Date(), body: "secret" },
+  });
+  check("a notification is routed to its owner and nobody else",
+    notificationEvents.length === 1 && notificationEvents[0].userId === String(a));
+  check("and the event names it without carrying its text",
+    notificationEvents[0].event === REALTIME_EVENTS.NOTIFICATION &&
+      Object.keys(notificationEvents[0].data).sort().join() === "createdAt,id");
+
+  const conversationEvents = eventsForChange({
+    collection: "conversations",
+    op: "update",
+    doc: {
+      _id: new mongoose.Types.ObjectId(),
+      participantIds: [a, b],
+      unreadCounts: { [String(a)]: 2, [String(b)]: 0 },
+      lastMessageAt: new Date(),
+      lastMessageSenderId: b,
+      lastMessagePreview: "do not send me",
+      archivedBy: [b],
+      updatedAt: new Date(),
+    },
+  });
+  check("a conversation change reaches both participants",
+    conversationEvents.map((e) => e.userId).sort().join() === [String(a), String(b)].sort().join());
+  check("each with their own unread count and archive state",
+    conversationEvents.find((e) => e.userId === String(a))?.data.unreadCount === 2 &&
+      conversationEvents.find((e) => e.userId === String(b))?.data.archived === true);
+  check("and no preview of what was said",
+    conversationEvents.every((e) => !JSON.stringify(e.data).includes("do not send me")));
+
+  const clientId = newClientId();
+  check("a client id is a v4 UUID",
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(clientId));
+  const t0 = new Date("2026-01-01T10:00:00Z").toISOString();
+  const t1 = new Date("2026-01-01T10:01:00Z").toISOString();
+  const local = { id: `local-${clientId}`, clientId, local: true, status: "sending", createdAt: t1 };
+  const stored = { id: "m2", clientId, createdAt: t1 };
+  const older = { id: "m1", createdAt: t0 };
+  const viaHint = mergeMessages([older, local], [stored]);
+  const viaResponseAfterHint = mergeMessages(viaHint, [stored]);
+  check("the stored copy of an optimistic message replaces it, whichever arrives first",
+    viaHint.length === 2 && viaHint[1].id === "m2" && !viaHint.some((m) => m.local));
+  check("and the second arrival changes nothing",
+    viaResponseAfterHint.length === 2 && viaResponseAfterHint.map((m) => m.id).join() === "m1,m2");
+  const failed = { ...local, clientId: newClientId(), id: "local-x", status: "failed" };
+  const withFailed = mergeMessages([older, failed], [older, stored]);
+  check("a failed message stays, after everything stored, until it is retried or edited",
+    withFailed.length === 3 && withFailed[2] === failed);
+  check("stored messages are kept in time order whatever order they arrive in",
+    mergeMessages([stored], [older]).map((m) => m.id).join() === "m1,m2");
+  check("the catch-up point ignores anything not yet stored",
+    newestStoredAt([older, local]) === new Date(t0).getTime());
+
+  const uri = process.env.MONGODB_URI;
+  if (!uri) return skip("realtime database tests", "MONGODB_URI is not set");
+  if (mongoose.connection.readyState !== 1) {
+    try {
+      await mongoose.connect(uri, { serverSelectionTimeoutMS: 2500 });
+    } catch {
+      return skip("realtime database tests", "MongoDB is not reachable");
+    }
+  }
+
+  const { User, TutorProfile, Conversation, Message, Notification } = await import("@/models");
+  const { ROLES, NOTIFICATION_TYPES } = await import("@/constants");
+  const realtime = await import("@/services/realtime.service");
+  const messages = await import("@/services/message.service");
+  const { notify, markNotificationsRead } = await import("@/services/notification.service");
+  const { startSource, supportsChangeStreams, REALTIME_SOURCES } = await import(
+    "@/lib/realtime/sources"
+  );
+  const { toPlain } = await import("@/lib/utils/serialize");
+
+  const tutorProfile = await TutorProfile.findOne({ isSearchable: true }).lean();
+  if (!tutorProfile) return skip("realtime database tests", "no seeded tutor — run `bun run seed`");
+  const tutorUser = await User.findById(tutorProfile.userId).lean();
+
+  // Throwaway accounts, so no seeded thread, badge or unread count moves.
+  const stamp = Date.now();
+  const makeUser = (label, role = ROLES.PARENT) =>
+    User.create({
+      email: `realtime-${label}-${stamp}@example.com`,
+      firstName: "Realtime",
+      lastName: label,
+      role,
+      emailVerifiedAt: new Date(),
+    });
+  const parentDoc = await makeUser("parent");
+  const strangerDoc = await makeUser("stranger");
+  const adminDoc = await makeUser("admin", ROLES.ADMIN);
+  const parent = toPlain(parentDoc.toObject());
+  const tutor = toPlain(tutorUser);
+  const createdUsers = [parentDoc._id, strangerDoc._id, adminDoc._id];
+  let conversationId = null;
+  // A tutor's reply feeds their public response time; put it back afterwards.
+  const tutorStats = tutorProfile.stats ?? {};
+
+  await Message.createIndexes();
+  const db = mongoose.connection.db;
+
+  try {
+    // --- Poll source, directly ----------------------------------------------
+    const isReplicaSet = await supportsChangeStreams(db);
+    const records = [];
+    let resyncs = 0;
+    const poll = await startSource(db, {
+      kind: REALTIME_SOURCES.POLL,
+      onChange: (record) => records.push(record),
+      onResync: () => {
+        resyncs += 1;
+      },
+      log: { error() {} },
+    });
+    check("the poll source starts when asked for", poll.kind === REALTIME_SOURCES.POLL);
+
+    const probe = await notify({
+      userId: strangerDoc._id,
+      type: NOTIFICATION_TYPES.MESSAGE_RECEIVED,
+      title: "Realtime probe",
+      body: "probe body",
+    });
+    const sawInsert = await waitFor(() =>
+      records.find((r) => r.collection === "notifications" && String(r.doc._id) === probe.id),
+    );
+    check("the poll source sees a new notification", sawInsert?.op === "insert",
+      JSON.stringify(sawInsert?.op));
+    check("and reads none of its text",
+      sawInsert && sawInsert.doc.body === undefined && sawInsert.doc.title === undefined);
+
+    await markNotificationsRead(strangerDoc._id, { ids: [probe.id] });
+    const sawUpdate = await waitFor(() =>
+      records.find(
+        (r) => r.collection === "notifications" && String(r.doc._id) === probe.id && r.op === "update",
+      ),
+    );
+    check("and sees it being read", Boolean(sawUpdate?.doc.readAt));
+
+    // Several ticks re-read the overlap window; none may deliver twice.
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    const versions = records
+      .filter((r) => String(r.doc._id) === probe.id)
+      .map((r) => `${r.op}:${new Date(r.doc.updatedAt).getTime()}`);
+    check("re-reading the overlap window delivers each version once",
+      versions.length === new Set(versions).size && versions.length >= 2, versions.join(" "));
+    await poll.stop();
+    check("a healthy poll asks nobody to resync", resyncs === 0);
+
+    // --- The hub: who hears about a message ---------------------------------
+    const parentSub = recordingSubscriber(parent.id);
+    const tutorSub = recordingSubscriber(tutor.id);
+    const strangerSub = recordingSubscriber(strangerDoc._id);
+    const adminSub = recordingSubscriber(adminDoc._id);
+    const unsubscribers = await Promise.all(
+      [parentSub, tutorSub, strangerSub, adminSub].map((sub) => realtime.subscribe(sub)),
+    );
+    check("the hub runs the poll source against a standalone server",
+      realtime.realtimeSourceKind() === (isReplicaSet ? "change-stream" : "poll"),
+      realtime.realtimeSourceKind());
+    // Let the first tick establish the watermark before anything is written.
+    await new Promise((resolve) => setTimeout(resolve, 400));
+
+    const firstClientId = newClientId();
+    const body = `Realtime integration message ${stamp}`;
+    const sent = await messages.sendMessage(
+      { tutorProfileId: String(tutorProfile._id), body, clientId: firstClientId },
+      { ...parent, role: ROLES.PARENT },
+    );
+    conversationId = sent.conversationId;
+
+    const tutorHeard = await waitFor(() =>
+      tutorSub.of(REALTIME_EVENTS.CONVERSATION).find((e) => e.data.id === conversationId),
+    );
+    check("the recipient hears that the conversation changed", Boolean(tutorHeard));
+    check("with their unread count for it", tutorHeard?.data.unreadCount === 1,
+      JSON.stringify(tutorHeard?.data));
+    const tutorNotified = await waitFor(() => tutorSub.of(REALTIME_EVENTS.NOTIFICATION).length > 0);
+    check("and that they have a new notification", Boolean(tutorNotified));
+    const tutorCounts = await waitFor(() => tutorSub.of(REALTIME_EVENTS.COUNTS).at(-1));
+    check("and a recount of both badges",
+      Number.isInteger(tutorCounts?.data.messages) && Number.isInteger(tutorCounts?.data.notifications));
+    check("the sender's own tabs hear it too",
+      Boolean(await waitFor(() =>
+        parentSub.of(REALTIME_EVENTS.CONVERSATION).find((e) => e.data.id === conversationId))));
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    check("someone outside the conversation hears nothing about it",
+      !strangerSub.events.some((e) => e.data?.id === conversationId));
+    check("nor does an administrator who is not in it",
+      !adminSub.events.some((e) => e.data?.id === conversationId) &&
+        adminSub.of(REALTIME_EVENTS.NOTIFICATION).length === 0);
+    check("no event carries what was said",
+      ![...parentSub.events, ...tutorSub.events].some((e) => JSON.stringify(e.data).includes(body)));
+
+    // --- Idempotency ---------------------------------------------------------
+    const countFor = () => Message.countDocuments({ conversationId });
+    const notificationsFor = () =>
+      Notification.countDocuments({ userId: tutor.id, entityId: conversationId });
+    const before = { messages: await countFor(), notifications: await notificationsFor() };
+    const unreadBefore = (await Conversation.findById(conversationId).lean()).unreadCounts[tutor.id];
+
+    const replay = await messages.sendMessage(
+      { conversationId, body, clientId: firstClientId },
+      { ...parent, role: ROLES.PARENT },
+    );
+    check("a retry under the same client id returns the stored message",
+      replay.message.id === sent.message.id);
+    check("without storing a second one", (await countFor()) === before.messages);
+    check("or notifying twice", (await notificationsFor()) === before.notifications);
+    check("or counting it unread twice",
+      (await Conversation.findById(conversationId).lean()).unreadCounts[tutor.id] === unreadBefore);
+
+    const raceId = newClientId();
+    const raced = await Promise.all(
+      [0, 1, 2].map(() =>
+        messages.sendMessage(
+          { conversationId, body: "Raced send", clientId: raceId },
+          { ...parent, role: ROLES.PARENT },
+        ),
+      ),
+    );
+    check("three copies of one send racing each other store one message",
+      new Set(raced.map((r) => r.message.id)).size === 1 &&
+        (await Message.countDocuments({ conversationId, clientId: raceId })) === 1);
+    check("and notify once",
+      (await notificationsFor()) === before.notifications + 1,
+      `${await notificationsFor()} vs ${before.notifications + 1}`);
+
+    const otherSenderSameId = await messages.sendMessage(
+      { conversationId, body: "Same id, other sender", clientId: raceId },
+      { ...tutor, role: ROLES.TUTOR },
+    );
+    check("a client id is the sender's own — another sender's identical one is a new message",
+      otherSenderSameId.message.id !== raced[0].message.id);
+
+    // --- Recovery -------------------------------------------------------------
+    // The tutor's tab was asleep for all of that. What it holds is the first
+    // message; the catch-up read has to bring everything after it.
+    const missed = await messages.messagesSince(conversationId, { ...tutor, role: ROLES.TUTOR },
+      sent.message.createdAt);
+    const missedIds = missed.messages.map((m) => m.id);
+    check("a catch-up read recovers every message sent while away",
+      missedIds.includes(raced[0].message.id) && missedIds.includes(otherSenderSameId.message.id));
+    check("in time order, with the reader's unread count",
+      missed.messages.every((m, i, all) => i === 0 || all[i - 1].createdAt <= m.createdAt) &&
+        Number.isInteger(missed.unreadCount));
+    check("and attachments shaped for a browser, never with a storage key",
+      missed.messages.every((m) => (m.attachments ?? []).every((x) => !("storageKey" in x))));
+    const refused = await throws(
+      () => messages.messagesSince(conversationId, { id: strangerDoc._id, role: ROLES.PARENT },
+        sent.message.createdAt),
+      (error) => error.status === 403,
+    );
+    check("someone outside the conversation cannot catch up on it", refused.threw && refused.matched);
+
+    // --- Read state follows -------------------------------------------------
+    const countsBeforeRead = tutorSub.of(REALTIME_EVENTS.COUNTS).length;
+    await messages.markConversationRead(conversationId, { ...tutor, role: ROLES.TUTOR });
+    const readEvent = await waitFor(() =>
+      tutorSub.of(REALTIME_EVENTS.CONVERSATION)
+        .find((e) => e.data.id === conversationId && e.data.unreadCount === 0),
+    );
+    check("reading a thread tells the reader's other tabs it is read", Boolean(readEvent));
+    check("and recounts their badges",
+      Boolean(await waitFor(() => tutorSub.of(REALTIME_EVENTS.COUNTS).length > countsBeforeRead)));
+
+    // --- The stream itself, and what it leaves behind -------------------------
+    const hubSubscribers = (id) => globalThis.__aplusRealtime?.subscribers.get(String(id))?.size ?? 0;
+    const readUntil = async (reader, marker) => {
+      const decoder = new TextDecoder();
+      let text = "";
+      const until = Date.now() + 4000;
+      while (!text.includes(marker) && Date.now() < until) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        text += decoder.decode(value, { stream: true });
+      }
+      return text;
+    };
+
+    const viaAbort = new AbortController();
+    const response = realtime.openRealtimeStream(
+      { id: parent.id, tokenVersion: parentDoc.tokenVersion ?? 0 }, viaAbort.signal);
+    check("the stream is served as uncompressible, unstorable event-stream",
+      response.headers.get("content-type").startsWith("text/event-stream") &&
+        /no-transform/.test(response.headers.get("cache-control")) &&
+        /no-store/.test(response.headers.get("cache-control")));
+    const abortReader = response.body.getReader();
+    const opening = await readUntil(abortReader, "event: ready");
+    check("and opens with a retry hint and a ready snapshot",
+      opening.startsWith("retry: 3000") && /event: ready\ndata: \{"counts":/.test(opening));
+    const whileOpen = hubSubscribers(parent.id);
+    viaAbort.abort();
+    await waitFor(() => hubSubscribers(parent.id) < whileOpen, 2000);
+    check("a browser that goes away is unsubscribed (request aborted)",
+      hubSubscribers(parent.id) === whileOpen - 1, `${whileOpen} → ${hubSubscribers(parent.id)}`);
+
+    const cancelled = realtime.openRealtimeStream(
+      { id: parent.id, tokenVersion: parentDoc.tokenVersion ?? 0 }, new AbortController().signal);
+    const cancelReader = cancelled.body.getReader();
+    await readUntil(cancelReader, "event: ready");
+    const beforeCancel = hubSubscribers(parent.id);
+    await cancelReader.cancel();
+    await waitFor(() => hubSubscribers(parent.id) < beforeCancel, 2000);
+    check("and so is one whose connection is torn down (stream cancelled)",
+      hubSubscribers(parent.id) === beforeCancel - 1, `${beforeCancel} → ${hubSubscribers(parent.id)}`);
+
+    // --- Sessions -------------------------------------------------------------
+    check("a session whose account is unchanged stands",
+      await realtime.sessionStillValid({ id: parent.id, tokenVersion: parentDoc.tokenVersion ?? 0 }));
+    await User.updateOne({ _id: parentDoc._id }, { $inc: { tokenVersion: 1 } });
+    check("a password reset or forced sign-out ends it",
+      !(await realtime.sessionStillValid({ id: parent.id, tokenVersion: parentDoc.tokenVersion ?? 0 })));
+
+    // --- Too many streams -----------------------------------------------------
+    const crowd = Array.from({ length: 9 }, () => recordingSubscriber(strangerDoc._id));
+    const crowdUnsubs = [];
+    for (const sub of crowd) crowdUnsubs.push(await realtime.subscribe(sub));
+    check("one account's streams are capped, the oldest giving way",
+      strangerSub.closed.includes("replaced") || crowd[0].closed.includes("replaced"));
+    for (const off of crowdUnsubs) off();
+
+    for (const off of unsubscribers) off();
+  } finally {
+    await realtime.stopRealtime();
+    await TutorProfile.updateOne({ _id: tutorProfile._id }, { $set: { stats: tutorStats } });
+    if (conversationId) {
+      await Message.deleteMany({ conversationId });
+      await Notification.deleteMany({ entityId: conversationId });
+      await Conversation.deleteOne({ _id: conversationId });
+    }
+    await Notification.deleteMany({ userId: { $in: createdUsers } });
+    await User.deleteMany({ _id: { $in: createdUsers } });
+  }
+
+  // --- Change streams, against a replica set ------------------------------------
+  const replUri = process.env.REALTIME_REPLSET_URI;
+  if (!replUri) {
+    return skip("change-stream source", "set REALTIME_REPLSET_URI to a replica set to run it");
+  }
+  const repl = await mongoose.createConnection(replUri, { serverSelectionTimeoutMS: 4000 }).asPromise()
+    .catch(() => null);
+  if (!repl) return skip("change-stream source", "the replica set is not reachable");
+
+  try {
+    check("a replica set is detected as able to stream changes",
+      await supportsChangeStreams(repl.db));
+    const streamed = [];
+    let inits = 0;
+    const source = await startSource(repl.db, {
+      kind: REALTIME_SOURCES.AUTO,
+      onChange: (record) => streamed.push(record),
+      onResync: () => {
+        inits += 1;
+      },
+      log: { error() {} },
+    });
+    check("auto selects change streams on a replica set", source.kind === REALTIME_SOURCES.CHANGE_STREAM);
+    check("and asks browsers to reconcile once the cursors are open",
+      Boolean(await waitFor(() => inits >= 2)));
+
+    const userId = new mongoose.Types.ObjectId();
+    const now = new Date();
+    const { insertedId } = await repl.db.collection("notifications").insertOne({
+      userId, type: "MESSAGE_RECEIVED", title: "Streamed", body: "streamed body",
+      readAt: null, createdAt: now, updatedAt: now,
+    });
+    const insert = await waitFor(() => streamed.find((r) => String(r.doc._id) === String(insertedId)));
+    check("an insert arrives as a change, not a poll", insert?.op === "insert");
+    check("projected down to the routing fields",
+      insert && insert.doc.body === undefined && String(insert.doc.userId) === String(userId));
+
+    await repl.db.collection("notifications").updateOne(
+      { _id: insertedId }, { $set: { readAt: new Date(), updatedAt: new Date() } });
+    const update = await waitFor(() =>
+      streamed.find((r) => String(r.doc._id) === String(insertedId) && r.op === "update"));
+    check("an update arrives with the document looked up", Boolean(update?.doc.readAt));
+
+    const otherUser = new mongoose.Types.ObjectId();
+    const convo = await repl.db.collection("conversations").insertOne({
+      participantIds: [userId, otherUser], unreadCounts: { [String(otherUser)]: 1 },
+      lastMessageAt: now, createdAt: now, updatedAt: now,
+    });
+    const routed = eventsForChange(
+      await waitFor(() => streamed.find((r) => String(r.doc._id) === String(convo.insertedId))),
+    );
+    check("a streamed conversation routes to its participants",
+      routed.length === 2 && routed.find((e) => e.userId === String(otherUser))?.data.unreadCount === 1);
+
+    await source.stop();
+    await repl.db.collection("notifications").deleteOne({ _id: insertedId });
+    await repl.db.collection("conversations").deleteOne({ _id: convo.insertedId });
+  } finally {
+    await repl.close();
+  }
+}

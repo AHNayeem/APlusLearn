@@ -76,7 +76,9 @@ remember to update a rule.
   There is no allowlist of "safe" API routes, because a route that is safe
   today is one refactor away from not being. This covers sessions, bookings,
   payments and payouts, messages, notifications, calendar data, admin
-  listings, integration configuration and verification documents.
+  listings, integration configuration and verification documents — and the
+  realtime event stream, `/api/realtime`, which the browser opens directly
+  and the worker never sees ([REALTIME.md](REALTIME.md)).
 - **Page documents.** A dashboard is rendered for one signed-in person.
   `/offline` is the single HTML document in any cache, and it was fetched
   anonymously.

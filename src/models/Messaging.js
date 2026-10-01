@@ -58,6 +58,8 @@ const ConversationSchema = new mongoose.Schema(
 ConversationSchema.index({ participantIds: 1, lastMessageAt: -1 });
 ConversationSchema.index({ reportStatus: 1, reportedAt: -1 });
 ConversationSchema.index({ learnerUserId: 1, tutorUserId: 1 }, { unique: true });
+// What the realtime poll source reads on a standalone server (docs/REALTIME.md).
+ConversationSchema.index({ updatedAt: 1 });
 
 export const Conversation =
   mongoose.models.Conversation || mongoose.model("Conversation", ConversationSchema);
@@ -105,6 +107,14 @@ const MessageSchema = new mongoose.Schema(
     kind: { type: String, enum: ["USER", "SYSTEM"], default: "USER" },
     systemEvent: { type: String, trim: true },
 
+    /**
+     * The sender's own name for this message, minted in the browser before
+     * the request is sent. A retry carries the same value, so a send whose
+     * response was lost is answered with the stored message rather than
+     * stored twice (docs/REALTIME.md).
+     */
+    clientId: { type: String, trim: true },
+
     readBy: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
     readAt: { type: Date },
     deletedAt: { type: Date, default: null },
@@ -113,5 +123,11 @@ const MessageSchema = new mongoose.Schema(
 );
 
 MessageSchema.index({ conversationId: 1, createdAt: -1 });
+// Backstop for two copies of one send arriving at once; `sendMessage` looks
+// first, so a sequential retry never reaches the index.
+MessageSchema.index(
+  { senderId: 1, clientId: 1 },
+  { unique: true, partialFilterExpression: { clientId: { $type: "string" } } },
+);
 
 export const Message = mongoose.models.Message || mongoose.model("Message", MessageSchema);

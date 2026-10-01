@@ -7,7 +7,7 @@ import {
 } from "@/services/message.service";
 import { Card, CardBody } from "@/components/ui";
 import { DashboardPage } from "@/components/layout/DashboardShell";
-import { ConversationList } from "@/components/messaging/ConversationList";
+import { LiveConversationList } from "@/components/messaging/LiveConversationList";
 import { ConversationView } from "@/components/messaging/ConversationView";
 
 export const metadata = { title: "Messages", robots: { index: false, follow: false } };
@@ -31,7 +31,7 @@ export default async function TutorConversationPage({ params }) {
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-[20rem_1fr]">
         <Card className="hidden lg:block">
           <CardBody className="max-h-[calc(100dvh-10rem)] overflow-y-auto p-0">
-            <ConversationList
+            <LiveConversationList
               conversations={inbox.items}
               activeId={id}
               basePath="/tutor/messages"

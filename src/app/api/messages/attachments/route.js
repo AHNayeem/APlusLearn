@@ -36,6 +36,7 @@ export const POST = routeHandler(
       bookingId: form.get("bookingId") || undefined,
       requestId: form.get("requestId") || undefined,
       body: form.get("body") ?? "",
+      clientId: form.get("clientId") || undefined,
     });
     if (!parsed.success) {
       throw new ValidationError({ fieldErrors: parsed.error.flatten().fieldErrors });

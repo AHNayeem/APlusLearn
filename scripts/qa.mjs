@@ -67,7 +67,7 @@ function createClient({ shareDevice = true } = {}) {
 
   return async function request(
     path,
-    { method = "GET", body, rawBody, form, raw = false, headers: extraHeaders } = {},
+    { method = "GET", body, rawBody, form, raw = false, headers: extraHeaders, signal } = {},
   ) {
     // `fetch` sets its own multipart Content-Type with the boundary, so a
     // FormData upload must not have one imposed on it.
@@ -89,6 +89,7 @@ function createClient({ shareDevice = true } = {}) {
       // callbacks, which are form-encoded and signed over their exact bytes.
       body: form ?? rawBody ?? (body ? JSON.stringify(body) : undefined),
       redirect: "manual",
+      signal,
     });
 
     for (const [key, value] of response.headers) {
@@ -239,6 +240,74 @@ function formWith(...files) {
   const form = new FormData();
   for (const file of files) form.append("file", file);
   return form;
+}
+
+/**
+ * Hold a client's realtime event stream open and record what it says.
+ *
+ * `events` is every parsed event in order; `raw` is every byte, so a test can
+ * assert that something never appeared on the wire at all.
+ */
+async function openStream(client) {
+  const controller = new AbortController();
+  const response = await client("/api/realtime", { raw: true, signal: controller.signal });
+  const stream = {
+    status: response.status,
+    headers: response.headers,
+    events: [],
+    raw: "",
+    of: (type) => stream.events.filter((e) => e.event === type),
+    async waitFor(predicate, timeout = 6000) {
+      const until = Date.now() + timeout;
+      for (;;) {
+        const found = stream.events.find(predicate);
+        if (found || Date.now() > until) return found ?? null;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    },
+    close: () => controller.abort(),
+  };
+
+  if (!response.ok) {
+    await response.text().catch(() => {});
+    return stream;
+  }
+
+  (async () => {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        const text = decoder.decode(value, { stream: true });
+        stream.raw += text;
+        buffer += text;
+        let end;
+        while ((end = buffer.indexOf("\n\n")) >= 0) {
+          const block = buffer.slice(0, end);
+          buffer = buffer.slice(end + 2);
+          let event = "message";
+          let data = "";
+          for (const line of block.split("\n")) {
+            if (line.startsWith("event: ")) event = line.slice(7);
+            else if (line.startsWith("data: ")) data += line.slice(6);
+          }
+          if (!data) continue;
+          try {
+            stream.events.push({ event, data: JSON.parse(data), at: Date.now() });
+          } catch {
+            stream.events.push({ event, data: null, at: Date.now() });
+          }
+        }
+      }
+    } catch {
+      // Aborted by the test, or the server ended it.
+    }
+  })();
+
+  return stream;
 }
 
 async function main() {
@@ -7273,6 +7342,158 @@ async function main() {
   check("a tutor has no favourites list", tutorFavourites.status === 403);
 
   await parent(`/api/favourites?tutorProfileId=${tutorId}`, { method: "DELETE" });
+
+  // --- Realtime ------------------------------------------------------------
+  //
+  // The stream is a delivery mechanism over the database, never a record, so
+  // what is proved here is: a change reaches the people the stored document
+  // names and nobody else, it reaches them without anyone asking, the wire
+  // never carries what was said, and everything a stream would have said can
+  // be recovered by reading — after a reconnect as well as after a hint
+  // (docs/REALTIME.md).
+  section("Realtime — delivery, scoping and recovery");
+
+  const anonStream = await anon("/api/realtime");
+  check("the event stream needs an account", anonStream.status === 401,
+    `status ${anonStream.status}`);
+
+  const rtOutsider = createClient();
+  await login(rtOutsider, "nadia.petrov@example.com");
+  const ownProfileId = (await tutor("/api/tutor/profile")).payload?.data?.profile?.id;
+
+  const tutorStream = await openStream(tutor);
+  check("a signed-in user can open their own event stream", tutorStream.status === 200,
+    `status ${tutorStream.status}`);
+  check("as server-sent events",
+    (tutorStream.headers.get("content-type") ?? "").startsWith("text/event-stream"));
+  check("which nothing downstream may store or compress",
+    /no-store/.test(tutorStream.headers.get("cache-control") ?? "") &&
+      /no-transform/.test(tutorStream.headers.get("cache-control") ?? ""));
+  const tutorReady = await tutorStream.waitFor((e) => e.event === "ready");
+  check("the stream opens with both unread counts",
+    Number.isInteger(tutorReady?.data?.counts?.messages) &&
+      Number.isInteger(tutorReady?.data?.counts?.notifications),
+    JSON.stringify(tutorReady?.data));
+  if (tutorReady?.data?.source) console.log(`    (realtime source: ${tutorReady.data.source})`);
+
+  const parentStream = await openStream(parent);
+  const outsiderStream = await openStream(rtOutsider);
+  const adminStream = await openStream(admin);
+  await Promise.all(
+    [parentStream, outsiderStream, adminStream].map((s) => s.waitFor((e) => e.event === "ready")),
+  );
+
+  const rtBody = `QA realtime message ${Date.now()}`;
+  const rtClientId = crypto.randomUUID();
+  const rtSent = await parent("/api/messages", {
+    method: "POST",
+    body: { tutorProfileId: ownProfileId, body: rtBody, clientId: rtClientId },
+  });
+  check("a parent sends a message carrying a client id", rtSent.ok,
+    JSON.stringify(rtSent.payload?.error));
+  const rtConversation = rtSent.payload?.data?.conversationId;
+  const rtMessage = rtSent.payload?.data?.message;
+
+  const rtHint = await tutorStream.waitFor(
+    (e) => e.event === "conversation" && e.data?.id === rtConversation && e.data?.unreadCount > 0,
+  );
+  check("the tutor's stream hears about it without asking", Boolean(rtHint));
+  check("with how quickly", rtHint && rtHint.at - Date.parse(rtMessage?.createdAt ?? 0) < 5000,
+    rtHint ? `${rtHint.at - Date.parse(rtMessage?.createdAt)} ms` : "no event");
+  check("and of the notification it produced",
+    Boolean(await tutorStream.waitFor((e) => e.event === "notification")));
+  const rtCounts = await tutorStream.waitFor(
+    (e) => e.event === "counts" && e.data?.messages > (tutorReady?.data?.counts?.messages ?? 0),
+  );
+  check("and the tutor's badges are recounted upwards", Boolean(rtCounts),
+    JSON.stringify(tutorStream.of("counts").map((e) => e.data)));
+  check("the sender's own stream hears the thread changed",
+    Boolean(await parentStream.waitFor((e) => e.event === "conversation" && e.data?.id === rtConversation)));
+  check("no stream carried what was said",
+    ![tutorStream, parentStream].some((s) => s.raw.includes(rtBody)));
+
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  check("a learner outside the thread hears nothing of it",
+    !outsiderStream.events.some((e) => e.data?.id === rtConversation));
+  check("nor does an administrator who is not in it",
+    !adminStream.events.some((e) => e.data?.id === rtConversation));
+
+  const sinceUrl = (at) =>
+    `/api/messages/conversations/${rtConversation}?since=${encodeURIComponent(at)}`;
+  const rtCatchUp = await tutor(sinceUrl(rtMessage?.createdAt));
+  check("the tutor reads the new message through the authorised catch-up read",
+    rtCatchUp.ok && rtCatchUp.payload.data.messages.some((m) => m.id === rtMessage?.id && m.body === rtBody),
+    JSON.stringify(rtCatchUp.payload?.error));
+  const outsiderCatchUp = await rtOutsider(sinceUrl(rtMessage?.createdAt));
+  check("someone outside the thread cannot read it that way",
+    outsiderCatchUp.status === 403 || outsiderCatchUp.status === 404,
+    `status ${outsiderCatchUp.status}`);
+  const badSince = await tutor(`/api/messages/conversations/${rtConversation}?since=yesterday-ish`);
+  check("a catch-up point that is not a time is refused", badSince.status === 422,
+    `status ${badSince.status}`);
+
+  const rtReplay = await parent("/api/messages", {
+    method: "POST",
+    body: { conversationId: rtConversation, body: rtBody, clientId: rtClientId },
+  });
+  check("a retried send under the same client id returns the stored message",
+    rtReplay.ok && rtReplay.payload.data.message.id === rtMessage?.id,
+    JSON.stringify(rtReplay.payload?.data?.message?.id));
+  const afterReplay = await tutor(sinceUrl(rtMessage?.createdAt));
+  check("and the thread holds it once",
+    (afterReplay.payload?.data?.messages ?? []).filter((m) => m.body === rtBody).length === 1);
+  const badClientId = await parent("/api/messages", {
+    method: "POST",
+    body: { conversationId: rtConversation, body: "Not a real id.", clientId: "not-a-uuid" },
+  });
+  check("a client id that is not a UUID is refused", badClientId.status === 422,
+    `status ${badClientId.status}`);
+
+  // Away: the tutor's stream drops, a message lands, the tutor comes back.
+  const unreadBeforeAway = rtCounts?.data?.messages ?? 0;
+  tutorStream.close();
+  const awayBody = `QA realtime while away ${Date.now()}`;
+  const awaySent = await parent("/api/messages", {
+    method: "POST",
+    body: { conversationId: rtConversation, body: awayBody, clientId: crypto.randomUUID() },
+  });
+  const tutorBack = await openStream(tutor);
+  const backReady = await tutorBack.waitFor((e) => e.event === "ready");
+  check("on reconnect, the opening snapshot counts what arrived while away",
+    (backReady?.data?.counts?.messages ?? 0) >= unreadBeforeAway + 1,
+    `${backReady?.data?.counts?.messages} vs ${unreadBeforeAway + 1}`);
+  const recovered = await tutor(sinceUrl(rtMessage?.createdAt));
+  check("and a catch-up read from the last message seen recovers it",
+    (recovered.payload?.data?.messages ?? []).some((m) => m.id === awaySent.payload?.data?.message?.id));
+
+  // Two tabs: reading in one is seen by the other.
+  const tutorOtherTab = await openStream(tutor);
+  await tutorOtherTab.waitFor((e) => e.event === "ready");
+  const readThread = await tutor(`/api/messages/conversations/${rtConversation}/read`, { method: "POST" });
+  check("the tutor reads the thread", readThread.ok);
+  check("and their other tab hears that it is read",
+    Boolean(await tutorOtherTab.waitFor(
+      (e) => e.event === "conversation" && e.data?.id === rtConversation && e.data?.unreadCount === 0,
+    )));
+  check("with the message badge recounted downwards",
+    Boolean(await tutorOtherTab.waitFor(
+      (e) => e.event === "counts" && e.data?.messages < (backReady?.data?.counts?.messages ?? 0),
+    )),
+    JSON.stringify(tutorOtherTab.of("counts").map((e) => e.data)));
+
+  const tutorUnread = await tutor("/api/notifications?unreadOnly=true&pageSize=5");
+  const unreadNotificationId = tutorUnread.payload?.data?.notifications?.[0]?.id;
+  check("the message left the tutor an unread notification", Boolean(unreadNotificationId));
+  await tutor("/api/notifications/read", { method: "POST", body: { ids: [unreadNotificationId] } });
+  check("marking it read in one tab reaches the other",
+    Boolean(await tutorOtherTab.waitFor(
+      (e) => e.event === "notification.updated" && e.data?.id === unreadNotificationId && e.data?.readAt,
+    )));
+  await tutor("/api/notifications/read", { method: "POST", body: { all: true } });
+  check("and marking everything read takes the badge to nothing",
+    Boolean(await tutorOtherTab.waitFor((e) => e.event === "counts" && e.data?.notifications === 0)));
+
+  for (const s of [tutorBack, tutorOtherTab, parentStream, outsiderStream, adminStream]) s.close();
 
   // --- Security headers ----------------------------------------------------
   //

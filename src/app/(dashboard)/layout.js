@@ -38,6 +38,7 @@ export default async function DashboardLayout({ children }) {
           avatarUrl: user.avatarUrl,
         }}
         badges={{ unreadNotifications, unreadMessages }}
+        realtime
       >
         {!user.emailVerifiedAt && <VerifyEmailBanner email={user.email} />}
         {children}

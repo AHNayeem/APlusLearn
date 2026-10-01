@@ -5,7 +5,7 @@ import { listConversations, getOrCreateConversation } from "@/services/message.s
 import { redirect } from "next/navigation";
 import { Card, CardBody } from "@/components/ui";
 import { DashboardPage, PageHeader } from "@/components/layout/DashboardShell";
-import { ConversationList } from "@/components/messaging/ConversationList";
+import { LiveConversationList } from "@/components/messaging/LiveConversationList";
 
 export const metadata = { title: "Messages" };
 export const dynamic = "force-dynamic";
@@ -34,7 +34,7 @@ export default async function MessagesPage({ searchParams }) {
       />
       <Card>
         <CardBody className="p-0">
-          <ConversationList conversations={items} className="p-4" />
+          <LiveConversationList conversations={items} className="p-4" />
         </CardBody>
       </Card>
     </DashboardPage>

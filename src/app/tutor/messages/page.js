@@ -4,7 +4,7 @@ import { ROLES } from "@/constants";
 import { listConversations } from "@/services/message.service";
 import { Card, CardBody } from "@/components/ui";
 import { DashboardPage, PageHeader } from "@/components/layout/DashboardShell";
-import { ConversationList } from "@/components/messaging/ConversationList";
+import { LiveConversationList } from "@/components/messaging/LiveConversationList";
 
 export const metadata = { title: "Messages" };
 export const dynamic = "force-dynamic";
@@ -23,7 +23,7 @@ export default async function TutorMessagesPage() {
       />
       <Card>
         <CardBody className="p-0">
-          <ConversationList conversations={items} basePath="/tutor/messages" className="p-4" />
+          <LiveConversationList conversations={items} basePath="/tutor/messages" className="p-4" />
         </CardBody>
       </Card>
     </DashboardPage>

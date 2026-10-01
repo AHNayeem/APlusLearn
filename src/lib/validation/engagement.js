@@ -10,6 +10,12 @@ import {
 } from "@/constants";
 import { objectId, cents, rating, isoDate, provinceCode, postalCode } from "./common";
 
+/**
+ * The browser's idempotency key for one send (docs/REALTIME.md). Optional, so
+ * every existing caller keeps working; a UUID, so it cannot carry anything.
+ */
+const messageClientId = z.uuid("That message reference is not valid.").optional();
+
 export const sendMessageSchema = z.object({
   conversationId: objectId.optional(),
   /** Starting a new thread from a tutor profile. */
@@ -21,6 +27,7 @@ export const sendMessageSchema = z.object({
     .trim()
     .min(1, "Write a message first.")
     .max(4000, "That message is too long."),
+  clientId: messageClientId,
 }).refine((d) => d.conversationId || d.tutorProfileId, {
   message: "We need to know who this message is for.",
   path: ["conversationId"],
@@ -41,6 +48,7 @@ export const messageAttachmentSchema = z.object({
   bookingId: objectId.optional(),
   requestId: objectId.optional(),
   body: z.string().trim().max(4000, "That message is too long.").optional().default(""),
+  clientId: messageClientId,
 }).refine((d) => d.conversationId || d.tutorProfileId, {
   message: "We need to know who this message is for.",
   path: ["conversationId"],

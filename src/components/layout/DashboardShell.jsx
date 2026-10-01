@@ -1,12 +1,18 @@
 import { cn } from "@/lib/utils/cn";
 import { UserMenu } from "./UserMenu";
 import { DashboardNav } from "./DashboardNav";
+import { RealtimeProvider } from "@/components/realtime/RealtimeProvider";
 
 /**
  * Shared dashboard chrome for the parent, tutor and admin areas (§24).
+ *
+ * `realtime` opens the signed-in user's event stream for everything inside
+ * the shell, and makes the message and notification badges live
+ * (docs/REALTIME.md). The parent and tutor areas turn it on; the admin area
+ * has neither an inbox nor a notification centre to keep current.
  */
-export function DashboardShell({ items, user, badges, branding, children }) {
-  return (
+export function DashboardShell({ items, user, badges, branding, realtime = false, children }) {
+  const shell = (
     /* Column on small screens so the mobile top bar spans the full width; the
        sidebar only becomes a flex *row* sibling once it is actually visible at
        `lg`. Laying these out as a row below `lg` is what left a dead gutter on
@@ -22,6 +28,18 @@ export function DashboardShell({ items, user, badges, branding, children }) {
         </main>
       </div>
     </div>
+  );
+
+  if (!realtime) return shell;
+  return (
+    <RealtimeProvider
+      initialCounts={{
+        messages: badges?.unreadMessages ?? 0,
+        notifications: badges?.unreadNotifications ?? 0,
+      }}
+    >
+      {shell}
+    </RealtimeProvider>
   );
 }
 

@@ -1,11 +1,11 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { Send, MoreVertical, Flag, Archive, Ban, CalendarDays } from "lucide-react";
+import { Send, MoreVertical, Flag, Archive, Ban, CalendarDays, RotateCw, AlertCircle } from "lucide-react";
 import { cn } from "@/lib/utils/cn";
-import { api } from "@/lib/api/client";
+import { api, ApiError } from "@/lib/api/client";
 import { useSubmit } from "@/hooks/useAsync";
 import {
   Alert, Avatar, Badge, Button, Dropdown, DropdownItem, Field, Modal, Textarea,
@@ -14,103 +14,238 @@ import {
 import { formatRelative, formatDate, formatTime } from "@/lib/utils/format";
 import { BOOKING_STATUS_LABELS, UPLOAD } from "@/constants";
 import { AttachmentList, AttachmentPicker } from "@/components/attachments/Attachments";
+import {
+  REALTIME_STATUS, useRealtimeEvent, useRealtimeStatus,
+} from "@/components/realtime/RealtimeProvider";
+import { REALTIME_EVENTS } from "@/lib/realtime/events";
+import { mergeMessages, newClientId, newestStoredAt } from "./thread";
 
 /**
  * A single conversation (§21).
  *
- * The thread is server-rendered and appended to optimistically on send, so the
- * message appears instantly and is reconciled when the request returns.
+ * The thread is server-rendered, then kept current by the realtime stream
+ * (docs/REALTIME.md): a `conversation` hint for this thread — or a reconnect,
+ * after which any number of hints may have been missed — triggers a catch-up
+ * read of what is new, through the same authorised endpoint as everything
+ * else. The stream itself never carries a message.
+ *
+ * Sending is optimistic. Each send gets a `clientId` before it leaves, and the
+ * server stores it beside the message, so:
+ *   - whichever comes back first — the response, or the catch-up read the
+ *     hint triggers — replaces the optimistic row, and the other changes
+ *     nothing (`mergeMessages`);
+ *   - a send that fails stays in the thread as *not sent*, with its text and
+ *     files, and Retry re-sends under the same `clientId`. If the first
+ *     attempt had in fact landed, the server answers with that message
+ *     instead of storing a second.
  */
 export function ConversationView({ conversation, messages: initialMessages, bookings, viewerId }) {
   const router = useRouter();
   const toast = useToast();
+  const status = useRealtimeStatus();
+  const live = status === REALTIME_STATUS.OPEN;
   const [messages, setMessages] = useState(initialMessages);
+  const [unread, setUnread] = useState(conversation.unreadCount);
   const [body, setBody] = useState("");
   const [files, setFiles] = useState([]);
   const [reportOpen, setReportOpen] = useState(false);
   const endRef = useRef(null);
+  // Sends go out one after another, so the thread's order is the order typed.
+  const sendQueue = useRef(Promise.resolve());
+  // Catch-up reads never overlap; a hint that lands mid-read asks for one more.
+  const catchUpState = useRef({ running: false, again: false });
+  const newestRef = useRef(newestStoredAt(initialMessages));
 
-  // When the server sends a fresh thread, adopt it. Adjusting during render
-  // keeps the optimistic list and the server list from flickering apart.
+  // When the server sends a fresh thread, adopt it — keeping anything still
+  // being sent, or that failed, which the server has never heard of.
+  // Adjusting during render keeps the two lists from flickering apart.
   const [lastServerMessages, setLastServerMessages] = useState(initialMessages);
   if (lastServerMessages !== initialMessages) {
     setLastServerMessages(initialMessages);
-    setMessages(initialMessages);
+    setMessages((current) => mergeMessages(current.filter((m) => m.local), initialMessages));
   }
+  const [lastServerUnread, setLastServerUnread] = useState(conversation.unreadCount);
+  if (lastServerUnread !== conversation.unreadCount) {
+    setLastServerUnread(conversation.unreadCount);
+    setUnread(conversation.unreadCount);
+  }
+
+  useEffect(() => {
+    newestRef.current = newestStoredAt(messages);
+  }, [messages]);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ block: "end" });
   }, [messages.length]);
 
-  // Opening a thread clears its unread count.
+  // Reading a thread clears its unread count — while it is actually on
+  // screen. A message that arrives in a background tab stays unread until
+  // the tab is looked at, which is also what the badge should say.
+  const markRead = useEffectEvent(() => {
+    if (unread <= 0 || document.visibilityState !== "visible") return;
+    setUnread(0);
+    api
+      .post(`/api/messages/conversations/${conversation.id}/read`)
+      // With the stream up, the badges follow on their own; without it, the
+      // layout has to be asked again.
+      .then(() => !live && router.refresh())
+      .catch(() => {});
+  });
+
   useEffect(() => {
-    if (conversation.unreadCount > 0) {
-      api
-        .post(`/api/messages/conversations/${conversation.id}/read`)
-        .then(() => router.refresh())
-        .catch(() => {});
+    markRead();
+  }, [unread, conversation.id]);
+
+  useEffect(() => {
+    const onVisible = () => markRead();
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, []);
+
+  /** Fetch what is new since the newest stored message, and fold it in. */
+  const catchUp = async () => {
+    const state = catchUpState.current;
+    if (state.running) {
+      state.again = true;
+      return;
     }
-  }, [conversation.id, conversation.unreadCount, router]);
+    state.running = true;
+    try {
+      do {
+        state.again = false;
+        const since = new Date(
+          newestRef.current ?? conversation.createdAt ?? Date.now() - 86_400_000,
+        ).toISOString();
+        const result = await api.get(
+          `/api/messages/conversations/${conversation.id}?since=${encodeURIComponent(since)}`,
+        );
+        setMessages((current) => mergeMessages(current, result.messages));
+        newestRef.current = Math.max(newestRef.current ?? 0, newestStoredAt(result.messages) ?? 0);
+        setUnread(result.unreadCount);
+        // More than one read's worth arrived while away: reload the thread.
+        if (!result.complete) router.refresh();
+      } while (state.again);
+    } catch {
+      // The next hint or reconnect tries again; nothing is lost by waiting.
+    } finally {
+      state.running = false;
+    }
+  };
+
+  useRealtimeEvent(REALTIME_EVENTS.CONVERSATION, (event) => {
+    if (event.id !== String(conversation.id)) return;
+    setUnread(event.unreadCount);
+    // A read receipt moves `updatedAt` but not `lastMessageAt`; only a newer
+    // message is worth a read.
+    const at = event.lastMessageAt ? new Date(event.lastMessageAt).getTime() : 0;
+    if (at > (newestRef.current ?? 0)) catchUp();
+  });
+  useRealtimeEvent(REALTIME_EVENTS.RESYNC, () => catchUp());
+
+  /** Send one local message; on failure it stays, marked, for Retry. */
+  const deliver = async (draft) => {
+    try {
+      let result;
+      if (draft.files.length) {
+        const form = new FormData();
+        form.set("conversationId", conversation.id);
+        form.set("body", draft.body);
+        form.set("clientId", draft.clientId);
+        for (const file of draft.files) form.append("file", file);
+        result = await api.post("/api/messages/attachments", form);
+      } else {
+        result = await api.post("/api/messages", {
+          conversationId: conversation.id,
+          body: draft.body,
+          clientId: draft.clientId,
+        });
+      }
+      setMessages((current) => mergeMessages(current, [result.message]));
+      // The stream brings the inbox and badges up to date by itself.
+      if (!live) router.refresh();
+    } catch (error) {
+      setMessages((current) =>
+        current.map((m) =>
+          m.local && m.clientId === draft.clientId
+            ? {
+                ...m,
+                status: "failed",
+                // The server's reason when it gave one; otherwise it was never reached.
+                error: error instanceof ApiError
+                  ? error.message
+                  : "Couldn't reach the server. Check your connection.",
+              }
+            : m,
+        ),
+      );
+    }
+  };
+
+  const enqueue = (draft) => {
+    sendQueue.current = sendQueue.current.then(() => deliver(draft));
+  };
 
   /**
-   * Send the message, with or without files.
-   *
-   * Two transports, one behaviour: a plain message is JSON, a message with
-   * files is multipart, and both land in the same service. The optimistic row
-   * shows the chosen filenames so the thread does not appear to swallow them
-   * while a 10 MB scan uploads; it is replaced by the server's version — the
-   * one carrying real attachment ids — as soon as the request returns.
-   *
-   * On failure the text *and* the files go back into the composer, because
-   * re-picking a file is worse than re-typing a sentence.
+   * Put the composer's contents in the thread and send them. The optimistic
+   * row shows the chosen filenames so the thread does not appear to swallow
+   * them while a 10 MB scan uploads.
    */
-  const { submit, pending } = useSubmit(async () => {
+  const submit = () => {
     const text = body.trim();
     const attached = files;
-    if (!text && !attached.length) return undefined;
+    if (!text && !attached.length) return;
 
-    const optimistic = {
-      id: `pending-${Date.now()}`,
+    const clientId = newClientId();
+    const draft = {
+      id: `local-${clientId}`,
+      clientId,
+      local: true,
+      status: "sending",
       senderId: viewerId,
       body: text,
+      files: attached,
       attachments: attached.map((file, index) => ({
-        id: `pending-file-${index}`,
+        id: `local-file-${clientId}-${index}`,
         fileName: file.name,
         contentType: file.type,
         sizeBytes: file.size,
         href: null,
       })),
       createdAt: new Date().toISOString(),
-      pending: true,
     };
-    setMessages((m) => [...m, optimistic]);
+    setMessages((current) => [...current, draft]);
     setBody("");
     setFiles([]);
+    enqueue(draft);
+  };
 
-    try {
-      let result;
-      if (attached.length) {
-        const form = new FormData();
-        form.set("conversationId", conversation.id);
-        form.set("body", text);
-        for (const file of attached) form.append("file", file);
-        result = await api.post("/api/messages/attachments", form);
-      } else {
-        result = await api.post("/api/messages", {
-          conversationId: conversation.id,
-          body: text,
-        });
-      }
-      setMessages((m) => m.map((msg) => (msg.id === optimistic.id ? result.message : msg)));
-      router.refresh();
-      return result;
-    } catch (error) {
-      setMessages((m) => m.filter((msg) => msg.id !== optimistic.id));
-      setBody(text);
-      setFiles(attached);
-      throw error;
-    }
-  });
+  const retry = (draft) => {
+    setMessages((current) =>
+      current.map((m) =>
+        m.local && m.clientId === draft.clientId ? { ...m, status: "sending", error: null } : m,
+      ),
+    );
+    enqueue(draft);
+  };
+
+  /**
+   * Take a failed message back into the composer. Re-picking a file is worse
+   * than re-typing a sentence, so the files come back too; anything already
+   * typed is kept ahead of it.
+   */
+  const edit = (draft) => {
+    setMessages((current) => current.filter((m) => !(m.local && m.clientId === draft.clientId)));
+    setBody((typed) => (typed.trim() ? `${typed}\n${draft.body}` : draft.body));
+    setFiles((picked) => [...picked, ...draft.files].slice(0, UPLOAD.maxAttachmentsPerMessage));
+  };
+
+  const sending = messages.some((m) => m.local && m.status === "sending");
+  const connection =
+    status === REALTIME_STATUS.OFFLINE
+      ? "Offline"
+      : status === REALTIME_STATUS.RECONNECTING
+        ? "Reconnecting…"
+        : null;
 
   const other = conversation.otherParty;
   const tutorProfile = conversation.tutorProfileId;
@@ -120,7 +255,14 @@ export function ConversationView({ conversation, messages: initialMessages, book
       <header className="flex items-center gap-3 border-b border-ink-200 p-4">
         <Avatar src={other?.avatarUrl} name={other?.name} size="md" />
         <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-bold text-ink-900">{other?.name}</p>
+          <p className="truncate text-sm font-bold text-ink-900">
+            {other?.name}
+            {connection && (
+              <span className="ml-2 text-xs font-medium text-ink-400" role="status">
+                {connection}
+              </span>
+            )}
+          </p>
           {tutorProfile?.slug ? (
             <Link
               href={`/tutors/${tutorProfile.slug}`}
@@ -225,7 +367,8 @@ export function ConversationView({ conversation, messages: initialMessages, book
                     mine
                       ? "rounded-br-md bg-brand-600 text-white"
                       : "rounded-bl-md bg-ink-100 text-ink-800",
-                    message.pending && "opacity-60",
+                    message.local && message.status === "sending" && "opacity-60",
+                    message.local && message.status === "failed" && "opacity-80",
                   )}
                 >
                   {message.body && (
@@ -244,10 +387,38 @@ export function ConversationView({ conversation, messages: initialMessages, book
                       mine ? "text-brand-100/70" : "text-ink-400",
                     )}
                   >
-                    {message.pending ? "Sending…" : formatTime(message.createdAt)}
+                    {message.local
+                      ? message.status === "failed" ? "Not sent" : "Sending…"
+                      : formatTime(message.createdAt)}
                   </p>
                 </div>
               </div>
+              {message.local && message.status === "failed" && (
+                <div
+                  role="alert"
+                  className="mt-1 flex flex-wrap items-center justify-end gap-x-3 gap-y-1 text-xs"
+                >
+                  <span className="inline-flex items-center gap-1 text-danger-600">
+                    <AlertCircle className="size-3.5" aria-hidden="true" />
+                    {message.error ?? "Couldn't send this message."}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => retry(message)}
+                    className="inline-flex items-center gap-1 font-semibold text-brand-600 hover:underline"
+                  >
+                    <RotateCw className="size-3.5" aria-hidden="true" />
+                    Retry
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => edit(message)}
+                    className="font-semibold text-ink-500 hover:text-ink-700 hover:underline"
+                  >
+                    Edit
+                  </button>
+                </div>
+              )}
             </div>
           );
         })}
@@ -271,7 +442,6 @@ export function ConversationView({ conversation, messages: initialMessages, book
               files={files}
               onChange={setFiles}
               max={UPLOAD.maxAttachmentsPerMessage}
-              disabled={pending}
             />
             <div className="flex items-end gap-2">
             <label htmlFor="message-body" className="sr-only">
@@ -296,7 +466,7 @@ export function ConversationView({ conversation, messages: initialMessages, book
               type="submit"
               size="icon"
               aria-label="Send message"
-              loading={pending}
+              loading={sending}
               disabled={!body.trim() && !files.length}
             >
               <Send className="size-4" />

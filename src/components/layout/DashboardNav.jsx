@@ -10,6 +10,7 @@ import { cn } from "@/lib/utils/cn";
 import { CountBadge } from "@/components/ui";
 import { Logo } from "./Logo";
 import { UserMenu } from "./UserMenu";
+import { useRealtimeCounts } from "@/components/realtime/RealtimeProvider";
 
 /**
  * Dashboard shell navigation (§24).
@@ -17,8 +18,14 @@ import { UserMenu } from "./UserMenu";
  * One component drives the parent, tutor and admin sidebars — the items come
  * from `navForRole`, so adding a role means adding a nav array, not a layout.
  */
-export function DashboardNav({ items, user, badges = {}, branding }) {
+export function DashboardNav({ items, user, badges: serverBadges = {}, branding }) {
   const pathname = usePathname();
+  // Inside a realtime shell the two inbox badges follow the stream; every
+  // other badge (the admin queues) is what the layout read.
+  const live = useRealtimeCounts();
+  const badges = live
+    ? { ...serverBadges, unreadMessages: live.messages, unreadNotifications: live.notifications }
+    : serverBadges;
   const [open, setOpen] = useState(false);
 
   // Close the drawer on navigation, adjusted during render so the new page

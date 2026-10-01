@@ -237,7 +237,8 @@ exercise upload, retrieval and replacement end to end on this machine.
 | Report | `/api/messages/conversations/[id]/actions` opens a case (`Conversation.reportStatus`) that reaches administrators | Implemented |
 | Reports reach a moderator | `/admin/moderation` queue and `/admin/moderation/[id]`, behind `ADMIN_MESSAGE_MODERATE`: reporter, participants, reason, timestamp, booking context, status and history. Opening a thread writes a `CONVERSATION_REPORT_VIEWED` audit entry; a decision writes `CONVERSATION_MODERATED` | Implemented |
 | Attachments | `Message.attachments` now populated: multipart `POST /api/messages/attachments`, authorised streaming at `GET /api/messages/attachments/[id]`, type decided from the bytes, storage key `select: false` (§41 Phase 3) | Implemented |
-| Ready for realtime | Thread reads are paginated and stateless; nothing assumes a polling client | Phase 2 |
+| Realtime delivery | `GET /api/realtime` (Server-Sent Events) sends hints — ids, times, unread counts, never content — to the participants the stored `Conversation` names; the open thread catches up via `GET …/[id]?since=`, the inbox and badges follow live, and every (re)connect reconciles from the database. Change streams on a replica set (Atlas), process-level polling on a standalone server. See [REALTIME.md](REALTIME.md) | Implemented |
+| A retried send is one message | `Message.clientId` (browser-minted UUID) is looked up before anything is written, with a partial unique index on `{ senderId, clientId }` for races; a failed send stays in the thread as *Not sent* with Retry under the same id | Implemented |
 
 ### Floating support launcher
 
@@ -449,6 +450,7 @@ than dropped.
 | All 10 notification types | `NOTIFICATION_TYPES` | Implemented |
 | Lesson reminders | `sendBookingReminders()` emits `BOOKING_REMINDER` to both parties 24 hours and 1 hour before a confirmed lesson, driven by the `booking-reminders` scheduled job (§48). Each reminder is claimed on `Booking.remindersSent` with a conditional update before it is sent, so repeat runs cannot duplicate one | Implemented |
 | Unread count, centre, read/unread | `/notifications`, `unreadNotificationCount()` | Implemented |
+| Appears without a refresh | The realtime stream's `notification` / `notification.updated` / `counts` hints keep the centre, its read state across tabs and devices, and both sidebar badges current ([REALTIME.md](REALTIME.md)). In-app only — not OS push | Implemented |
 | Preferences | Per-channel toggles in Settings, beneath the platform-level switches in §26b | Implemented |
 | Email / SMS / push ready | `NOTIFICATION_CHANNELS` + `deliveredChannels`; email wired through Resend, SMS/push declared | Partial — SMS/push are Phase 2 |
 | Transactional templates | 13 templates in `email-templates.js`: auth, booking, cancellation, reschedule, refund, tutor lifecycle, payouts. Responsive HTML + a real plain-text twin, built from one description. Bound to the configured brand via `brandedEmailTemplates()` (§26b) | Implemented |
@@ -604,7 +606,7 @@ audit is
 
 | Still deferred from Phase 2 | Architectural hook | Status |
 |---|---|---|
-| Realtime messaging | Stateless paginated thread reads | Phase 2 backlog |
+| Realtime messaging | Implemented — SSE over change streams / polling ([REALTIME.md](REALTIME.md)) | Implemented |
 | Push notifications | `NOTIFICATION_CHANNELS` carries the channel | Needs a mobile app |
 
 ## 42. Core business rules

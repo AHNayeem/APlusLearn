@@ -148,6 +148,8 @@ const NotificationSchema = new mongoose.Schema(
 
 NotificationSchema.index({ userId: 1, readAt: 1, createdAt: -1 });
 NotificationSchema.index({ userId: 1, createdAt: -1 });
+// What the realtime poll source reads on a standalone server (docs/REALTIME.md).
+NotificationSchema.index({ updatedAt: 1 });
 
 export const Notification =
   mongoose.models.Notification || mongoose.model("Notification", NotificationSchema);

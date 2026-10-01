@@ -32,6 +32,7 @@ export default async function TutorLayout({ children }) {
           avatarUrl: user.avatarUrl,
         }}
         badges={{ unreadNotifications, unreadMessages }}
+        realtime
       >
         {!user.emailVerifiedAt && <VerifyEmailBanner email={user.email} />}
         {children}

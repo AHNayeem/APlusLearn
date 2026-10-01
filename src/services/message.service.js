@@ -94,6 +94,16 @@ export async function sendMessage(input, actor) {
   // A message is text, or a file, or both — but not nothing.
   if (!body && !files.length) throw new BusinessRuleError("Write a message first.");
 
+  // A retry of a send that already landed — the response was lost, the tab
+  // went to sleep mid-request — is answered with what was stored. Looked up
+  // before anything is written or uploaded, so a replay creates no second
+  // message, no second notification and no second unread increment. The
+  // unique index on `{ senderId, clientId }` covers two copies racing.
+  if (input.clientId) {
+    const replayed = await findSentMessage(actor, input.clientId);
+    if (replayed) return replayed;
+  }
+
   let conversation;
 
   if (input.conversationId) {
@@ -135,10 +145,16 @@ export async function sendMessage(input, actor) {
       senderId: actor.id,
       body,
       attachments,
+      clientId: input.clientId,
       readBy: [actor.id],
     });
   } catch (error) {
     await discardAttachments(attachments);
+    // The other copy of this very send won the insert; it is the answer.
+    if (error?.code === 11000 && input.clientId) {
+      const replayed = await findSentMessage(actor, input.clientId);
+      if (replayed) return replayed;
+    }
     throw error;
   }
 
@@ -199,6 +215,16 @@ export async function sendMessage(input, actor) {
   return {
     message: publicMessage(toPlain(message)),
     conversationId: String(conversation._id),
+  };
+}
+
+/** The message this sender already stored under `clientId`, shaped as a send returns it. */
+async function findSentMessage(actor, clientId) {
+  const existing = await Message.findOne({ senderId: actor.id, clientId }).lean();
+  if (!existing) return null;
+  return {
+    message: publicMessage(toPlain(existing)),
+    conversationId: String(existing.conversationId),
   };
 }
 
@@ -358,6 +384,49 @@ export async function getConversation(id, actor, { page = 1, pageSize } = {}) {
     total,
     page,
     pageSize: size,
+  };
+}
+
+/**
+ * How far behind `since` a catch-up read reaches.
+ *
+ * `createdAt` is stamped by whichever server instance wrote the message, so a
+ * message from an instance whose clock runs slightly behind can carry a time
+ * just before the newest one this browser already holds. Reading a little
+ * further back costs a few duplicates, which the browser drops by id.
+ */
+const SINCE_OVERLAP_MS = 5_000;
+
+/**
+ * Messages in a thread from `since` onwards, oldest first (docs/REALTIME.md).
+ *
+ * This is how a browser catches up — after a realtime hint that the thread
+ * changed, or after a reconnect in which it may have missed any number of
+ * them. The realtime stream never carries a message; this read, with the same
+ * participant check as every other one in this file, is the only way in.
+ */
+export async function messagesSince(id, actor, since, { limit = 100 } = {}) {
+  const conversation = await Conversation.findById(id)
+    .select("participantIds unreadCounts")
+    .lean();
+  if (!conversation) throw new NotFoundError("That conversation no longer exists.");
+  assertParticipant(conversation, actor);
+
+  const from = new Date(new Date(since).getTime() - SINCE_OVERLAP_MS);
+  const messages = await Message.find({
+    conversationId: id,
+    deletedAt: null,
+    createdAt: { $gte: from },
+  })
+    .sort({ createdAt: 1 })
+    .limit(limit)
+    .lean();
+
+  return {
+    messages: toPlain(messages).map(publicMessage),
+    unreadCount: conversation.unreadCounts?.[String(actor.id)] ?? 0,
+    // A full page means there may be more; the browser reloads the thread.
+    complete: messages.length < limit,
   };
 }
 

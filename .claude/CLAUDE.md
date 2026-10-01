@@ -18,6 +18,7 @@ Package manager is **bun** (`bun.lock`, `packageManager: bun@1.3.12`); npm works
 | `bun run qa` | End-to-end API suite over real HTTP — **requires `bun run dev` running in another terminal** |
 | `bun run test:integrations` | Provider adapters and DB-backed service rules, with `fetch` stubbed — no third-party service is contacted |
 | `bun run e2e` | Forgot password in a real browser (Playwright + system Chrome, not a dependency) — **requires `bun run dev` running**, no mail provider configured |
+| `bun run e2e:realtime` | Two browsers (parent + tutor): live messages, badges, notifications, offline recovery, failed send + Retry — **requires `bun run dev` running** |
 | `node scripts/pwa-icons.mjs` | Regenerate `public/icons/*` from `public/icon.svg` after a rebrand. Outputs are committed; no build step runs this |
 
 Two suites, no unit-test runner. Both are single sequential scripts with no filter flag —
@@ -165,6 +166,18 @@ ad-hoc JSON responses, and never let a raw driver error reach the client.
   code is shown on screen only when `NODE_ENV=development` and `APP_ENV` is not production; it is still
   emailed and checked. Social sign-in is not gated. `bun run qa` clients share one device cookie per run
   (`createClient({ shareDevice: false })` opts out) and complete the step from `devCode`.
+- **Realtime is delivery, never a record.** `GET /api/realtime` (SSE,
+  [src/services/realtime.service.js](src/services/realtime.service.js)) sends hints — ids, times,
+  unread counts — and **never content**; the browser answers each through the endpoint it already
+  uses (`GET …/conversations/[id]?since=`, the list reads). Recipients come from the stored
+  document only (`Notification.userId`, `Conversation.participantIds`) — the request names no
+  channel, and an admin gets nothing for threads they are not in. Events are produced by watching
+  the existing collections ([src/lib/realtime/sources.js](src/lib/realtime/sources.js): change
+  streams on a replica set, one poll per process on a standalone `mongod`), so a new write path
+  needs no "publish" call. Losing an event must stay survivable: every `ready` and `resync`
+  reconciles from the database. `Message.clientId` makes a retried send one message — look it up
+  before writing, never after. One stream per tab *in view*, opened only by `RealtimeProvider`; no
+  component opens its own. See [docs/REALTIME.md](docs/REALTIME.md).
 - **Risk detects; it never punishes.** [src/services/risk.service.js](src/services/risk.service.js) is the only place fraud logic lives. Every signal carries a `dedupeKey` derived from the event, so replays record once, and every call site uses `safelyRecordRiskSignal` so detection can never break the action being taken. No score restricts an account — an administrator does, from user management.
 - **The client supplies intent, never state.** Amounts, commission and statuses are derived server-side from stored data. `bun run qa` asserts an injected `price` or `status` is ignored.
 - **Ownership is checked against the loaded DB record**, never a request field (`requireOwnership`, `requireParticipant`, `ownsOrAdmin`).
@@ -292,6 +305,8 @@ same for §41 Phase 3 — which is a list of fourteen feature names and no requi
 mostly a record of which product decisions each deferred item is waiting on.
 [docs/PASSWORD_RESET.md](docs/PASSWORD_RESET.md) covers forgot password: the flow, its limits, the
 development mailbox and what production email needs.
+[docs/REALTIME.md](docs/REALTIME.md) covers realtime messages and notifications: the SSE stream,
+its two change sources, the event model, recovery, idempotent sends and what production needs.
 [docs/PWA.md](docs/PWA.md) covers the service worker: its caching allowlist,
 what is deliberately never cached, offline behaviour and the update strategy.
 
