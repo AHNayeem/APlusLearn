@@ -3,6 +3,8 @@ import { getAppConfig } from "@/services/settings.service";
 import { buildThemeCss, themeColor } from "@/lib/theme/tokens";
 import { ToastProvider } from "@/components/ui";
 import { ServiceWorkerManager } from "@/components/pwa/ServiceWorkerManager";
+import { InstallPrompt } from "@/components/pwa/InstallPrompt";
+import { CAPTURE_SCRIPT } from "@/lib/pwa/install";
 import "./globals.css";
 
 const jakarta = Plus_Jakarta_Sans({
@@ -123,7 +125,7 @@ export async function generateViewport() {
 }
 
 export default async function RootLayout({ children }) {
-  const { theme } = await getAppConfig();
+  const { theme, branding } = await getAppConfig();
 
   // Configured colours are expanded into the token names `globals.css` already
   // declares. An untouched theme produces no CSS at all, so the shipped design
@@ -144,6 +146,12 @@ export default async function RootLayout({ children }) {
       suppressHydrationWarning
     >
       <body className="flex min-h-full flex-col antialiased">
+        {/*
+          First in <body>, before any chunk can load: Chromium may fire
+          `beforeinstallprompt` before React hydrates, and only once per page
+          load. This parks it for `InstallPrompt` (docs/PWA.md).
+        */}
+        <script dangerouslySetInnerHTML={{ __html: CAPTURE_SCRIPT }} />
         {/*
           Hoisted into <head> by React, which de-duplicates it by `href` and
           orders it by `precedence`. Rendered here rather than inside a
@@ -168,7 +176,11 @@ export default async function RootLayout({ children }) {
           precisely because they have to render with nothing behind them. Each
           shell that already knows who is looking mounts it instead.
         */}
-        <ToastProvider>{children}</ToastProvider>
+        <ToastProvider>
+          {children}
+          {/* Offers "install this app" after a delay; nothing until then. */}
+          <InstallPrompt appName={branding.appName} />
+        </ToastProvider>
         {/* Renders nothing; registers the service worker after load (§18). */}
         <ServiceWorkerManager />
       </body>

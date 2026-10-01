@@ -15,6 +15,7 @@
     "qa": "node scripts/qa.mjs",
     "e2e": "node scripts/e2e-password-reset.mjs",
     "e2e:realtime": "node scripts/e2e-realtime.mjs",
+    "e2e:install": "node scripts/e2e-install.mjs",
     "test:integrations": "node --env-file=.env.local --import ./scripts/lib/register-loader.mjs scripts/integration-tests.mjs"
   },
   "dependencies": {

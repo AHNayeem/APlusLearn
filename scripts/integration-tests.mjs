@@ -185,6 +185,7 @@ async function runSections() {
   await attachmentTests();
   await studentAnalyticsTests();
   await realtimeTests();
+  await installPromptTests();
 }
 
 /**
@@ -13099,3 +13100,139 @@ async function realtimeTests() {
     await repl.close();
   }
 }
+
+/**
+ * The "install this app" prompt (docs/PWA.md).
+ *
+ * The decision is pure, so all of it is tested here, browser-free: which
+ * environments count as "already installed", which count as Safari on iOS —
+ * and, as importantly, which iOS browsers do *not*, because telling a
+ * Chrome-on-iPhone user to use Safari's Share sheet is an instruction for a
+ * different app — the cooldown arithmetic, the routes that hold the offer
+ * back, and the precedence between states A–F. What a browser renders, and
+ * that the native dialog is (or is not) called, is `bun run e2e:install`.
+ */
+async function installPromptTests() {
+  section("PWA install prompt — installed state, platform, cooldown and precedence");
+
+  const {
+    CAPTURE_SCRIPT, DEFERRED_PROMPT_EVENT, DEFERRED_PROMPT_GLOBAL, INSTALL_OFFER, INSTALL_SILENCE,
+    isCoolingDown, isIosSafari, isQuietRoute, isRunningInstalled, resolveInstallPrompt,
+  } = await import("@/lib/pwa/install");
+  const { PWA_INSTALL_PROMPT } = await import("@/constants/config");
+
+  // Installed-state detection.
+  const media = (...modes) => (query) => ({ matches: modes.some((m) => query === `(display-mode: ${m})`) });
+  check("a tab is not the installed app", !isRunningInstalled({ matchMedia: media("browser") }));
+  for (const mode of ["standalone", "fullscreen", "minimal-ui", "window-controls-overlay"]) {
+    check(`display-mode: ${mode} is the installed app`, isRunningInstalled({ matchMedia: media(mode) }));
+  }
+  check("iOS's navigator.standalone is the installed app",
+    isRunningInstalled({ matchMedia: media("browser"), navigator: { standalone: true } }));
+  check("a Trusted Web Activity is the installed app",
+    isRunningInstalled({ matchMedia: media(), referrer: "android-app://ca.apluslearn.twa/" }));
+  check("no matchMedia at all is treated as a tab, not a crash", !isRunningInstalled({}));
+  check("a matchMedia that throws is treated as a tab",
+    !isRunningInstalled({ matchMedia: () => { throw new Error("nope"); } }));
+
+  // Safari on iOS — and everything that looks like it but is not.
+  const UA = {
+    iphoneSafari: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Mobile/15E148 Safari/604.1",
+    ipadSafari: "Mozilla/5.0 (iPad; CPU OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
+    desktopModeIpad: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Safari/605.1.15",
+    iosChrome: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/140.0.7339.122 Mobile/15E148 Safari/604.1",
+    iosFirefox: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) FxiOS/143.0 Mobile/15E148 Safari/605.1.15",
+    iosEdge: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 EdgiOS/140.0.3485.94 Mobile/15E148 Safari/605.1.15",
+    iosGoogleApp: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) GSA/385.0.790807 Mobile/15E148 Safari/604.1",
+    iosInstagram: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Instagram 400.0.0.0 (iPhone15,2; iOS 18_6; en_CA)",
+    iosWebView: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+    androidChrome: "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36",
+    desktopFirefox: "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.6; rv:143.0) Gecko/20100101 Firefox/143.0",
+  };
+  check("Safari on iPhone is iOS Safari", isIosSafari({ userAgent: UA.iphoneSafari, platform: "iPhone", maxTouchPoints: 5 }));
+  check("Safari on iPad is iOS Safari", isIosSafari({ userAgent: UA.ipadSafari, platform: "iPad", maxTouchPoints: 5 }));
+  check("an iPad presenting a desktop user agent is recognised by its touch points",
+    isIosSafari({ userAgent: UA.desktopModeIpad, platform: "MacIntel", maxTouchPoints: 5 }));
+  check("macOS Safari is not (same user agent, no touch)",
+    !isIosSafari({ userAgent: UA.desktopModeIpad, platform: "MacIntel", maxTouchPoints: 0 }));
+  for (const [name, userAgent] of [
+    ["Chrome on iOS", UA.iosChrome], ["Firefox on iOS", UA.iosFirefox], ["Edge on iOS", UA.iosEdge],
+    ["the Google app", UA.iosGoogleApp], ["Instagram's in-app browser", UA.iosInstagram],
+    ["an embedded web view", UA.iosWebView], ["Chrome on Android", UA.androidChrome],
+    ["desktop Firefox", UA.desktopFirefox],
+  ]) {
+    check(`${name} is not given Safari's steps`, !isIosSafari({ userAgent, platform: "iPhone", maxTouchPoints: 5 }));
+  }
+
+  // Cooldown arithmetic.
+  const DAY = 24 * 60 * 60 * 1000;
+  const now = Date.UTC(2026, 9, 1, 12);
+  const cooldown = PWA_INSTALL_PROMPT.cooldownDays * DAY;
+  check("cooldown is a pause, not a permanent opt-out", PWA_INSTALL_PROMPT.cooldownDays > 0 && Number.isFinite(cooldown));
+  check("just dismissed is cooling down", isCoolingDown(now, now));
+  check("one millisecond before the cooldown ends is still cooling down", isCoolingDown(now - cooldown + 1, now));
+  check("at the end of the cooldown it may be offered again", !isCoolingDown(now - cooldown, now));
+  check("a stored string timestamp works (that is what localStorage holds)", isCoolingDown(String(now - DAY), now));
+  for (const junk of [null, undefined, "", "soon", "-5", "0", NaN]) {
+    check(`an unreadable stored value (${JSON.stringify(junk) ?? "undefined"}) does not silence it`, !isCoolingDown(junk, now));
+  }
+  check("a dismissal stamped in the future (clock moved back) counts as just now, not forever",
+    isCoolingDown(now + 365 * DAY, now) && !isCoolingDown(now + 365 * DAY, now + 365 * DAY + cooldown));
+
+  // Quiet routes hold the offer back; they do not cancel it.
+  for (const route of ["/login", "/login/verify", "/register", "/forgot-password", "/reset-password",
+    "/verify-email", "/bookings/checkout/abc123", "/bookings/checkout/abc123/complete", "/offline",
+    "/dev/mail", "/messages/66f0c0ffee", "/tutor/messages/66f0c0ffee"]) {
+    check(`${route} is quiet`, isQuietRoute(route));
+  }
+  for (const route of ["/", "/find-a-tutor", "/dashboard", "/bookings", "/messages", "/tutor/messages",
+    "/tutor/dashboard", "/admin/dashboard", "/settings", "/loginhelp", "/developers"]) {
+    check(`${route} is not`, !isQuietRoute(route));
+  }
+
+  // Precedence: C, F, E, then A / B, else D.
+  const base = { now, pathname: "/dashboard" };
+  const r = (overrides) => resolveInstallPrompt({ ...base, ...overrides });
+  check("A — an install event offers the native install",
+    r({ nativeAvailable: true }).offer === INSTALL_OFFER.NATIVE && r({ nativeAvailable: true }).visible);
+  check("B — iOS Safari offers the Add to Home Screen steps",
+    r({ iosSafari: true }).offer === INSTALL_OFFER.IOS && r({ iosSafari: true }).visible);
+  check("C — running installed shows nothing, even with an install event",
+    r({ installed: true, nativeAvailable: true }).reason === INSTALL_SILENCE.INSTALLED
+      && !r({ installed: true, nativeAvailable: true }).visible);
+  check("C — and nothing on an iPhone home-screen copy",
+    !r({ installed: true, iosSafari: true }).visible);
+  check("D — no event and not iOS Safari shows nothing",
+    r({}).reason === INSTALL_SILENCE.UNSUPPORTED && r({}).offer === null);
+  check("E — dismissed recently shows nothing",
+    r({ nativeAvailable: true, dismissedAt: now - DAY }).reason === INSTALL_SILENCE.COOLING_DOWN);
+  check("E — and the iOS steps respect the same cooldown",
+    !r({ iosSafari: true, dismissedAt: now - DAY }).visible);
+  check("E — once the cooldown is over it is offered again",
+    r({ nativeAvailable: true, dismissedAt: now - cooldown - 1 }).visible);
+  check("F — accepted this session shows nothing",
+    r({ accepted: true, nativeAvailable: true }).reason === INSTALL_SILENCE.ACCEPTED);
+  check("a quiet route keeps the offer but does not show it",
+    r({ nativeAvailable: true, pathname: "/login" }).offer === INSTALL_OFFER.NATIVE
+      && !r({ nativeAvailable: true, pathname: "/login" }).visible
+      && r({ nativeAvailable: true, pathname: "/login" }).reason === INSTALL_SILENCE.ROUTE);
+  check("an install event is preferred over instructions",
+    r({ nativeAvailable: true, iosSafari: true }).offer === INSTALL_OFFER.NATIVE);
+  check("nothing about the decision takes an account",
+    !Object.keys(r({ nativeAvailable: true })).some((k) => /user|role|session|account/i.test(k)));
+
+  // The inline capture script, run against a stand-in window.
+  const win = new EventTarget();
+  let parked = 0;
+  win.addEventListener(DEFERRED_PROMPT_EVENT, () => { parked += 1; });
+  new Function("window", "Event", CAPTURE_SCRIPT)(win, Event);
+  const bip = new Event("beforeinstallprompt", { cancelable: true });
+  win.dispatchEvent(bip);
+  check("the capture script parks beforeinstallprompt for the component", win[DEFERRED_PROMPT_GLOBAL] === bip);
+  check("and suppresses the browser's own mini-infobar", bip.defaultPrevented);
+  check("and tells a component that is already listening", parked === 1);
+  win.dispatchEvent(new Event("appinstalled"));
+  check("appinstalled drops the parked event", win[DEFERRED_PROMPT_GLOBAL] === null);
+  check("the capture script never calls prompt() itself", !/\.prompt\(/.test(CAPTURE_SCRIPT));
+}
+

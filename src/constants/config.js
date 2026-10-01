@@ -294,6 +294,20 @@ export const LOGIN_VERIFICATION = {
   trustedDeviceDays: 90,
 };
 
+/**
+ * The "install this app" prompt (docs/PWA.md).
+ *
+ * `delaySeconds` is time the page has actually been *in view*, not wall-clock
+ * time since load — a tab opened in the background and switched to an hour
+ * later has not been looked at for an hour. `cooldownDays` follows either
+ * "Not now" or turning the browser's own install dialog down; it is a pause,
+ * not an opt-out, because there is no product requirement for a permanent one.
+ */
+export const PWA_INSTALL_PROMPT = {
+  delaySeconds: 20,
+  cooldownDays: 14,
+};
+
 export const DEFAULT_SETTINGS = {
   /** Platform commission taken from each lesson, as a percentage. */
   commissionPercent: 15,

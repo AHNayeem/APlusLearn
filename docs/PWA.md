@@ -17,6 +17,7 @@ cannot make a booking safe to keep in a shared browser cache by editing a form.
 | Icons | `public/icons/*` | Generated from `public/icon.svg` by [scripts/pwa-icons.mjs](../scripts/pwa-icons.mjs). Committed, so no build step and no dependency. |
 | Service worker | [public/sw.js](../public/sw.js) | Hand-written allowlist. No package, no generated precache manifest. |
 | Registration | [src/components/pwa/ServiceWorkerManager.jsx](../src/components/pwa/ServiceWorkerManager.jsx) | Mounted in the root layout. Registers in production; actively unregisters in development. |
+| Install prompt | [src/components/pwa/InstallPrompt.jsx](../src/components/pwa/InstallPrompt.jsx) + [src/lib/pwa/install.js](../src/lib/pwa/install.js) | A delayed, dismissible "Install App" card where the browser can install, Safari's steps on iOS, nothing elsewhere. See [Install prompt](#install-prompt). |
 | Offline page | [src/app/offline/page.js](../src/app/offline/page.js) | Pre-cached at install, anonymously. Works with no JavaScript. |
 | Headers | [next.config.mjs](../next.config.mjs) | `/sw.js` is never cached by a proxy; `/icons/*` is cached for a day. |
 | API envelope | [src/lib/api/response.js](../src/lib/api/response.js) | Every `ok`/`fail`/`noContent` response now carries `Cache-Control: no-store`. |
@@ -153,9 +154,10 @@ Installability criteria, all verified served:
   deployment whose `NEXT_PUBLIC_APP_URL` is not `https://`); `localhost` is a
   secure context for development.
 
-No custom install button. `beforeinstallprompt` does not exist on Safari, so a
-hand-rolled prompt would be a control that works on one platform and lies on
-another; the browser's own affordance is used on all of them.
+The browser's own affordances — Chrome's address-bar icon, "Install app" in
+the menu, Safari's Share → Add to Home Screen — always work. On top of them the
+application offers an install itself, but only where it can do so honestly; see
+[Install prompt](#install-prompt) below.
 
 ### iOS
 
@@ -169,11 +171,186 @@ another; the browser's own affordance is used on all of them.
 - `apple-mobile-web-app-status-bar-style` is **`default`**, not
   `black-translucent`. The translucent bar draws the page under the clock and
   battery, which would push every sticky header on the site up behind them.
-- **iOS caveats, not claimed as working:** no `beforeinstallprompt`, no Web
+- **iOS caveats, not claimed as working:** no `beforeinstallprompt` (so the
+  install prompt shows Safari's steps instead of a button), no Web
   Push except for a copy already added to the home screen (iOS 16.4+), and
   Safari evicts all storage — service-worker caches included — after roughly
   seven days without use. An installed copy will re-download its shell after a
   quiet week. None of this is worked around, because none of it can be.
+
+---
+
+## Install prompt
+
+A small card that tells a visitor the application can be installed, after
+they have had time to look around. Two offers, and only two, because there are
+only two that do what they say:
+
+| Environment | What is shown | What the button does |
+|---|---|---|
+| Chrome / Edge / Samsung Internet / Opera, Android or desktop, not installed | **Install {name}** — "Install App" / "Not now" | Calls the saved `beforeinstallprompt` event's `prompt()`: the browser's own dialog |
+| Safari on iPhone or iPad, not on the home screen | **Install {name}** — Safari's three steps (Share → Add to Home Screen → Add), labelled "In Safari" — "Not now" | Nothing to install from: there is no Install App button |
+| Running installed (any platform) | Nothing | — |
+| Firefox (any), macOS Safari, Chrome/Firefox/Edge on iOS, in-app browsers | Nothing | — |
+| Within the cooldown after "Not now" or a declined dialog | Nothing | — |
+| After an accepted install, for the rest of the session | Nothing | — |
+
+`{name}` is the configured application name, as in the manifest, so a
+rebranded deployment never offers to install "APlus Learn".
+
+### Pieces
+
+| Piece | File |
+|---|---|
+| The decision — installed-state detection, iOS Safari detection, cooldown, quiet routes, states A–F | [src/lib/pwa/install.js](../src/lib/pwa/install.js) (pure; no `window`) |
+| The card | [src/components/pwa/InstallPrompt.jsx](../src/components/pwa/InstallPrompt.jsx), mounted in the root layout inside `ToastProvider` |
+| Early event capture | `CAPTURE_SCRIPT` in `install.js`, inlined first in `<body>` by [src/app/layout.js](../src/app/layout.js) |
+| Timing constants | `PWA_INSTALL_PROMPT` in [src/constants/config.js](../src/constants/config.js) |
+
+It touches nothing in the service worker, the manifest or the caching rules,
+and it stores nothing but one timestamp.
+
+### Chromium (Android and desktop)
+
+Chromium fires `beforeinstallprompt` once per page load when the site is
+installable *and not already installed*, and it can fire before React has
+hydrated. So an inline script at the top of `<body>` catches it, calls
+`preventDefault()` — which stops Android's mini-infobar, since our card
+replaces it on our schedule, but leaves the address-bar icon and the menu
+item alone — and parks the event on `window`. Nothing ever calls `prompt()`
+except a click on **Install App**.
+
+After the browser's dialog:
+
+- **accepted** → the card closes, a toast says the app is installing, and
+  `sessionStorage` remembers it, so it is not offered again this session
+  (`appinstalled` does the same if the visitor installs from the browser menu
+  while the card is up);
+- **dismissed** → the card closes and the cooldown starts, exactly as for
+  "Not now" — the browser's "Cancel" is a no.
+
+An event is good for one `prompt()`; afterwards it is dropped, and a fresh one
+arrives on a later page load if the site is still installable.
+
+### iOS Safari
+
+iOS has no install API, and nothing on a page can open the Add to Home Screen
+sheet. So the card shows Safari's own steps, with Safari's glyphs, under an "In
+Safari" label, and has no install button — only "Not now" and close.
+
+Step 1 names both places Share can be: the toolbar, or behind "•••" in the
+compact toolbar iOS 26 made the default. iPadOS presents a Mac user agent, so an
+iPad is recognised by a Mac platform with touch points; macOS Safari has none
+and is shown nothing. Chrome, Firefox and Edge on iOS, and embedded web views
+(Instagram, the Google app, …), are excluded: their share menus are not
+Safari's, and the steps would be instructions for a different app.
+
+### Already installed
+
+The card is not shown when the page is running *as* the app:
+`display-mode` `standalone`, `fullscreen`, `minimal-ui` or
+`window-controls-overlay`; iOS's `navigator.standalone`; or an
+`android-app://` referrer (a Trusted Web Activity).
+
+A browser *tab* on a device where the app is installed is a different
+question. Chromium answers it for us by not firing `beforeinstallprompt`, so
+no card. Safari gives a page no way to ask — and a home-screen app's storage is
+separate from Safari's, so the app cannot leave a note for the tab. An iPhone
+user who installed the app and then opens the site in Safari again will see the
+instructions once more, subject to the cooldown. This cannot be fixed from the
+page.
+
+### Timing
+
+- **Delay:** `PWA_INSTALL_PROMPT.delaySeconds` (20) of time the page is
+  actually *in view* — a background tab does not count down. Never on first
+  paint.
+- **Not while typing:** if a field has focus when the delay is up, it waits
+  and checks again five seconds later.
+- **Quiet routes:** sign-in, sign-up, verification and reset pages, checkout,
+  `/offline`, `/dev` and open message threads (whose composer is pinned to the
+  bottom of a phone). On these the offer is held, not dropped: it appears on
+  the next ordinary page, and nothing is recorded as dismissed. Client-side
+  navigation keeps the timer, so moving from a quiet route to an ordinary one
+  shows it without waiting again.
+
+### Dismissal
+
+"Not now", the close button, Escape, and declining the browser's dialog all
+write one key, `localStorage["aplus:install-prompt-dismissed"]`, holding the
+time in milliseconds. The card is not offered again for
+`PWA_INSTALL_PROMPT.cooldownDays` (14). It is a pause, not an opt-out — there
+is no requirement for a permanent one. A timestamp from the future (a clock
+that moved back) counts as "just now", and an unreadable one as no dismissal.
+"Not now" in one tab closes the card in the others. If storage is refused
+(private browsing, managed browsers), the card still works for the visit; it
+just cannot remember.
+
+Nothing about the prompt involves an account: it works the same signed in or
+out, and the stored state belongs to the browser.
+
+### Layout and accessibility
+
+- **Phone (< `sm`):** a sheet across the bottom, 12px from each edge (or the
+  safe-area inset, if larger), lifted by `env(safe-area-inset-bottom)` and
+  by the `--support-launcher-clearance` the support launcher publishes, so it
+  never covers the launcher or the home indicator. 44px buttons.
+- **`sm` and up:** a compact card, `max-w-sm`, at the bottom centre — clear
+  of the launcher and toasts (bottom right) and of the dashboard sidebar's
+  account links (bottom left).
+- **Non-modal:** `role="dialog"` with `aria-modal="false"`, labelled and
+  described. No backdrop, no scroll lock, no focus trap, and focus is *not*
+  moved into it on arrival — an unsolicited card that took the caret out of a
+  half-typed search would be the intrusive popup this is meant not to be. A
+  polite live region announces it once. Keyboard users reach it with Tab;
+  closing it from inside returns focus to where they came from.
+- **Escape** closes it when focus is on the page or in the card — not while a
+  modal is open, and not from inside a text field, where Escape already means
+  something else.
+- Fixed-position, so no layout shift; `prefers-reduced-motion` reduces the
+  slide to a fade; `no-print`. The application has no dark theme, so neither
+  does the card; it uses the same tokens, `Button` and `IconButton` as
+  everything else.
+
+### Testing it
+
+```bash
+bun run test:integrations   # the decision: "PWA install prompt" section
+bun run dev                 # in another terminal, then:
+bun run e2e:install         # the card in real Chrome
+```
+
+[`scripts/e2e-install.mjs`](../scripts/e2e-install.mjs) covers each state in
+a fresh browser context: the native flow (accepted and declined), "Not now"
+and its cooldown, Escape, standalone and iOS standalone, Safari on iPhone,
+Firefox and Chrome on iOS, phones at 360×800, 390×844 and 412×915 (inside the
+viewport, no horizontal overflow, 44px targets, clear of the launcher and top
+bar, page still scrolls), quiet routes, typing, and every signed-in area plus
+the admin console with the card on screen. The install event is *simulated* —
+an automated browser cannot be made installable on demand and cannot click
+browser chrome — and a real event is stopped before the application sees it,
+so a run never opens a real install dialog. The delay is skipped with
+Playwright's clock, not a test hook.
+
+Against a production build in real Chrome (154, a fresh profile, started with
+`--bypass-app-banner-engagement-checks` because an automated profile has no
+engagement with the origin), the real path was verified end to end up to the
+browser's own dialog: Chrome fires a *trusted* `beforeinstallprompt`, the
+capture script parks it, nothing is shown on first paint, the card appears
+after the delay, and Install App calls the real `prompt()`. What could not be
+automated is everything after that: accepting the browser's dialog, relaunching
+the installed app and uninstalling it. A page cannot click browser chrome, and
+the DevTools `PWA` domain (`PWA.install` / `launch` / `uninstall`) is not
+present in that build. Those steps are covered by simulation in
+`e2e:install` and need a person at a real browser to confirm.
+
+To try the real thing on desktop Chrome, use a production build (above), visit
+`http://localhost:3210`, interact with the page, and wait 20 seconds. To see
+the card again, clear `aplus:install-prompt-dismissed` from Local Storage, or
+uninstall the app (`chrome://apps`, or the app window's menu). On a phone, the
+production build has to be served over HTTPS (a tunnel such as `cloudflared`
+or `ngrok` will do) — `localhost` is only a secure context on the device that
+is serving it.
 
 ---
 

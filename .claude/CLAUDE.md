@@ -19,6 +19,7 @@ Package manager is **bun** (`bun.lock`, `packageManager: bun@1.3.12`); npm works
 | `bun run test:integrations` | Provider adapters and DB-backed service rules, with `fetch` stubbed — no third-party service is contacted |
 | `bun run e2e` | Forgot password in a real browser (Playwright + system Chrome, not a dependency) — **requires `bun run dev` running**, no mail provider configured |
 | `bun run e2e:realtime` | Two browsers (parent + tutor): live messages, badges, notifications, offline recovery, failed send + Retry — **requires `bun run dev` running** |
+| `bun run e2e:install` | The PWA install prompt in real Chrome: native flow, cooldown, installed, iOS Safari, unsupported browsers, phone layouts, and every signed-in area with the card shown — **requires `bun run dev` running** |
 | `node scripts/pwa-icons.mjs` | Regenerate `public/icons/*` from `public/icon.svg` after a rebrand. Outputs are committed; no build step runs this |
 
 Two suites, no unit-test runner. Both are single sequential scripts with no filter flag —
@@ -308,7 +309,9 @@ development mailbox and what production email needs.
 [docs/REALTIME.md](docs/REALTIME.md) covers realtime messages and notifications: the SSE stream,
 its two change sources, the event model, recovery, idempotent sends and what production needs.
 [docs/PWA.md](docs/PWA.md) covers the service worker: its caching allowlist,
-what is deliberately never cached, offline behaviour and the update strategy.
+what is deliberately never cached, offline behaviour, the update strategy, and
+the install prompt (which browsers get a button, which get Safari's steps, and
+which get nothing).
 
 **Security headers live in [next.config.mjs](next.config.mjs).** Content-Security-Policy is sent on
 every *document* and deliberately not on `/api` — a header declared in the config replaces one a

@@ -766,10 +766,14 @@ design notes in [`docs/PWA.md`](PWA.md).
 | API cacheability | `ok`/`fail`/`noContent` now send `Cache-Control: no-store`, closing heuristic caching by a browser, proxy or CDN. The binary routes keep the headers they reason about individually (§16, §18) | Implemented |
 | Update strategy | New workers wait; nothing calls `skipWaiting()` and nothing reloads. `activate` drops older `aplus-` caches and claims uncontrolled pages. The registrar re-checks hourly and on tab focus. Navigations are network-first, so a stale worker is a stale *policy*, never stale code | Implemented |
 | Offline mutations | Deliberately absent. No offline database, no queued bookings or payments — a payment a person believes succeeded because it was queued locally is worse than one that plainly failed | Not applicable |
+| Install prompt | `src/components/pwa/InstallPrompt.jsx`, decided by the pure `src/lib/pwa/install.js`. After 20s *in view* (not while typing, not on sign-in/sign-up/checkout/thread routes): Chromium gets "Install App", which calls the captured `beforeinstallprompt`; iOS Safari gets Safari's Add to Home Screen steps and no button; everything else, and anything already running installed, gets nothing. "Not now", Escape or a declined dialog pause it for 14 days in one `localStorage` key; an accepted install silences it for the session. Non-modal, no scroll lock, 44px targets, safe-area and support-launcher aware. Account-independent. `test:integrations` + `bun run e2e:install` | Implemented |
 | iOS support | Apple touch icon, legacy `apple-mobile-web-app-capable` alongside Next's standardised tag, `status-bar-style: default` so no sticky header slides under the clock | Partial — see below |
 
 **iOS limitations, not worked around because they cannot be:** no
-`beforeinstallprompt`, so no custom install button on Safari; Web Push only for
+`beforeinstallprompt`, so the install prompt can only *describe* Safari's Add to
+Home Screen steps, never trigger them — and a Safari tab cannot tell whether the
+app is already on the home screen, so an iPhone user who installed it may be
+shown the steps again in Safari after the cooldown; Web Push only for
 a copy already on the home screen (iOS 16.4+); and Safari evicts all storage,
 service-worker caches included, after roughly seven days without use, so an
 installed copy re-downloads its shell after a quiet week.
