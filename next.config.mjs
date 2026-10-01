@@ -1,3 +1,5 @@
+import { networkInterfaces } from "node:os";
+
 import { REMOTE_IMAGE_HOSTS } from "./src/constants/config.js";
 
 /**
@@ -92,9 +94,40 @@ function contentSecurityPolicy() {
  */
 const HSTS = "max-age=31536000";
 
+/**
+ * Hosts other than `localhost` that may load the development server.
+ *
+ * Next 16 refuses its dev resources — the HMR socket above all — to any
+ * origin it was not told about. A phone opening `http://192.168.x.x:3000`
+ * is such an origin, and losing that socket stops the page hydrating: the
+ * server-rendered HTML arrives, but every `Reveal` stays at opacity 0 and no
+ * button, menu or chat launcher responds. Only the footer, which has no
+ * entrance animation, is visible.
+ *
+ * The allowance is this machine's own IPv4 addresses — the only hosts a
+ * device on the LAN can reach this server by — rather than a whole private
+ * range, so another machine on the network gains nothing. Read once per
+ * process: if the address changes, restart `bun run dev`.
+ * `DEV_ALLOWED_ORIGINS` (comma-separated hostnames) adds anything else, such
+ * as a tunnel. The option has no effect on a production build.
+ */
+function devAllowedOrigins() {
+  const lanAddresses = Object.values(networkInterfaces())
+    .flat()
+    .filter((address) => address && address.family === "IPv4" && !address.internal)
+    .map((address) => address.address);
+  const configured = (process.env.DEV_ALLOWED_ORIGINS ?? "")
+    .split(",")
+    .map((host) => host.trim())
+    .filter(Boolean);
+  return [...new Set([...lanAddresses, ...configured])];
+}
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactCompiler: true,
+
+  allowedDevOrigins: isProduction ? [] : devAllowedOrigins(),
 
   /**
    * The local verification-document store reads from a runtime-configured
