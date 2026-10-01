@@ -46,15 +46,15 @@ export default async function AdminIntegrationsPage({ searchParams }) {
       <PageHeader
         title="External modules"
         description="Credentials and connection settings for the services this platform talks to. Every change is recorded in the audit log; stored credentials are encrypted and are never shown again once saved."
-        action={
-          <Link
-            href="/admin/settings"
-            className="inline-flex items-center gap-1.5 text-sm font-medium text-ink-600 hover:text-ink-900"
-          >
-            <ArrowLeft className="size-4" aria-hidden="true" />
-            Platform settings
-          </Link>
-        }
+        // action={
+        //   <Link
+        //     href="/admin/settings"
+        //     className="inline-flex items-center gap-1.5 text-sm font-medium text-ink-600 hover:text-ink-900"
+        //   >
+        //     <ArrowLeft className="size-4" aria-hidden="true" />
+        //     Platform settings
+        //   </Link>
+        // }
       />
 
       <Alert tone="info" title="Where these values come from" className="mb-6 max-w-3xl">
