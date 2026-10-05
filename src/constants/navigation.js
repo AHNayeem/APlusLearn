@@ -36,6 +36,7 @@ export const FOOTER_NAV = [
       { href: "/about", label: "About us" },
       { href: "/how-it-works", label: "How it works" },
       { href: "/safety", label: "Safety" },
+      { href: "/help-centre", label: "Help centre" },
       { href: "/support", label: "Support" },
       { href: "/faq", label: "FAQ" },
     ],
@@ -47,6 +48,8 @@ export const FOOTER_NAV = [
       { href: "/legal/privacy", label: "Privacy policy" },
       { href: "/legal/cookies", label: "Cookie policy" },
       { href: "/legal/cancellation", label: "Cancellation & refunds" },
+      { href: "/legal/community-standards", label: "Community standards" },
+      { href: "/legal/tutor-agreement", label: "Tutor agreement" },
       { href: "/legal/accessibility", label: "Accessibility" },
     ],
   },
@@ -70,7 +73,7 @@ export const FOOTER_SUBJECT_LINKS = [
   { href: "/find-a-tutor?subject=history", label: "History" },
   { href: "/find-a-tutor?subject=geography", label: "Geography" },
   { href: "/find-a-tutor?subject=social-sciences", label: "Social sciences" },
-  { href: "/courses?popular=true", label: "Ontario course codes" },
+  { href: "/courses?popular=true", label: "Course codes" },
 ];
 
 /** The same subjects, scoped to online delivery (§14 `mode` filter). */
@@ -98,15 +101,19 @@ export const FOOTER_USEFUL_LINKS = [
   { href: "/safety", label: "Safety" },
   { href: "/verification", label: "Verification" },
   { href: "/faq", label: "F.A.Q" },
+  { href: "/help-centre", label: "Help centre" },
   { href: "/login", label: "Sign in now" },
 ];
 
 /** Bottom bar. `/legal/[slug]` renders each of these. */
 export const FOOTER_LEGAL_LINKS = [
+  { href: "/help-centre", label: "Help centre" },
   { href: "/support", label: "Support" },
   { href: "/legal/terms", label: "Terms of use" },
   { href: "/legal/privacy", label: "Privacy policy" },
-  { href: "/legal/cookies", label: "Cookie notice" },
+  { href: "/legal/cookies", label: "Cookie policy" },
+  { href: "/legal/community-standards", label: "Community standards" },
+  { href: "/legal/tutor-agreement", label: "Tutor agreement" },
   { href: "/legal/accessibility", label: "Accessibility" },
 ];
 
@@ -171,6 +178,7 @@ export const ADMIN_NAV = [
   { href: "/admin/risk", label: "Risk", icon: "Siren", badge: "openRiskCases" },
   { href: "/admin/reviews", label: "Reviews", icon: "Star", badge: "reportedReviews" },
   { href: "/admin/moderation", label: "Reported chats", icon: "MessageSquareWarning", badge: "reportedConversations" },
+  { href: "/admin/support", label: "Support tickets", icon: "LifeBuoy" },
   { href: "/admin/sms", label: "Text messages", icon: "Smartphone" },
   { href: "/admin/audit", label: "Audit log", icon: "ScrollText" },
   { href: "/admin/settings", label: "Settings", icon: "Settings" },

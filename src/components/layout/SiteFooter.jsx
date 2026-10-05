@@ -98,10 +98,9 @@ export async function SiteFooter({ config }) {
               )}
               <li className="flex flex-wrap items-center gap-x-3 gap-y-1">
                 <MessageCircle className="size-4 shrink-0 text-white/45" aria-hidden="true" />
-                <Link href="/support" className="text-white hover:text-accent-300">
-                  Help centre &amp; live chat
+                <Link href="/help-centre" className="text-white hover:text-accent-300">
+                  Help centre &amp; support
                 </Link>
-                <span className="text-white/45">( replies within 4 hours )</span>
               </li>
               {location && (
                 <li className="flex flex-wrap items-center gap-x-3 gap-y-1">

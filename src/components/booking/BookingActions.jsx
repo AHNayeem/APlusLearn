@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { XCircle, CheckCircle2, Star, AlertTriangle, CalendarClock } from "lucide-react";
+import { XCircle, CheckCircle2, Star, AlertTriangle, CalendarClock, UserX } from "lucide-react";
 import { api } from "@/lib/api/client";
 import { useSubmit } from "@/hooks/useAsync";
 import {
@@ -20,7 +20,7 @@ export function BookingActions({ booking, viewerRole, cancellationPolicy }) {
   const [modal, setModal] = useState(null);
   const close = () => setModal(null);
 
-  const { canCancel, canComplete, canReview, canDispute } = booking.permissions ?? {};
+  const { canCancel, canComplete, canReview, canDispute, canReportNoShow } = booking.permissions ?? {};
 
   return (
     <>
@@ -56,6 +56,15 @@ export function BookingActions({ booking, viewerRole, cancellationPolicy }) {
             Reschedule
           </Button>
         )}
+        {canReportNoShow && (
+          <Button
+            variant="dangerGhost"
+            onClick={() => setModal("noShow")}
+            iconLeft={<UserX className="size-4" />}
+          >
+            The tutor didn&rsquo;t show up
+          </Button>
+        )}
         {canDispute && (
           <Button
             variant="dangerGhost"
@@ -77,6 +86,7 @@ export function BookingActions({ booking, viewerRole, cancellationPolicy }) {
       <CompleteModal open={modal === "complete"} onClose={close} booking={booking} />
       <ReviewModal open={modal === "review"} onClose={close} booking={booking} />
       <DisputeModal open={modal === "dispute"} onClose={close} booking={booking} />
+      <NoShowModal open={modal === "noShow"} onClose={close} booking={booking} />
       <RescheduleModal open={modal === "reschedule"} onClose={close} booking={booking} />
     </>
   );
@@ -245,12 +255,26 @@ function ReviewModal({ open, onClose, booking }) {
 
   const set = (key, value) => setForm((f) => ({ ...f, [key]: value }));
 
+  // A written review is optional (R21.2); stars alone are a review. The
+  // server decides whether it is published now or waits for approval.
   const { submit, pending, error, fieldErrors } = useSubmit(async () => {
-    await api.post("/api/reviews", { bookingId: booking.id, ...form });
-    toast.success("Review published", "Thanks — this helps other families choose.");
+    const { review } = await api.post("/api/reviews", {
+      bookingId: booking.id,
+      ...form,
+      title: form.title.trim() || undefined,
+      body: form.body.trim() || undefined,
+    });
+    if (review?.status === "PENDING_MODERATION") {
+      toast.success("Review submitted", "It will appear once our team has approved it.");
+    } else {
+      toast.success("Review published", "Thanks — this helps other families choose.");
+    }
     onClose();
     router.refresh();
   });
+
+  const bodyChars = form.body.replace(/\s/g, "").length;
+  const bodyTooShort = bodyChars > 0 && bodyChars < 10;
 
   return (
     <Modal
@@ -264,8 +288,8 @@ function ReviewModal({ open, onClose, booking }) {
           <Button variant="ghost" onClick={onClose}>
             Not now
           </Button>
-          <Button onClick={submit} loading={pending} disabled={form.body.trim().length < 20}>
-            Publish review
+          <Button onClick={submit} loading={pending} disabled={bodyTooShort}>
+            Submit review
           </Button>
         </>
       }
@@ -315,11 +339,14 @@ function ReviewModal({ open, onClose, booking }) {
         </Field>
 
         <Field
-          label="Your review"
+          label="Written review (optional)"
           htmlFor="review-body"
-          hint="What worked, what to expect — the details other parents need."
+          hint={
+            bodyTooShort
+              ? "If you write something, make it at least 10 characters."
+              : "Optional. What worked, what to expect — the details other parents need."
+          }
           error={fieldErrors.body}
-          required
         >
           <Textarea
             id="review-body"
@@ -369,6 +396,61 @@ function StarInput({ label, value, onChange, size = "md" }) {
         <span className="text-sm font-bold text-ink-700 tabular-nums">{value}.0</span>
       </div>
     </div>
+  );
+}
+
+/**
+ * A learner reporting that the tutor did not attend (R27.5). It opens a
+ * dispute for our team to decide — nothing is refunded by the report itself
+ * — and is only offered for a short window after the lesson.
+ */
+function NoShowModal({ open, onClose, booking }) {
+  const router = useRouter();
+  const toast = useToast();
+  const [note, setNote] = useState("");
+  const closesAt = booking.permissions?.noShowReportClosesAt;
+
+  const { submit, pending, error, fieldErrors } = useSubmit(async () => {
+    await api.post(`/api/bookings/${booking.id}/no-show`, { party: "TUTOR", note });
+    toast.success("Report received", "Our team will review it and decide on any refund.");
+    onClose();
+    router.refresh();
+  });
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title="Report that the tutor didn't show up"
+      description="Our team reviews every report with the tutor before deciding on a refund."
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button variant="danger" onClick={submit} loading={pending} disabled={note.trim().length < 5}>
+            Send report
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-4">
+        <FormErrorSummary error={error} fieldErrors={fieldErrors} />
+        {closesAt && (
+          <Alert tone="info">You can report this until {formatDateTime(closesAt)}.</Alert>
+        )}
+        <Field label="What happened?" htmlFor="no-show-note" required error={fieldErrors?.note}>
+          <Textarea
+            id="no-show-note"
+            rows={4}
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            maxLength={600}
+            placeholder="e.g. We waited in the meeting room for 20 minutes and the tutor never joined."
+          />
+        </Field>
+      </div>
+    </Modal>
   );
 }
 

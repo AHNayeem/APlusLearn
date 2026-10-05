@@ -173,7 +173,7 @@ export function CourseFilters({ facets, grades = [], subjects = [], className })
         </div>
       </FilterGroup>
 
-      <FilterGroup title="Course code" hint="Ontario secondary courses carry a code; elementary ones don't">
+      <FilterGroup title="Course code" hint="Courses with a provincial code; many elementary courses have none">
         <div className="space-y-2">
           {[
             { value: "", label: "Coded and uncoded" },

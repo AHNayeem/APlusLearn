@@ -4,7 +4,7 @@ import { Field, Input, Select } from "@/components/ui";
 import { CANADIAN_TIMEZONES } from "@/lib/utils/time";
 
 /** Step 1 — personal information (§17). */
-export function PersonalStep({ value, onChange, fieldErrors, provinces = [] }) {
+export function PersonalStep({ value, onChange, fieldErrors, provinces = [], defaultProvince = "" }) {
   const set = (key) => (e) => onChange({ ...value, [key]: e.target.value });
 
   return (
@@ -50,7 +50,7 @@ export function PersonalStep({ value, onChange, fieldErrors, provinces = [] }) {
 
       <div className="grid gap-4 sm:grid-cols-2">
         <Field label="Province" htmlFor="ob-province" error={fieldErrors.province} required>
-          <Select id="ob-province" value={value.province ?? "ON"} onChange={set("province")}>
+          <Select id="ob-province" value={value.province ?? defaultProvince} onChange={set("province")}>
             {provinces.map((p) => (
               <option key={p.code} value={p.code} disabled={!p.isActive}>
                 {p.name}

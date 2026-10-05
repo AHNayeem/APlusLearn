@@ -1,7 +1,8 @@
 import { z } from "zod";
-import { routeHandler, ok } from "@/lib/api";
+import { routeHandler, ok, failFromError } from "@/lib/api";
+import { connectToDatabase } from "@/lib/db/connect";
 import { objectId } from "@/lib/validation/common";
-import { capturePayment } from "@/services/payment.service";
+import { capturePayment, requireInAppCheckout } from "@/services/payment.service";
 import { confirmBookings } from "@/services/booking.service";
 import { PERMISSIONS } from "@/constants";
 
@@ -11,7 +12,7 @@ import { PERMISSIONS } from "@/constants";
  * Card details are forwarded to the payment provider and never persisted —
  * only the brand and last four digits come back (§20, §35).
  */
-export const POST = routeHandler(
+const capture = routeHandler(
   async ({ user, params, body }) => {
     const payment = await capturePayment(params.id, { card: body.card }, user);
     // No meeting provider is taken from the request: the platform the
@@ -35,3 +36,18 @@ export const POST = routeHandler(
     }),
   },
 );
+
+/**
+ * With hosted checkout the card form is the provider's, and this route has
+ * nothing to accept — so it answers 404 before the body is read, rather than
+ * parsing a card number only to refuse it (S16).
+ */
+export async function POST(request, context) {
+  try {
+    await connectToDatabase();
+    await requireInAppCheckout();
+  } catch (error) {
+    return failFromError(error);
+  }
+  return capture(request, context);
+}

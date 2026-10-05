@@ -1,5 +1,6 @@
 import {
   dayKeyInZone,
+  minutesInZone,
   zonedTimeToUtc,
   addDays,
   addMinutes,
@@ -17,7 +18,16 @@ import {
  * makes double-booking structurally impossible rather than merely checked.
  */
 
-export function generateSlots({
+/**
+ * Every free slot, in time order, one day at a time.
+ *
+ * The single place the slot rules live — weekly rules projected onto real
+ * instants in the tutor's zone, minus notice, horizon, blocked periods and
+ * busy time widened by the buffer. `generateSlots` collects it for the
+ * calendar; `findFirstSlot` stops at the first match for search (§8, §9),
+ * so a search card and the booking calendar can never disagree.
+ */
+function* iterateDays({
   availability,
   bookings = [],
   durationMinutes = 60,
@@ -25,27 +35,24 @@ export function generateSlots({
   days = 14,
   minNoticeHours = 4,
   horizonDays = 60,
+  now = new Date(),
 }) {
-  if (!availability?.weeklyRules?.length) return [];
-
   const timeZone = availability.timeZone || "America/Toronto";
   const buffer = availability.bufferMinutes ?? 0;
   const increment = availability.slotIncrementMinutes ?? 30;
   const notice = Math.max(minNoticeHours, availability.minNoticeHours ?? 0);
 
-  const now = new Date();
   const earliest = addMinutes(now, notice * 60);
   const latest = addDays(now, horizonDays);
 
   // Group rules by weekday once rather than filtering inside the day loop.
   const rulesByWeekday = new Map();
-  for (const rule of availability.weeklyRules) {
+  for (const rule of availability.weeklyRules ?? []) {
     if (!rulesByWeekday.has(rule.weekday)) rulesByWeekday.set(rule.weekday, []);
     rulesByWeekday.get(rule.weekday).push(rule);
   }
 
   const blocked = (availability.exceptions ?? []).filter((e) => e.kind !== "EXTRA");
-  const results = [];
 
   for (let dayOffset = 0; dayOffset < days; dayOffset += 1) {
     const cursor = addDays(fromDate, dayOffset);
@@ -53,7 +60,7 @@ export function generateSlots({
     // Weekday *in the tutor's zone*, not the server's.
     const weekday = new Date(`${key}T12:00:00Z`).getUTCDay();
 
-    const rules = rulesByWeekday.get(weekday) ?? [];
+    const rules = [...(rulesByWeekday.get(weekday) ?? [])].sort((a, b) => a.startMinutes - b.startMinutes);
     const daySlots = [];
 
     for (const rule of rules) {
@@ -87,19 +94,46 @@ export function generateSlots({
           endAt: end.toISOString(),
           label: minutesToLabel(minute),
           minutes: minute,
+          dayKey: key,
+          weekday,
         });
       }
     }
 
+    yield { dayKey: key, weekday, slots: daySlots.sort((a, b) => a.minutes - b.minutes) };
+  }
+}
+
+export function generateSlots(options) {
+  if (!options.availability?.weeklyRules?.length) return [];
+  const results = [];
+  for (const day of iterateDays(options)) {
     results.push({
-      dayKey: key,
-      weekday,
-      slots: daySlots.sort((a, b) => a.minutes - b.minutes),
-      hasAvailability: daySlots.length > 0,
+      dayKey: day.dayKey,
+      weekday: day.weekday,
+      slots: day.slots.map(({ dayKey: _d, weekday: _w, ...slot }) => slot),
+      hasAvailability: day.slots.length > 0,
     });
   }
-
   return results;
+}
+
+/**
+ * The first free slot that satisfies `accept`, or null — the same rules as
+ * `generateSlots`, stopping as soon as one is found.
+ *
+ * `accept(slot)` sees `{ startAt, minutes, dayKey, weekday }` in the tutor's
+ * own zone, which is how "today", "this weekend" or "Tuesday at 4:30" are
+ * asked of a tutor's real calendar rather than of their weekly template.
+ */
+export function findFirstSlot(options, accept = () => true) {
+  if (!options.availability?.weeklyRules?.length) return null;
+  for (const day of iterateDays(options)) {
+    for (const slot of day.slots) {
+      if (accept(slot)) return slot;
+    }
+  }
+  return null;
 }
 
 /**
@@ -138,7 +172,9 @@ export function isSlotBookable({ availability, bookings, startAt, durationMinute
   // The requested window must sit inside a weekly rule.
   const key = dayKeyInZone(start, timeZone);
   const weekday = new Date(`${key}T12:00:00Z`).getUTCDay();
-  const startMinutes = minutesFromDayStart(start, key, timeZone);
+  // Wall-clock minutes, read from the zone — not "milliseconds since local
+  // midnight", which is an hour out on the two days a year the clocks change.
+  const startMinutes = minutesInZone(start, timeZone);
   const endMinutes = startMinutes + durationMinutes;
 
   const insideRule = (availability?.weeklyRules ?? []).some(
@@ -167,11 +203,6 @@ export function isSlotBookable({ availability, bookings, startAt, durationMinute
   }
 
   return { bookable: true };
-}
-
-function minutesFromDayStart(date, key, timeZone) {
-  const midnight = zonedTimeToUtc(key, 0, timeZone);
-  return Math.round((date.getTime() - midnight.getTime()) / 60000);
 }
 
 /** The soonest bookable slot, cached on the tutor profile for search cards. */

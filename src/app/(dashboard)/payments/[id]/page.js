@@ -5,8 +5,9 @@ import { connectToDatabase } from "@/lib/db/connect";
 import { enforceRole } from "@/lib/auth/guards";
 import { LEARNER_ROLES, PAYMENT_STATUS_LABELS, LESSON_MODE_LABELS } from "@/constants";
 import { getReceipt } from "@/services/payment.service";
+import { SETTLED_PAYMENT_STATUSES } from "@/lib/booking/policy";
 import { getAppConfig } from "@/services/settings.service";
-import { Badge, Card, CardBody, CardHeader } from "@/components/ui";
+import { Badge, Card, CardBody, CardHeader, EmptyState, Button } from "@/components/ui";
 import { DashboardPage, PageHeader } from "@/components/layout/DashboardShell";
 import { formatMoney, formatDate, formatDateTime, formatDuration } from "@/lib/utils/format";
 import { PrintButton } from "@/components/dashboard/PrintButton";
@@ -26,6 +27,25 @@ export default async function ReceiptPage({ params }) {
   if (!receipt) notFound();
 
   const { payment, bookings, receiptNumber, issuedAt } = receipt;
+
+  // A receipt is proof that money was taken. A payment that failed, was
+  // voided or is still waiting has none, and is shown as what it is (R22.7).
+  if (!SETTLED_PAYMENT_STATUSES.includes(payment.status)) {
+    return (
+      <DashboardPage>
+        <PageHeader title="No receipt for this payment" />
+        <EmptyState
+          title={`This payment is ${PAYMENT_STATUS_LABELS[payment.status]?.toLowerCase() ?? "not complete"}`}
+          description={
+            payment.failureReason
+              ? `${payment.failureReason} Nothing was charged, so there is no receipt.`
+              : "Nothing was charged, so there is no receipt."
+          }
+          action={<Button href="/payments" variant="secondary">All payments</Button>}
+        />
+      </DashboardPage>
+    );
+  }
 
   return (
     <DashboardPage>

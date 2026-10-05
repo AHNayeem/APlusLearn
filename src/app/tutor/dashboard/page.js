@@ -437,6 +437,7 @@ function NextLessonCard({ booking }) {
           <div className="flex min-w-0 gap-4">
             <Avatar
               src={student?.avatarUrl}
+              name={studentName}
               firstName={student?.firstName}
               lastName={student?.lastName}
               size="lg"

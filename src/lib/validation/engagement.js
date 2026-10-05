@@ -7,6 +7,8 @@ import {
   REQUEST_URGENCY,
   REQUEST_VISIBILITY,
   QUALIFICATION_TYPES,
+  OFFERED_QUALIFICATION_TYPES,
+  REQUEST_REPORT_REASONS,
 } from "@/constants";
 import { objectId, cents, rating, isoDate, provinceCode, postalCode } from "./common";
 
@@ -16,10 +18,18 @@ import { objectId, cents, rating, isoDate, provinceCode, postalCode } from "./co
  */
 const messageClientId = z.uuid("That message reference is not valid.").optional();
 
+/**
+ * A message goes into a thread, or starts one: a learner names a tutor, a
+ * tutor names the booking whose family they are writing to (R17.1, R23.6).
+ * Whether this sender may use the route they chose is the service's call.
+ */
+const messageHasRecipient = (d) => Boolean(d.conversationId || d.tutorProfileId || d.bookingId);
+
 export const sendMessageSchema = z.object({
   conversationId: objectId.optional(),
   /** Starting a new thread from a tutor profile. */
   tutorProfileId: objectId.optional(),
+  /** Context for a new thread; for a tutor, the booking that allows it. */
   bookingId: objectId.optional(),
   requestId: objectId.optional(),
   body: z
@@ -28,7 +38,7 @@ export const sendMessageSchema = z.object({
     .min(1, "Write a message first.")
     .max(4000, "That message is too long."),
   clientId: messageClientId,
-}).refine((d) => d.conversationId || d.tutorProfileId, {
+}).refine(messageHasRecipient, {
   message: "We need to know who this message is for.",
   path: ["conversationId"],
 });
@@ -49,7 +59,7 @@ export const messageAttachmentSchema = z.object({
   requestId: objectId.optional(),
   body: z.string().trim().max(4000, "That message is too long.").optional().default(""),
   clientId: messageClientId,
-}).refine((d) => d.conversationId || d.tutorProfileId, {
+}).refine(messageHasRecipient, {
   message: "We need to know who this message is for.",
   path: ["conversationId"],
 });
@@ -74,6 +84,20 @@ export const reportedConversationQuerySchema = z.object({
   pageSize: z.coerce.number().int().min(1).max(50).default(20),
 });
 
+/**
+ * A written review is optional (R21.2): the star rating is the review, and a
+ * family who only wants to leave stars may. What is refused is a body that
+ * says nothing — if words are given, at least ten of them must be more than
+ * whitespace. An empty or blank body arrives as "no body", not as a short one.
+ */
+const optionalText = (max) =>
+  z
+    .string()
+    .trim()
+    .max(max)
+    .optional()
+    .transform((v) => (v ? v : undefined));
+
 export const createReviewSchema = z.object({
   bookingId: objectId,
   rating,
@@ -81,12 +105,11 @@ export const createReviewSchema = z.object({
   communication: rating,
   reliability: rating,
   teaching: rating,
-  title: z.string().trim().max(120).optional(),
-  body: z
-    .string()
-    .trim()
-    .min(20, "Write at least 20 characters so other parents can learn from it.")
-    .max(2000),
+  title: optionalText(120),
+  body: optionalText(2000).refine(
+    (v) => v === undefined || v.replace(/\s/g, "").length >= 10,
+    "If you write a review, make it at least 10 characters so other parents can learn from it.",
+  ),
 });
 
 export const replyToReviewSchema = z.object({
@@ -97,6 +120,10 @@ export const reportReviewSchema = z.object({
   reason: z.string().trim().min(10, "Tell us what is wrong with this review.").max(600),
 });
 
+/**
+ * A moderator's ruling on a review: publish it (approving one awaiting
+ * approval, or dismissing a report) or remove it (R21.5).
+ */
 export const moderateReviewSchema = z.object({
   status: z.enum([REVIEW_STATUS.PUBLISHED, REVIEW_STATUS.REMOVED]),
   note: z.string().trim().max(600).optional(),
@@ -129,9 +156,11 @@ const requestBrief = {
   budgetMaxCents: cents,
   languages: z.array(z.string().trim().min(2).max(40)).max(5).default([]),
   minYearsExperience: z.coerce.number().int().min(0).max(50).optional(),
+  // A new request may only name the categories the form offers (§8, R13.5);
+  // an edit also accepts the legacy ones a stored request may still carry.
   preferredQualifications: z
-    .array(z.enum(Object.values(QUALIFICATION_TYPES)))
-    .max(6)
+    .array(z.enum(OFFERED_QUALIFICATION_TYPES, { message: "Choose from the current list of qualifications." }))
+    .max(OFFERED_QUALIFICATION_TYPES.length)
     .default([]),
   urgency: z.enum(Object.values(REQUEST_URGENCY)).default(REQUEST_URGENCY.FLEXIBLE),
   visibility: z.enum(Object.values(REQUEST_VISIBILITY)).default(REQUEST_VISIBILITY.PUBLIC),
@@ -175,7 +204,10 @@ export const updateTutorRequestSchema = z
     budgetMaxCents: cents.optional(),
     goal: z.string().trim().min(10, "Describe what you want to achieve.").max(500).optional(),
     languages: z.array(z.string().trim().min(2).max(40)).max(5).optional(),
-    preferredQualifications: z.array(z.enum(Object.values(QUALIFICATION_TYPES))).max(6).optional(),
+    preferredQualifications: z
+      .array(z.enum(Object.values(QUALIFICATION_TYPES)))
+      .max(Object.values(QUALIFICATION_TYPES).length)
+      .optional(),
     urgency: z.enum(Object.values(REQUEST_URGENCY)).optional(),
     visibility: z.enum(Object.values(REQUEST_VISIBILITY)).optional(),
     maxDistanceKm: z.coerce.number().int().min(1).max(200).optional(),
@@ -208,14 +240,25 @@ export const cancelRequestSchema = z.object({
   reason: z.string().trim().max(300).optional(),
 });
 
-/** A moderator removing a request from the board, or putting it back. */
+/**
+ * A moderator removing a request from the board, putting it back, or
+ * dismissing the report case against it (R28.24).
+ */
 export const moderateRequestSchema = z.object({
-  action: z.enum(["REMOVE", "RESTORE"]),
+  action: z.enum(["REMOVE", "RESTORE", "DISMISS_REPORT"]),
   note: z.string().trim().min(5, "Record why.").max(600),
+});
+
+/** A member reporting a tutor request (R28.24). */
+export const reportRequestSchema = z.object({
+  reason: z.enum(Object.keys(REQUEST_REPORT_REASONS), "Choose why you are reporting this request."),
+  note: z.string().trim().max(600, "Keep it under 600 characters.").optional(),
 });
 
 export const adminRequestQuerySchema = z.object({
   status: z.enum(Object.values(REQUEST_STATUS)).optional(),
+  /** The report queue: requests with an open report case. */
+  reported: z.enum(["true", "false"]).optional().transform((v) => v === "true"),
   search: z.string().trim().max(60).optional(),
   page: z.coerce.number().int().min(1).max(200).default(1),
   pageSize: z.coerce.number().int().min(1).max(50).optional(),

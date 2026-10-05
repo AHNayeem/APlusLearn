@@ -14,6 +14,7 @@ import {
 import { BookingWidget } from "@/components/booking/BookingWidget";
 import { PackageOffers } from "@/components/packages/PackageOffers";
 import { MessageTutorPanel } from "@/components/messaging/MessageTutorPanel";
+import { JsonLd } from "@/components/seo/JsonLd";
 
 export async function generateMetadata({ params }) {
   const { slug } = await params;
@@ -100,10 +101,8 @@ export default async function TutorProfilePage({ params }) {
       </div>
 
       {/* Structured data so tutor profiles can surface as rich results (§29). */}
-      <script
-        type="application/ld+json"
-        dangerouslySetInnerHTML={{
-          __html: JSON.stringify({
+      <JsonLd
+        data={{
             "@context": "https://schema.org",
             "@type": "Person",
             name: tutor.displayName,
@@ -131,8 +130,7 @@ export default async function TutorProfilePage({ params }) {
                 ? "https://schema.org/InStock"
                 : "https://schema.org/LimitedAvailability",
             },
-          }),
-        }}
+          }}
       />
     </div>
   );

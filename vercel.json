@@ -10,8 +10,16 @@
       "schedule": "*/10 * * * *"
     },
     {
+      "path": "/api/cron/lesson-completion",
+      "schedule": "0 * * * *"
+    },
+    {
       "path": "/api/cron/verification-expiry",
       "schedule": "0 3 * * *"
+    },
+    {
+      "path": "/api/cron/verification-document-retention",
+      "schedule": "30 3 * * *"
     },
     {
       "path": "/api/cron/payouts",

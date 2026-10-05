@@ -9,50 +9,63 @@ import { getCurrentUser } from "@/lib/auth/current-user";
 import { Badge, Button, Card, CardBody, Reveal, RevealGroup, RevealItem } from "@/components/ui";
 import { PageHero } from "@/components/marketing/PageHero";
 import { Section, Faq } from "@/components/home/Sections";
-import { formatMoney, formatNumber } from "@/lib/utils/format";
-import { ROLES, ONBOARDING_STEPS, ONBOARDING_STEP_META } from "@/constants";
+import { formatMoney, formatNumber, applicationReviewLabel } from "@/lib/utils/format";
+import { ROLES, ONBOARDING_STEPS, ONBOARDING_STEP_META, hoursLabel, refundPhrase } from "@/constants";
 
 export const metadata = {
   title: "Become a tutor",
   description:
-    "Teach the Ontario courses you know best. Set your own rate and availability, get verified, and let APlus Learn handle payments and scheduling.",
+    "Teach the courses you know best. Set your own rate and availability, get verified, and let APlus Learn handle payments and scheduling.",
   alternates: { canonical: "/become-a-tutor" },
 };
 
-const TUTOR_FAQS = [
-  {
-    q: "What qualifications do I need?",
-    a: "There's no single requirement. Certified teachers, university graduates, current students and subject specialists all tutor on APlus Learn. What matters is that you can prove what you claim — every qualification on your profile is verified before the matching badge appears.",
-  },
-  {
-    q: "How much can I earn?",
-    a: "You set your own hourly rate. Most Ontario tutors charge between $45 and $85, with certified teachers and senior-course specialists at the higher end. You keep 85% of every completed lesson, and you can see exactly what you'll receive before you set a rate.",
-  },
-  {
-    q: "How long does approval take?",
-    a: "Usually within two business days of submitting a complete application. If something's missing we'll tell you specifically what, rather than rejecting it outright — most applications that need work are approved once the gap is filled.",
-  },
-  {
-    q: "Do I have to commit to set hours?",
-    a: "No. You publish whatever weekly availability suits you and change it whenever you like. You can block specific dates, take a holiday, or turn off new students entirely while keeping your existing ones.",
-  },
-  {
-    q: "When do I get paid?",
-    a: "Earnings become payable a few days after each completed lesson, then transfer to your connected bank account. Every lesson, the fee taken and your running total are visible in your earnings dashboard.",
-  },
-  {
-    q: "What happens if a student cancels?",
-    a: "If they cancel more than 24 hours ahead, they're refunded and you're not paid for that slot. Inside 24 hours, the late-cancellation portion is retained. If they simply don't show, the lesson isn't refunded to them.",
-  },
-  {
-    q: "Can I teach online, in person, or both?",
-    a: "Whichever you prefer. Online lessons get a Zoom, Google Meet or Teams link generated automatically. For in person, you set a travel radius and choose which kinds of locations you'll teach at.",
-  },
-  {
-    q: "Is there a cost to join?",
-    a: "No. There's no registration fee, no subscription and no charge for your profile. The only money that changes hands is the commission on lessons you actually teach.",
-  },
-];
+/**
+ * Tutor questions, answered with the platform's live terms (R12.3): the
+ * commission, the minimum rate, the review time, the payout hold and the
+ * cancellation rules all come from settings, so this page can never quote a
+ * number the engine does not apply.
+ */
+function tutorFaqs(settings) {
+  const keeps = 100 - settings.commissionPercent;
+  const window = settings.freeCancellationWindowHours;
+  const review = applicationReviewLabel(settings);
+  return [
+    {
+      q: "What qualifications do I need?",
+      a: "There's no single requirement. Certified teachers, university graduates, current students and subject specialists all tutor here. Every tutor's government-issued ID is reviewed before an application is approved, and every other qualification on your profile is checked before the matching badge appears.",
+    },
+    {
+      q: "How much can I earn?",
+      a: `You set your own hourly rate, from ${formatMoney(settings.minHourlyRate * 100)} an hour. You keep ${keeps}% of every completed lesson, and you can see exactly what you'll receive before you set a rate.`,
+    },
+    {
+      q: "How long does approval take?",
+      a: `Reviews usually take ${review ?? "a few business days"} from a complete application. If something's missing we'll tell you specifically what, rather than rejecting it outright — most applications that need work are approved once the gap is filled.`,
+    },
+    {
+      q: "Do I have to commit to set hours?",
+      a: "No. You publish whatever weekly availability suits you and change it whenever you like. You can block specific dates, take a holiday, or turn off new students entirely while keeping your existing ones.",
+    },
+    {
+      q: "When do I get paid?",
+      a: `Earnings become payable ${settings.payoutHoldDays} days after each completed lesson, then transfer to your connected bank account. Every lesson, the fee taken and your running total are visible in your earnings dashboard.`,
+    },
+    {
+      q: "What happens if a student cancels?",
+      a: window > 0
+        ? `If they cancel more than ${hoursLabel(window)} ahead, they're refunded and you're not paid for that slot. Inside ${hoursLabel(window)} they get ${refundPhrase(settings.lateCancellationRefundPercent)}, and you're paid your share of the rest. If they simply don't show, they get ${refundPhrase(settings.studentNoShowRefundPercent)}.`
+        : `Students can cancel for a full refund until the lesson starts. If they simply don't show, they get ${refundPhrase(settings.studentNoShowRefundPercent)}.`,
+    },
+    {
+      q: "Can I teach online, in person, or both?",
+      a: "Whichever you prefer. For online lessons you choose the meeting platforms you use; for in person, you set a travel radius and choose which kinds of locations you'll teach at.",
+    },
+    {
+      q: "Is there a cost to join?",
+      a: "No. There's no registration fee, no subscription and no charge for your profile. The only money that changes hands is the commission on lessons you actually teach.",
+    },
+  ];
+}
 
 export default async function BecomeATutorPage() {
   await connectToDatabase();
@@ -234,6 +247,35 @@ export default async function BecomeATutorPage() {
         </Reveal>
       </Section>
 
+      {/* After the application: what the platform does, step by step, with
+          the live terms (R12.1, R12.5). */}
+      <Section
+        eyebrow="After you apply"
+        title="From approval to your first payout"
+        description="Everything between you and a family runs through the platform, so you never chase an invoice."
+      >
+        <ol className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {[
+            ["Verification", `Our team reviews your government-issued ID — required before approval — and any credential you asked to have verified, one badge at a time. Reviews usually take ${applicationReviewLabel(settings) ?? "a few business days"}.`],
+            ["Approval", "Once approved, your profile appears in search for the exact courses you chose. You can pause new students at any time."],
+            ["Bookings", "Families book and pay through the platform. You're notified straight away, and the lesson is on your calendar."],
+            ["Teaching", "Teach online on the platform you chose, or in person at the agreed location. Mark the lesson complete — or it completes on its own once its reporting window closes."],
+            ["Payout", `Your ${100 - settings.commissionPercent}% share becomes payable ${settings.payoutHoldDays} days after the lesson and transfers to your bank account.`],
+            ["Reviews", "Families who completed a lesson can rate it. Your rating and review count build the reputation that brings repeat bookings."],
+          ].map(([title, body], index) => (
+            <li key={title} className="flex gap-3 rounded-xl border border-ink-200 bg-white p-4">
+              <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-brand-50 text-xs font-bold text-brand-700">
+                {index + 1}
+              </span>
+              <div className="min-w-0">
+                <p className="text-sm font-bold text-ink-900">{title}</p>
+                <p className="mt-0.5 text-xs leading-relaxed text-ink-500">{body}</p>
+              </div>
+            </li>
+          ))}
+        </ol>
+      </Section>
+
       <Section tone="dark">
         <Reveal className="mx-auto max-w-3xl text-center">
           <h2 className="text-3xl font-extrabold tracking-tight text-white sm:text-4xl">
@@ -241,7 +283,7 @@ export default async function BecomeATutorPage() {
           </h2>
           <p className="mt-4 text-base leading-relaxed text-brand-100/80">
             Across {formatNumber(stats.cityCount)} cities and {formatNumber(stats.subjectCount)}{" "}
-            subjects. Applications are reviewed within two business days.
+            subjects. Applications are usually reviewed within {applicationReviewLabel(settings) ?? "a few business days"}.
           </p>
           <div className="mt-8 flex flex-wrap justify-center gap-3">
             <Button href={ctaHref} size="lg" variant="accent">
@@ -259,7 +301,7 @@ export default async function BecomeATutorPage() {
         </Reveal>
       </Section>
 
-      <Faq faqs={TUTOR_FAQS} title="Tutor questions" showAllLink={false} />
+      <Faq faqs={tutorFaqs(settings)} title="Tutor questions" showAllLink={false} />
     </>
   );
 }

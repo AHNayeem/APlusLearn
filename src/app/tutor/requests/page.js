@@ -106,7 +106,11 @@ export default async function TutorRequestsPage({ searchParams }) {
                         <Fact
                           icon={<MapPin className="size-3" />}
                           label="Location"
-                          value={request.city}
+                          value={
+                            request.distanceKm !== null && request.distanceKm !== undefined
+                              ? `${request.city} · about ${request.distanceKm} km away`
+                              : request.city
+                          }
                         />
                       )}
                     </dl>

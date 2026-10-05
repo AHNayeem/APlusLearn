@@ -2,27 +2,16 @@ import { z } from "zod";
 import { routeHandler, ok, NotFoundError } from "@/lib/api";
 import { reviewApplicationSchema } from "@/lib/validation/tutors";
 import { objectId } from "@/lib/validation/common";
-import { TutorApplication } from "@/models";
-import { toPlain } from "@/lib/utils/serialize";
-import { reviewApplication } from "@/services/tutor.service";
-import { listVerificationRecords } from "@/services/verification.service";
+import { getApplicationForReview, reviewApplication } from "@/services/tutor.service";
 import { PERMISSIONS } from "@/constants";
 
 const paramsSchema = z.object({ id: objectId });
 
 export const GET = routeHandler(
   async ({ params }) => {
-    const application = await TutorApplication.findById(params.id)
-      .populate("userId", "firstName lastName email phone city province createdAt emailVerifiedAt")
-      .populate("tutorProfileId")
-      .lean();
-    if (!application) throw new NotFoundError("That application no longer exists.");
-
-    const records = application.tutorProfileId
-      ? await listVerificationRecords(application.tutorProfileId._id)
-      : [];
-
-    return ok({ application: toPlain(application), verification: records });
+    const review = await getApplicationForReview(params.id);
+    if (!review) throw new NotFoundError("That application no longer exists.");
+    return ok(review);
   },
   { permission: PERMISSIONS.ADMIN_TUTOR_REVIEW, paramsSchema },
 );

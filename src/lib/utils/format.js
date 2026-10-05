@@ -1,4 +1,4 @@
-import { SITE } from "@/constants/config";
+import { SITE, DEFAULT_SETTINGS } from "@/constants/config";
 
 const CAD = new Intl.NumberFormat(SITE.locale, {
   style: "currency",
@@ -153,4 +153,35 @@ export function formatBytes(bytes) {
 export function truncate(text = "", length = 160) {
   if (text.length <= length) return text;
   return `${text.slice(0, text.lastIndexOf(" ", length))}…`;
+}
+
+/**
+ * "2 business days" — a service level as copy (§12, §33).
+ *
+ * The number always comes from platform settings; this only words it, so the
+ * become-a-tutor page, the tutor workspace and the application email cannot
+ * phrase the same promise three different ways.
+ */
+export function businessDaysLabel(days) {
+  const n = Math.round(Number(days));
+  if (!Number.isFinite(n) || n < 1) return null;
+  return `${formatNumber(n)} business ${n === 1 ? "day" : "days"}`;
+}
+
+/**
+ * How long a tutor application review takes, from settings
+ * (`applicationReviewBusinessDays`). Accepts the settings document, the
+ * `policy` group from `getAppConfig()`, or anything else carrying the field.
+ */
+export function applicationReviewLabel(settings) {
+  return businessDaysLabel(
+    settings?.applicationReviewBusinessDays ?? DEFAULT_SETTINGS.applicationReviewBusinessDays,
+  );
+}
+
+/** How soon support replies, from settings (`supportResponseBusinessDays`). */
+export function supportResponseLabel(settings) {
+  return businessDaysLabel(
+    settings?.supportResponseBusinessDays ?? DEFAULT_SETTINGS.supportResponseBusinessDays,
+  );
 }

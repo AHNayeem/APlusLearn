@@ -3,7 +3,7 @@ import { connectToDatabase } from "@/lib/db/connect";
 import { enforceRole } from "@/lib/auth/guards";
 import { LEARNER_ROLES, ROLES } from "@/constants";
 import { listStudents } from "@/services/student.service";
-import { listGrades, listSubjects } from "@/services/curriculum.service";
+import { listProvinces, listSubjects, defaultProvinceCode } from "@/services/curriculum.service";
 import { SkeletonList } from "@/components/ui";
 import { DashboardPage, PageHeader } from "@/components/layout/DashboardShell";
 import { ChildrenManager } from "@/components/dashboard/ChildrenManager";
@@ -15,11 +15,14 @@ export default async function ChildrenPage() {
   const user = await enforceRole(LEARNER_ROLES, "/children");
   await connectToDatabase();
 
-  const [students, grades, subjects] = await Promise.all([
+  const [students, provinces, subjects, liveDefault] = await Promise.all([
     listStudents(user),
-    listGrades({ provinceCode: user.province ?? "ON" }),
+    listProvinces({ activeOnly: false }),
     listSubjects(),
+    defaultProvinceCode(),
   ]);
+  // A new child starts in the family's own province, else the first live one.
+  const defaultProvince = user.province ?? liveDefault ?? "";
 
   const isParent = user.role === ROLES.PARENT;
 
@@ -29,15 +32,16 @@ export default async function ChildrenPage() {
         title={isParent ? "Children" : "My learner profile"}
         description={
           isParent
-            ? "Each child gets their own grade, courses and lesson history."
+            ? "Each child gets their own province, grade, courses, goals and lesson history."
             : "Keep your grade and courses current so tutors can prepare."
         }
       />
       <Suspense fallback={<SkeletonList count={2} />}>
         <ChildrenManager
           students={students}
-          grades={grades}
+          provinces={provinces}
           subjects={subjects}
+          defaultProvince={defaultProvince}
           canManage={isParent}
         />
       </Suspense>

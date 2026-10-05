@@ -73,9 +73,11 @@ function ReplyModal({ open, onClose, review }) {
       <div className="space-y-4">
         <FormErrorSummary error={error} fieldErrors={fieldErrors} />
 
-        <blockquote className="rounded-xl bg-ink-50 p-3 text-sm leading-relaxed text-ink-600">
-          {review.body}
-        </blockquote>
+        {review.body && (
+          <blockquote className="rounded-xl bg-ink-50 p-3 text-sm leading-relaxed text-ink-600">
+            {review.body}
+          </blockquote>
+        )}
 
         <Field label="Your reply" htmlFor="reply-body" error={fieldErrors.reply} required>
           <Textarea
@@ -142,7 +144,8 @@ function ReportModal({ open, onClose, review }) {
           />
         </Field>
         <p className="text-xs text-ink-500">
-          Reported reviews are hidden from your public average until our team has reviewed them.
+          A report does not hide the review: it stays on your profile and in your rating until
+          our team has decided.
         </p>
       </div>
     </Modal>

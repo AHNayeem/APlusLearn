@@ -2,18 +2,19 @@
 
 import { useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Mail, Lock, User, Check, Gift } from "lucide-react";
+import { Mail, Lock, User, Check, Gift, Phone, MapPin } from "lucide-react";
 import { cn } from "@/lib/utils/cn";
 import { api } from "@/lib/api/client";
 import { useSubmit } from "@/hooks/useAsync";
 import { passwordIssues } from "@/lib/auth/password-policy";
 import { internalPath } from "@/lib/utils/url";
 import {
-  Button, Field, Input, PasswordInput, Checkbox, OptionCard, FormErrorSummary,
+  Button, Field, Input, PasswordInput, Checkbox, OptionCard, FormErrorSummary, Select,
 } from "@/components/ui";
 import { OAuthButtons } from "@/components/layout/OAuthButtons";
 import { OAuthErrorNotice } from "./OAuthErrorNotice";
-import { ROLES } from "@/constants";
+import { ROLES, AGE_RULES } from "@/constants";
+import { latestStudentBirthYear } from "@/lib/utils/age";
 
 const ACCOUNT_TYPES = [
   {
@@ -33,7 +34,13 @@ const ACCOUNT_TYPES = [
   },
 ];
 
-export function RegisterForm({ oauthProviders }) {
+/**
+ * `provinces` comes from the curriculum's province list, so a province an
+ * administrator adds is offered here without a code change (§6). Every
+ * Canadian province and territory is listed, live or "coming soon": this is
+ * where somebody lives, not where tutoring has launched.
+ */
+export function RegisterForm({ oauthProviders, provinces = [] }) {
   const router = useRouter();
   const params = useSearchParams();
   const next = params.get("next");
@@ -47,6 +54,11 @@ export function RegisterForm({ oauthProviders }) {
     email: params.get("email")?.slice(0, 254) ?? "",
     password: "",
     confirmPassword: "",
+    phone: "",
+    provinceCode: "",
+    city: "",
+    postalCode: "",
+    birthYear: "",
     acceptTerms: false,
     marketingOptIn: false,
     // A referral link carries the code in the query string (§41 Phase 2).
@@ -91,6 +103,7 @@ export function RegisterForm({ oauthProviders }) {
   const { submit, pending, error, fieldErrors } = useSubmit(async () => {
     const result = await api.post("/api/auth/register", {
       ...form,
+      birthYear: form.role === ROLES.STUDENT && form.birthYear ? Number(form.birthYear) : undefined,
       referralCode: form.referralCode.trim() || undefined,
     });
     router.push(internalPath(next) ?? result.redirectTo);
@@ -180,6 +193,87 @@ export function RegisterForm({ oauthProviders }) {
             placeholder="you@example.com"
           />
         </Field>
+
+        <Field label="Phone number" htmlFor="reg-phone" error={fieldErrors.phone} required>
+          <Input
+            id="reg-phone"
+            type="tel"
+            autoComplete="tel"
+            inputMode="tel"
+            required
+            value={form.phone}
+            onChange={set("phone")}
+            error={fieldErrors.phone}
+            iconLeft={<Phone className="size-4" />}
+            placeholder="(416) 555-0123"
+          />
+        </Field>
+
+        <div className="grid gap-4 sm:grid-cols-3">
+          <Field label="Province" htmlFor="reg-province" error={fieldErrors.provinceCode} required>
+            <Select
+              id="reg-province"
+              required
+              value={form.provinceCode}
+              onChange={set("provinceCode")}
+              error={fieldErrors.provinceCode}
+              autoComplete="address-level1"
+            >
+              <option value="">Choose…</option>
+              {provinces.map((province) => (
+                <option key={province.code} value={province.code}>
+                  {province.name}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <Field label="City" htmlFor="reg-city" error={fieldErrors.city} required>
+            <Input
+              id="reg-city"
+              autoComplete="address-level2"
+              required
+              value={form.city}
+              onChange={set("city")}
+              error={fieldErrors.city}
+              iconLeft={<MapPin className="size-4" />}
+            />
+          </Field>
+          <Field label="Postal code" htmlFor="reg-postal" error={fieldErrors.postalCode} required>
+            <Input
+              id="reg-postal"
+              autoComplete="postal-code"
+              required
+              maxLength={7}
+              value={form.postalCode}
+              onChange={(e) => setForm((f) => ({ ...f, postalCode: e.target.value.toUpperCase() }))}
+              error={fieldErrors.postalCode}
+              placeholder="M5V 2T6"
+            />
+          </Field>
+        </div>
+
+        {form.role === ROLES.STUDENT && (
+          <Field
+            label="Year you were born"
+            htmlFor="reg-birth-year"
+            error={fieldErrors.birthYear}
+            hint={`Students under ${AGE_RULES.adultAge} have their surname hidden from tutors. Under ${AGE_RULES.minimumStudentAge}? Ask a parent to create the account.`}
+            required
+          >
+            <Input
+              id="reg-birth-year"
+              type="number"
+              inputMode="numeric"
+              autoComplete="bday-year"
+              required
+              min={1900}
+              max={latestStudentBirthYear()}
+              value={form.birthYear}
+              onChange={set("birthYear")}
+              error={fieldErrors.birthYear}
+            />
+          </Field>
+        )}
 
         <Field label="Password" htmlFor="reg-password" error={fieldErrors.password} required>
           <PasswordInput

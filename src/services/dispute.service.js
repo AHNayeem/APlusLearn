@@ -1,5 +1,5 @@
 import "server-only";
-import { Dispute, Booking, User } from "@/models";
+import { Dispute, Booking, User, Payment } from "@/models";
 import {
   DISPUTE_STATUS,
   DISPUTE_STATUS_LABELS,
@@ -15,7 +15,9 @@ import { NotFoundError, AuthorizationError, BusinessRuleError, ConflictError } f
 import { toPlain } from "@/lib/utils/serialize";
 import { publicReference } from "@/lib/auth/tokens";
 import { formatMoney } from "@/lib/utils/format";
-import { refundPayment } from "./payment.service";
+import { refundLessonValue, refundableOnBooking } from "./payment.service";
+import { getSettings } from "./settings.service";
+import { disputeEligibility, disputeOutcomeStatus, SETTLED_PAYMENT_STATUSES } from "@/lib/booking/policy";
 import { notify } from "./notification.service";
 import { recordAudit } from "./audit.service";
 import { checkDisputePattern } from "./risk.service";
@@ -37,9 +39,15 @@ export async function createDispute(input, actor) {
   }).lean();
   if (existing) throw new ConflictError("A dispute for this lesson is already open.");
 
-  if (new Date(booking.endAt) > new Date()) {
-    throw new BusinessRuleError("You can open a dispute once the lesson has finished.");
-  }
+  // Only a lesson whose outcome a dispute can change, inside the window, and
+  // that was actually paid for — never an unpaid, cancelled or expired one,
+  // which a rejected dispute used to turn into a "completed" lesson (S4).
+  const [settings, payment] = await Promise.all([
+    getSettings(),
+    booking.paymentId ? Payment.findById(booking.paymentId).select("status").lean() : null,
+  ]);
+  const eligible = disputeEligibility(booking, { settings, payment });
+  if (!eligible.ok) throw new BusinessRuleError(eligible.message, eligible.code);
 
   const maxRefundable = await refundableOn(booking);
   if (input.requestedRefundCents && input.requestedRefundCents > maxRefundable) {
@@ -62,6 +70,9 @@ export async function createDispute(input, actor) {
     requestedRefundCents: input.requestedRefundCents,
   });
 
+  // Remembered so a decision that changes nothing puts the lesson back as it
+  // was, instead of rewriting it as something it never was (S4).
+  booking.preDisputeStatus = booking.status;
   booking.status = BOOKING_STATUS.DISPUTED;
   await booking.save();
 
@@ -152,19 +163,13 @@ export async function addDisputeNote(id, note, admin) {
  * outright (`REFUND_EXCEEDS_BALANCE`), which protects the money; this is what
  * keeps the dispute records agreeing with it.
  */
-async function refundableOn(booking, excludeDisputeId = null) {
-  const settled = await Dispute.find({
-    bookingId: booking._id,
-    ...(excludeDisputeId ? { _id: { $ne: excludeDisputeId } } : {}),
-    refundIssuedCents: { $gt: 0 },
-  })
-    .select("refundIssuedCents")
-    .lean();
-
-  const byDispute = settled.reduce((total, d) => total + (d.refundIssuedCents ?? 0), 0);
-  const byCancellation = booking.cancellation?.refundCents ?? 0;
-
-  return Math.max(0, booking.price.totalCents - byCancellation - byDispute);
+/**
+ * What can still be given back on this lesson: its value less everything
+ * already refunded on it by any path (`Booking.refundedCents`), capped by
+ * what the payment actually collected, account credit included (R16.7).
+ */
+async function refundableOn(booking) {
+  return refundableOnBooking(booking);
 }
 
 /**
@@ -194,7 +199,7 @@ export async function resolveDispute(id, { resolution, refundCents, note }, admi
   if (!booking) throw new NotFoundError("That lesson no longer exists.");
 
   const status = DISPUTE_STATUS[resolution] ?? DISPUTE_STATUS.REJECTED;
-  const refundable = await refundableOn(booking, dispute._id);
+  const refundable = await refundableOn(booking);
 
   let issued = 0;
   if (resolution === "RESOLVED_REFUND") issued = refundable;
@@ -223,11 +228,14 @@ export async function resolveDispute(id, { resolution, refundCents, note }, admi
 
   if (issued > 0 && booking.paymentId) {
     try {
-      await refundPayment(booking.paymentId, {
-        amountCents: issued,
+      // Attributed to the lesson, so its payable share is netted — or, if it
+      // was already paid out, carried to the tutor's next payout (S3, S4).
+      const result = await refundLessonValue(booking.paymentId, {
+        allocations: [{ bookingId: booking._id, valueCents: issued }],
         reason: `Dispute ${dispute.reference} — ${note}`,
         issuedBy: admin.id,
       });
+      issued = result.refundedCents;
     } catch (error) {
       // Nothing was sent back, so the decision never happened. Put the
       // dispute where it was and let the administrator try again.
@@ -245,13 +253,20 @@ export async function resolveDispute(id, { resolution, refundCents, note }, admi
     claimed.refundIssuedCents = issued;
   }
 
-  // Return the booking to a settled state so it leaves the disputed queue.
-  // `issued >= refundable` is "everything that was still collectable has now
-  // gone back" — which is the same test as "fully refunded" but stated
-  // against what was actually left, so a second dispute awarding the
-  // remainder still settles the lesson as cancelled.
-  booking.status =
-    issued >= refundable ? BOOKING_STATUS.CANCELLED_BY_ADMIN : BOOKING_STATUS.COMPLETED;
+  // The lesson leaves the disputed queue as what the decision says it was:
+  // the status the dispute interrupted, unless the decision changed the
+  // outcome (an upheld tutor no-show, a full refund). A partial refund keeps
+  // the real status; the refunded share is already on the booking, so the
+  // payout pays only what was kept (S4, R27.6).
+  const payment = booking.paymentId ? await Payment.findById(booking.paymentId).select("status").lean() : null;
+  booking.status = disputeOutcomeStatus({
+    reason: dispute.reason,
+    resolution,
+    preDisputeStatus: booking.preDisputeStatus,
+    fullyRefunded: issued > 0 && issued >= refundable,
+    paid: Boolean(booking.packagePurchaseId) || SETTLED_PAYMENT_STATUSES.includes(payment?.status),
+  });
+  booking.preDisputeStatus = undefined;
   await booking.save();
 
   for (const userId of [claimed.raisedBy, claimed.againstUserId]) {

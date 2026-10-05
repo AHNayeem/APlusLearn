@@ -3,12 +3,14 @@ import { Badge, Button, Card, CardBody, Reveal } from "@/components/ui";
 import { PageHero } from "@/components/marketing/PageHero";
 import { StepCards } from "@/components/home/StepCards";
 import { Section, Faq } from "@/components/home/Sections";
-import { VERIFICATION_TYPES, VERIFICATION_LABELS, VERIFICATION_DESCRIPTIONS } from "@/constants";
+import {
+  VERIFICATION_TYPES, VERIFICATION_LABELS, VERIFICATION_DESCRIPTIONS, VERIFICATION_DISCLAIMER,
+} from "@/constants";
 
 export const metadata = {
   title: "Tutor verification",
   description:
-    "How APlus Learn verifies tutors: identity checks, Ontario College of Teachers membership, education, university enrolment and Vulnerable Sector Checks.",
+    "How APlus Learn verifies tutors: identity checks, teaching-college membership, education, university enrolment and Vulnerable Sector Checks.",
   alternates: { canonical: "/verification" },
 };
 
@@ -16,13 +18,14 @@ const BADGE_DETAIL = {
   [VERIFICATION_TYPES.IDENTITY]: {
     icon: UserCheck,
     what: "Government-issued photo ID matched against the name on the account.",
-    why: "It means the person teaching your child is who their profile says they are.",
+    why: "It confirms the tutor's name matches a real, current ID — it is not a judgement of their character or teaching.",
     required: true,
   },
   [VERIFICATION_TYPES.OCT]: {
     icon: School,
-    what: "Registration number checked against the Ontario College of Teachers public register.",
-    why: "OCT members are certified Ontario teachers, subject to professional standards and discipline.",
+    // The college's own wording lives with the badge in the domain constants.
+    what: VERIFICATION_DESCRIPTIONS[VERIFICATION_TYPES.OCT],
+    why: "College members are certified teachers, subject to the college's professional standards and discipline.",
   },
   [VERIFICATION_TYPES.EDUCATION]: {
     icon: GraduationCap,
@@ -158,6 +161,10 @@ export default function VerificationPage() {
             );
           })}
         </div>
+        {/* What a badge is, and what it is not (R11.7). */}
+        <p className="mt-8 max-w-3xl rounded-xl bg-ink-50 p-4 text-sm leading-relaxed text-ink-600 ring-1 ring-inset ring-ink-200">
+          {VERIFICATION_DISCLAIMER}
+        </p>
       </Section>
 
       <Section

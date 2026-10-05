@@ -2,7 +2,7 @@ import "server-only";
 import { cache } from "react";
 import { connectToDatabase } from "@/lib/db/connect";
 import { User } from "@/models";
-import { USER_STATUS } from "@/constants";
+import { BLOCKED_USER_STATUSES } from "@/constants";
 import { toPlain } from "@/lib/utils/serialize";
 import { readSessionToken, verifySessionToken } from "./session";
 
@@ -24,7 +24,8 @@ export const getCurrentUser = cache(async () => {
 
   if (!user) return null;
   if (user.deletedAt) return null;
-  if (user.status === USER_STATUS.SUSPENDED) return null;
+  // Suspended and banned accounts hold no session (R28.2).
+  if (BLOCKED_USER_STATUSES.includes(user.status)) return null;
 
   // Token predates a password reset or forced logout.
   if ((user.tokenVersion ?? 0) !== payload.tokenVersion) return null;

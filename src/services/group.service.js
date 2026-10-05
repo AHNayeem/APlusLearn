@@ -46,8 +46,8 @@ import {
   syncSeatMeetings,
   retireMeeting,
 } from "./meeting.service";
-import { externalBusyPeriods } from "./calendar.service";
-import { refreshNextAvailable } from "./availability.service";
+import { refreshNextAvailable, tutorBusyPeriods } from "./availability.service";
+import { announceBookingCancelled } from "./booking-messages.service";
 import { notify, notifyMany } from "./notification.service";
 import { recordAudit } from "./audit.service";
 
@@ -186,43 +186,31 @@ export async function publishGroupSession(id, actor) {
     throw new BusinessRuleError("Publish your availability before running a group session.", "NO_AVAILABILITY");
   }
 
-  // The same slot rules a one-to-one booking obeys — a group does not get to
-  // sit on top of a lesson somebody already paid for (§18, §42).
-  const [bookings, external] = await Promise.all([
-    Booking.find({
-      tutorProfileId: session.tutorProfileId,
-      status: { $in: BLOCKING_BOOKING_STATUSES },
-      startAt: { $lt: session.endAt },
-      endAt: { $gt: session.startAt },
-    })
-      .select("startAt endAt")
-      .lean(),
-    externalBusyPeriods(session.tutorProfileId, { from: session.startAt, to: session.endAt }),
-  ]);
-
-  const check = isSlotBookable({
-    availability,
-    bookings: [...bookings, ...external],
-    startAt: session.startAt,
-    durationMinutes: session.durationMinutes,
-    settings,
-  });
-  if (!check.bookable) throw new ConflictError(check.reason);
-
-  const clashing = await GroupSession.exists({
-    _id: { $ne: session._id },
-    tutorProfileId: session.tutorProfileId,
-    status: { $in: ACTIVE_GROUP_STATUSES },
-    startAt: { $lt: session.endAt },
-    endAt: { $gt: session.startAt },
-  });
-  if (clashing) {
-    throw new ConflictError("You already have a group session at that time.");
-  }
+  await assertSessionSlotFree(session, { availability, settings });
 
   session.status = GROUP_SESSION_STATUS.PUBLISHED;
   session.publishedAt = new Date();
   await session.save();
+
+  // The check above is a read before a write, and a one-to-one booking can
+  // land between the two. Each side re-reads the other after writing — see
+  // `settleSlotRace` in booking.service — so at least one of them sees the
+  // clash and stands down. Here that means going back to a draft: nobody can
+  // have joined a session that was published a moment ago (R14.4).
+  const raced = await Booking.exists({
+    tutorProfileId: session.tutorProfileId,
+    groupSessionId: { $ne: session._id },
+    status: { $in: BLOCKING_BOOKING_STATUSES },
+    startAt: { $lt: session.endAt },
+    endAt: { $gt: session.startAt },
+  });
+  if (raced) {
+    await GroupSession.updateOne(
+      { _id: session._id, status: GROUP_SESSION_STATUS.PUBLISHED, seatsTaken: 0 },
+      { $set: { status: GROUP_SESSION_STATUS.DRAFT }, $unset: { publishedAt: 1 } },
+    );
+    throw new ConflictError("A lesson was booked at that time moments ago. Please pick another time.");
+  }
 
   await refreshNextAvailable(session.tutorProfileId);
 
@@ -235,6 +223,57 @@ export async function publishGroupSession(id, actor) {
   });
 
   return toPlain(session);
+}
+
+/**
+ * Is the session's hour free for it? (§18, R14.4)
+ *
+ * The same slot rules a one-to-one booking obeys, read from the single
+ * definition of a tutor's busy time — lessons, other live group sessions and
+ * connected calendars — so a group cannot sit on top of a lesson somebody has
+ * paid for, and a lesson cannot later be sold on top of the group.
+ *
+ * A session that is already live appears in that busy time itself, at the
+ * hour it is stored at. When it is being moved, that one stored hour is set
+ * aside: it is the session's own, not a clash.
+ */
+async function assertSessionSlotFree(session, { availability, settings, storedHour } = {}) {
+  const buffer = availability?.bufferMinutes ?? 0;
+  let busy = await tutorBusyPeriods(session.tutorProfileId, {
+    from: addMinutes(session.startAt, -buffer),
+    to: addMinutes(session.endAt, buffer),
+  });
+
+  if (storedHour) {
+    const own = busy.findIndex(
+      (p) =>
+        new Date(p.startAt).getTime() === new Date(storedHour.startAt).getTime() &&
+        new Date(p.endAt).getTime() === new Date(storedHour.endAt).getTime(),
+    );
+    if (own !== -1) busy = busy.filter((_, index) => index !== own);
+  }
+
+  const check = isSlotBookable({
+    availability,
+    bookings: busy,
+    startAt: session.startAt,
+    durationMinutes: session.durationMinutes,
+    settings,
+  });
+  if (!check.bookable) throw new ConflictError(check.reason);
+
+  // A finished session no longer blocks a lesson, but two sessions on one
+  // record at the same hour would still be one tutor in two rooms.
+  const clashing = await GroupSession.exists({
+    _id: { $ne: session._id },
+    tutorProfileId: session.tutorProfileId,
+    status: { $in: ACTIVE_GROUP_STATUSES },
+    startAt: { $lt: session.endAt },
+    endAt: { $gt: session.startAt },
+  });
+  if (clashing) {
+    throw new ConflictError("You already have a group session at that time.");
+  }
 }
 
 export async function updateGroupSession(id, input, actor) {
@@ -266,6 +305,9 @@ export async function updateGroupSession(id, input, actor) {
       "CAPACITY_BELOW_ENROLMENTS",
     );
   }
+
+  // The hour the session holds right now, before anything below moves it.
+  const storedHour = { startAt: session.startAt, endAt: session.endAt };
 
   for (const field of ["title", "description", "minParticipants", "maxParticipants", ...lockedFields]) {
     if (input[field] === undefined) continue;
@@ -302,6 +344,14 @@ export async function updateGroupSession(id, input, actor) {
     session.confirmBy = new Date(
       session.startAt.getTime() - (settings.groups?.confirmationDeadlineHours ?? 24) * 3600_000,
     );
+
+    // A draft holds nothing and is checked when it is published. A live
+    // session already holds the tutor's time, so moving it is a new claim on
+    // the new hour and is checked exactly like publishing (R14.4).
+    if (JOINABLE_GROUP_STATUSES.includes(session.status)) {
+      const availability = await Availability.findOne({ tutorProfileId: session.tutorProfileId }).lean();
+      await assertSessionSlotFree(session, { availability, settings, storedHour });
+    }
   }
 
   assertCapacity(session, settings);
@@ -758,6 +808,7 @@ async function refundEveryone(session, reason) {
   for (const enrolment of enrolments) {
     const booking = enrolment.bookingId ? await Booking.findById(enrolment.bookingId) : null;
     if (booking && ![BOOKING_STATUS.CANCELLED_BY_TUTOR, BOOKING_STATUS.COMPLETED].includes(booking.status)) {
+      const wasConfirmed = booking.status === BOOKING_STATUS.CONFIRMED;
       booking.status = BOOKING_STATUS.CANCELLED_BY_TUTOR;
       booking.cancellation = {
         cancelledAt: new Date(),
@@ -769,6 +820,9 @@ async function refundEveryone(session, reason) {
         policyApplied: "TUTOR_CANCELLATION",
       };
       await booking.save();
+      // Told in the family's thread with the tutor, like any cancelled lesson
+      // (R17.3). An unpaid seat was never a lesson anybody was expecting.
+      if (wasConfirmed) await announceBookingCancelled([booking]);
 
       if (enrolment.paymentId) {
         const payment = await Payment.findById(enrolment.paymentId).lean();

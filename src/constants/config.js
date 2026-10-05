@@ -18,7 +18,13 @@ export const SITE = {
     "Find verified Canadian tutors for your child's exact course — online or in person. Compare, message and book lessons with transparent pricing.",
   supportEmail: "support@apluslearn.ca",
   contactEmail: "hello@apluslearn.ca",
-  supportPhone: "1-888-555-0142",
+  /**
+   * Blank by design, like `whatsappNumber` below: a phone line is something an
+   * operator has, not something the code can invent. Every place that shows a
+   * number renders nothing until one is set in Admin → Settings → Identity, so a
+   * fresh deployment never publishes a number that rings somebody else.
+   */
+  supportPhone: "",
   /**
    * WhatsApp business number, digits only with the country code (§26b).
    *
@@ -324,6 +330,21 @@ export const DEFAULT_SETTINGS = {
   /** Refund percentage when a tutor does not attend. */
   tutorNoShowRefundPercent: 100,
 
+  /**
+   * Hours after a lesson ends during which either side may report that the
+   * other did not attend (S2, R27.5). Once it passes, the `lesson-completion`
+   * job settles an unmarked lesson as COMPLETED (R22.2), so the window is
+   * also how long a tutor's earnings wait for a dispute that never comes.
+   */
+  noShowReportWindowHours: 48,
+
+  /**
+   * Days after a lesson ends during which a dispute may still be opened on it
+   * (S4, R27.6). Long enough for a billing surprise on a statement, short
+   * enough that a payout is not reopened months after it settled.
+   */
+  disputeWindowDays: 30,
+
   /** Cancellations inside a rolling window before a warning is issued. */
   cancellationAbuseThreshold: 3,
   cancellationAbuseWindowDays: 30,
@@ -349,6 +370,31 @@ export const DEFAULT_SETTINGS = {
 
   /** Days after a completed lesson before funds become payable. */
   payoutHoldDays: 3,
+
+  /**
+   * Verification (§11, §16, R11.5, S9).
+   *
+   * A background check is only meaningful while it is recent, so the badge
+   * always carries an expiry: this many months from the grant unless the
+   * administrator granting it sets a date. Documents behind a declined or
+   * lapsed badge are deleted this many days after the decision by the
+   * `verification-document-retention` job; the record of the decision stays.
+   */
+  backgroundCheckValidityMonths: 36,
+  verificationDocumentRetentionDays: 90,
+
+  /**
+   * Service levels the platform states in public (§12, §33).
+   *
+   * They are promises, so they are the operator's to make: the become-a-tutor
+   * page, the application emails and the tutor workspace quote
+   * `applicationReviewBusinessDays`; the support page, the FAQ and the help
+   * launcher quote `supportResponseBusinessDays`. Read through
+   * `applicationReviewLabel()` / `supportResponseLabel()` in
+   * `lib/utils/format.js` so every surface words them the same way.
+   */
+  applicationReviewBusinessDays: 2,
+  supportResponseBusinessDays: 1,
 
   /** Create payouts automatically when the scheduler runs (§20). */
   autoPayouts: true,
@@ -598,6 +644,12 @@ export const DEFAULT_SETTINGS = {
   },
 
   contact: {
+    /**
+     * The registered name of the business that operates the platform, as the
+     * legal pages name it. Blank means "the application name" — which is right
+     * until an operator has a registered entity to put there (§33).
+     */
+    legalName: "",
     supportEmail: SITE.supportEmail,
     contactEmail: SITE.contactEmail,
     supportPhone: SITE.supportPhone,
@@ -695,6 +747,33 @@ export const AVAILABILITY_WINDOWS = [
 ];
 
 /**
+ * Search availability filters (§8, R8.17–R8.21).
+ *
+ * Unlike `AVAILABILITY_WINDOWS` above — the *preference* vocabulary a tutor
+ * request uses — these are questions asked of a tutor's real calendar:
+ * is there a bookable slot today, tomorrow, before the week is out, this
+ * weekend, on a given date, at a given time. "This week" runs to the coming
+ * Sunday; "this weekend" is the coming Saturday and Sunday (or what is left
+ * of it). Days are counted in each tutor's own time zone.
+ */
+export const SEARCH_AVAILABILITY_DAYS = [
+  { value: "TODAY", label: "Today" },
+  { value: "TOMORROW", label: "Tomorrow" },
+  { value: "THIS_WEEK", label: "This week" },
+  { value: "WEEKEND", label: "This weekend" },
+];
+
+/** Time of day a lesson starts, as hours in the tutor's zone [from, to). */
+export const SEARCH_TIME_OF_DAY = [
+  { value: "MORNING", label: "Morning", from: 6, to: 12 },
+  { value: "AFTERNOON", label: "Afternoon", from: 12, to: 17 },
+  { value: "EVENING", label: "Evening", from: 17, to: 22 },
+];
+
+/** How far ahead a time-of-day filter looks when no day is chosen. */
+export const SEARCH_AVAILABILITY_LOOKAHEAD_DAYS = 14;
+
+/**
  * Session cookie name and lifetime.
  *
  * "Keep me signed in" chooses between the two. A remembered session is a
@@ -707,6 +786,30 @@ export const SESSION = {
   cookieName: "aplus_session",
   maxAgeSeconds: 60 * 60 * 24 * 14, // 14 days
   transientMaxAgeSeconds: 60 * 60 * 12, // 12 hours
+};
+
+/**
+ * Age rules (§3, §4, §30).
+ *
+ * The one place the platform decides who is a minor. A learner under
+ * `adultAge` is a minor: their surname is withheld from tutors unless the
+ * account holder opts in, and the server — not the page — enforces it.
+ * `minimumStudentAge` is the youngest a student may hold their own account;
+ * anyone younger is added as a child by a parent. Birth *year* is all that is
+ * collected, so an age is a year count and errs towards "minor".
+ */
+export const AGE_RULES = {
+  adultAge: 18,
+  minimumStudentAge: 13,
+};
+
+/**
+ * Search demand analytics (§28, R28.31). Events are anonymous and kept for a
+ * rolling window long enough to compare a season with the same one last year.
+ */
+export const SEARCH_ANALYTICS = {
+  retentionDays: 400,
+  topLimit: 10,
 };
 
 export const UPLOAD = {

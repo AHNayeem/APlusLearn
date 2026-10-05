@@ -48,3 +48,8 @@ next-env.d.ts
 # points there.
 /.storage/
 /uploads/
+
+# curl cookie jars from manual API testing (S13)
+*.cookies.txt
+/a.txt
+/b.txt

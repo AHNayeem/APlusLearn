@@ -134,6 +134,17 @@ export const PERMISSIONS = {
   ADMIN_INTEGRATION_MANAGE: "ADMIN_INTEGRATION_MANAGE",
 
   /**
+   * Read and work the support queue (§33, R28.20).
+   *
+   * Its own permission because a support ticket is somebody's own words about
+   * a problem — a safety report about a tutor, a payment complaint — written to
+   * the platform, not to a counterpart. Answering them is a different job from
+   * changing settings or moderating reviews, and a future support-agent role
+   * should be able to hold this without holding anything that moves money.
+   */
+  ADMIN_SUPPORT_MANAGE: "ADMIN_SUPPORT_MANAGE",
+
+  /**
    * Set or withdraw the joining details on a lesson that is already booked
    * (§27).
    *

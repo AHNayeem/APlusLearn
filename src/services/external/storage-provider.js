@@ -6,7 +6,7 @@ import {
   IntegrationDisabledError,
   resolveIntegrationConfig,
 } from "@/lib/config/integrations";
-import { ConfigurationError } from "@/lib/config/env";
+import { ConfigurationError, allowsLocalIdentityDocuments } from "@/lib/config/env";
 import { INTEGRATION_MODULES, UPLOAD } from "@/constants";
 import { ObjectStoreClient, storageError } from "./object-storage";
 
@@ -63,7 +63,10 @@ import { ObjectStoreClient, storageError } from "./object-storage";
  * filesystem accepts a tutor's identity document into local mode and then
  * loses it on the next deploy, so local mode logs a warning on selection —
  * loudly in production — and a deployment that would rather fail than fall
- * back sets `STORAGE_REQUIRE_EXTERNAL=true`.
+ * back sets `STORAGE_REQUIRE_EXTERNAL=true`. Identity documents are the
+ * exception that does not wait to be asked: in production the local store
+ * refuses the `documents` scope outright unless
+ * `STORAGE_ALLOW_LOCAL_DOCUMENTS=true` (audit S10).
  */
 
 export const STORAGE_SCOPES = {
@@ -230,6 +233,16 @@ export class LocalStorageProvider extends StorageProvider {
   }
 
   async put({ buffer, fileName, contentType, extension, scope = STORAGE_SCOPES.DOCUMENTS }) {
+    // Identity documents fail closed in production (S10). Checked here, in
+    // the one place every local write passes through, so no caller can reach
+    // the disk with a document by forgetting to ask.
+    if (scope === STORAGE_SCOPES.DOCUMENTS && !allowsLocalIdentityDocuments()) {
+      throw new ConfigurationError(
+        "File storage: verification documents are not written to the local filesystem in production. " +
+          "Configure object storage (STORAGE_ENDPOINT, STORAGE_BUCKET, STORAGE_ACCESS_KEY, STORAGE_SECRET_KEY), " +
+          "or set STORAGE_ALLOW_LOCAL_DOCUMENTS=true if this host's disk is persistent and encrypted.",
+      );
+    }
     await mkdir(scopedDir(scope), { recursive: true });
 
     const key = generateKey({ fileName, extension });

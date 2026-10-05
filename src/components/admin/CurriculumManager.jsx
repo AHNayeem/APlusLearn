@@ -1,13 +1,13 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Plus, Pencil, Trash2, Search } from "lucide-react";
 import { api, qs } from "@/lib/api/client";
 import { useSubmit } from "@/hooks/useAsync";
 import {
   Badge, Button, Card, CardBody, CardHeader, Checkbox, EmptyState, Field, Input,
-  Modal, Select, Tabs, Textarea, Table, THead, TH, TBody, TR, TD,
+  Modal, Pagination, Select, Tabs, Textarea, Table, THead, TH, TBody, TR, TD,
   FormErrorSummary, useToast,
 } from "@/components/ui";
 
@@ -17,8 +17,37 @@ import {
  * Provinces, grades, subjects and courses are all editable here so a new
  * province can be opened without a deploy.
  */
-export function CurriculumManager({ provinces, grades, subjects, courses, courseTotal }) {
+export function CurriculumManager({
+  province, query, provinces, grades, subjects, courses, courseTotal, coursePage,
+}) {
+  const router = useRouter();
+  const current = provinces.find((p) => p.code === province);
+
   return (
+    <>
+      {/* Grades and courses belong to one province at a time; this is which. */}
+      <div className="mb-5 flex flex-wrap items-end gap-3">
+        <Field label="Province" htmlFor="curriculum-province" className="min-w-56">
+          <Select
+            id="curriculum-province"
+            value={province ?? ""}
+            onChange={(e) => router.push(`/admin/curriculum${qs({ province: e.target.value })}`)}
+          >
+            {provinces.map((p) => (
+              <option key={p.id} value={p.code}>
+                {p.name}
+                {p.isActive ? "" : " — coming soon"}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        {current && (
+          <Badge tone={current.isActive ? "success" : "neutral"} size="sm" className="mb-2.5">
+            {current.isActive ? "Open for search" : "Not yet open"}
+          </Badge>
+        )}
+      </div>
+
     <Tabs
       tabs={[
         { value: "courses", label: "Courses", count: courseTotal },
@@ -31,24 +60,72 @@ export function CurriculumManager({ provinces, grades, subjects, courses, course
         <>
           {active === "courses" && (
             <CoursesTab
+              province={province}
+              query={query}
               courses={courses}
+              courseTotal={courseTotal}
+              coursePage={coursePage}
               provinces={provinces}
-              grades={grades}
               subjects={subjects}
             />
           )}
           {active === "subjects" && <SubjectsTab subjects={subjects} />}
-          {active === "grades" && <GradesTab grades={grades} provinces={provinces} />}
+          {active === "grades" && (
+            <GradesTab grades={grades} provinces={provinces} province={current} />
+          )}
           {active === "provinces" && <ProvincesTab provinces={provinces} />}
         </>
       )}
     </Tabs>
+    </>
+  );
+}
+
+/** Grades of whichever province a form has chosen, inactive included. */
+function useProvinceGrades(provinceCode) {
+  const [state, setState] = useState({ code: null, grades: [] });
+  useEffect(() => {
+    if (!provinceCode) return undefined;
+    let cancelled = false;
+    api
+      .get(`/api/admin/curriculum/grades${qs({ province: provinceCode })}`)
+      .then((data) => !cancelled && setState({ code: provinceCode, grades: data.grades ?? [] }))
+      .catch(() => !cancelled && setState({ code: provinceCode, grades: [] }));
+    return () => {
+      cancelled = true;
+    };
+  }, [provinceCode]);
+  return state.code === provinceCode ? state.grades : [];
+}
+
+/** A row's delete control, refused server-side while the record is in use. */
+function DeleteButton({ label, endpoint }) {
+  const router = useRouter();
+  const toast = useToast();
+  return (
+    <button
+      type="button"
+      onClick={async () => {
+        if (!window.confirm(`Delete ${label}? This only works while nothing uses it.`)) return;
+        try {
+          await api.delete(endpoint);
+          toast.success(`${label} deleted`);
+          router.refresh();
+        } catch (error) {
+          toast.error("Couldn't delete", error.message);
+        }
+      }}
+      aria-label={`Delete ${label}`}
+      className="rounded-lg p-1.5 text-ink-400 hover:bg-danger-50 hover:text-danger-600"
+    >
+      <Trash2 className="size-3.5" />
+    </button>
   );
 }
 
 // --- Courses ---------------------------------------------------------------
 
-function CoursesTab({ courses, provinces, grades, subjects }) {
+function CoursesTab({ province, query, courses, courseTotal, coursePage, provinces, subjects }) {
   const router = useRouter();
   const toast = useToast();
   const [editing, setEditing] = useState(null);
@@ -58,8 +135,10 @@ function CoursesTab({ courses, provinces, grades, subjects }) {
     <>
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <form action="/admin/curriculum" className="flex max-w-sm flex-1 gap-2">
+          {province && <input type="hidden" name="province" value={province} />}
           <input
             name="q"
+            defaultValue={query}
             placeholder="Search courses"
             aria-label="Search courses"
             className="h-10 flex-1 rounded-xl border-0 bg-white px-3.5 text-sm ring-1 ring-inset ring-ink-200 focus:ring-2 focus:ring-brand-500 focus:outline-none"
@@ -141,11 +220,26 @@ function CoursesTab({ courses, provinces, grades, subjects }) {
         </Table>
       )}
 
+      {/* Paged, never capped: every course in the province is reachable (R28.12). */}
+      {coursePage && (
+        <Pagination
+          className="mt-4"
+          page={coursePage.page}
+          totalPages={coursePage.totalPages}
+          pageSize={coursePage.pageSize}
+          total={courseTotal}
+          label="courses"
+          buildHref={(p) =>
+            `/admin/curriculum${qs({ province: province ?? undefined, q: query || undefined, page: p > 1 ? p : undefined })}`
+          }
+        />
+      )}
+
       <CourseForm
         open={Boolean(editing)}
         course={editing}
         provinces={provinces}
-        grades={grades}
+        defaultProvinceId={provinces.find((p) => p.code === province)?.id}
         subjects={subjects}
         onClose={() => setEditing(null)}
       />
@@ -188,12 +282,14 @@ function CoursesTab({ courses, provinces, grades, subjects }) {
   );
 }
 
-function CourseForm({ open, course, provinces, grades, subjects, onClose }) {
+function CourseForm({ open, course, provinces, defaultProvinceId, subjects, onClose }) {
   const router = useRouter();
   const toast = useToast();
   const isEdit = Boolean(course?.id);
 
   const [form, setForm] = useState({});
+  // The grade list follows the province chosen in this form, not the page.
+  const grades = useProvinceGrades(provinces.find((p) => p.id === form.provinceId)?.code);
 
   const set = (key) => (e) =>
     setForm((f) => ({
@@ -205,7 +301,7 @@ function CourseForm({ open, course, provinces, grades, subjects, onClose }) {
   if (open && form._seeded !== (course?.id ?? "new")) {
     setForm({
       _seeded: course?.id ?? "new",
-      provinceId: course?.provinceId ?? provinces.find((p) => p.isActive)?.id ?? "",
+      provinceId: course?.provinceId ?? defaultProvinceId ?? provinces[0]?.id ?? "",
       gradeId: course?.gradeId ?? "",
       subjectId: course?.subjectId ?? "",
       name: course?.name ?? "",
@@ -215,6 +311,7 @@ function CourseForm({ open, course, provinces, grades, subjects, onClose }) {
       credits: course?.credits ?? "",
       isPopular: course?.isPopular ?? false,
       isActive: course?.isActive ?? true,
+      aliases: (course?.aliases ?? []).join(", "),
     });
   }
 
@@ -230,6 +327,7 @@ function CourseForm({ open, course, provinces, grades, subjects, onClose }) {
       credits: form.credits ? Number(form.credits) : undefined,
       isPopular: form.isPopular,
       isActive: form.isActive,
+      aliases: form.aliases ?? "",
     };
 
     if (isEdit) await api.patch(`/api/admin/curriculum/courses/${course.id}`, payload);
@@ -262,7 +360,11 @@ function CourseForm({ open, course, provinces, grades, subjects, onClose }) {
 
         <div className="grid gap-4 sm:grid-cols-3">
           <Field label="Province" htmlFor="course-province" error={fieldErrors.provinceId} required>
-            <Select id="course-province" value={form.provinceId ?? ""} onChange={set("provinceId")}>
+            <Select
+              id="course-province"
+              value={form.provinceId ?? ""}
+              onChange={(e) => setForm((f) => ({ ...f, provinceId: e.target.value, gradeId: "" }))}
+            >
               {provinces.map((p) => (
                 <option key={p.id} value={p.id}>
                   {p.name}
@@ -351,6 +453,19 @@ function CourseForm({ open, course, provinces, grades, subjects, onClose }) {
           </Field>
         </div>
 
+        <Field
+          label="Other URL names"
+          htmlFor="course-aliases"
+          hint="Comma-separated, e.g. calculus. Searches and links using these find this course."
+        >
+          <Input
+            id="course-aliases"
+            value={form.aliases ?? ""}
+            onChange={set("aliases")}
+            placeholder="calculus"
+          />
+        </Field>
+
         <div className="space-y-3 rounded-xl border border-ink-200 p-4">
           <Checkbox
             label="Active"
@@ -410,14 +525,17 @@ function SubjectsTab({ subjects }) {
                 </div>
               </TD>
               <TD align="right">
-                <button
-                  type="button"
-                  onClick={() => setEditing(subject)}
-                  aria-label={`Edit ${subject.name}`}
-                  className="rounded-lg p-1.5 text-ink-400 hover:bg-ink-100 hover:text-ink-700"
-                >
-                  <Pencil className="size-3.5" />
-                </button>
+                <div className="flex justify-end gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setEditing(subject)}
+                    aria-label={`Edit ${subject.name}`}
+                    className="rounded-lg p-1.5 text-ink-400 hover:bg-ink-100 hover:text-ink-700"
+                  >
+                    <Pencil className="size-3.5" />
+                  </button>
+                  <DeleteButton label={subject.name} endpoint={`/api/admin/curriculum/subjects/${subject.id}`} />
+                </div>
               </TD>
             </TR>
           ))}
@@ -435,6 +553,7 @@ function SubjectsTab({ subjects }) {
           { key: "shortName", label: "Short name", placeholder: "Math" },
           { key: "description", label: "Description", type: "textarea" },
           { key: "icon", label: "Icon", hint: "A lucide-react icon name", placeholder: "Sigma" },
+          { key: "aliases", label: "Other URL names", hint: "Comma-separated, e.g. math, maths", type: "list" },
           { key: "displayOrder", label: "Display order", type: "number" },
           { key: "isPopular", label: "Popular", type: "checkbox" },
           { key: "isActive", label: "Active", type: "checkbox", defaultValue: true },
@@ -444,7 +563,7 @@ function SubjectsTab({ subjects }) {
   );
 }
 
-function GradesTab({ grades, provinces }) {
+function GradesTab({ grades, provinces, province }) {
   const [editing, setEditing] = useState(null);
 
   return (
@@ -475,14 +594,17 @@ function GradesTab({ grades, provinces }) {
                 </Badge>
               </TD>
               <TD align="right">
-                <button
-                  type="button"
-                  onClick={() => setEditing(grade)}
-                  aria-label={`Edit ${grade.name}`}
-                  className="rounded-lg p-1.5 text-ink-400 hover:bg-ink-100 hover:text-ink-700"
-                >
-                  <Pencil className="size-3.5" />
-                </button>
+                <div className="flex justify-end gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setEditing(grade)}
+                    aria-label={`Edit ${grade.name}`}
+                    className="rounded-lg p-1.5 text-ink-400 hover:bg-ink-100 hover:text-ink-700"
+                  >
+                    <Pencil className="size-3.5" />
+                  </button>
+                  <DeleteButton label={grade.name} endpoint={`/api/admin/curriculum/grades/${grade.id}`} />
+                </div>
               </TD>
             </TR>
           ))}
@@ -493,7 +615,8 @@ function GradesTab({ grades, provinces }) {
         open={Boolean(editing)}
         entity={editing}
         onClose={() => setEditing(null)}
-        title={editing?.id ? `Edit ${editing.name}` : "Add a grade"}
+        defaults={{ provinceId: province?.id }}
+        title={editing?.id ? `Edit ${editing.name}` : `Add a grade${province ? ` to ${province.name}` : ""}`}
         endpoint="/api/admin/curriculum/grades"
         fields={[
           {
@@ -516,6 +639,7 @@ function GradesTab({ grades, provinces }) {
               { value: "SECONDARY", label: "Secondary" },
             ],
           },
+          { key: "aliases", label: "Other URL names", hint: "Comma-separated, e.g. g12", type: "list" },
           { key: "isActive", label: "Active", type: "checkbox", defaultValue: true },
         ]}
       />
@@ -556,14 +680,17 @@ function ProvincesTab({ provinces }) {
                 </Badge>
               </TD>
               <TD align="right">
-                <button
-                  type="button"
-                  onClick={() => setEditing(province)}
-                  aria-label={`Edit ${province.name}`}
-                  className="rounded-lg p-1.5 text-ink-400 hover:bg-ink-100 hover:text-ink-700"
-                >
-                  <Pencil className="size-3.5" />
-                </button>
+                <div className="flex justify-end gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setEditing(province)}
+                    aria-label={`Edit ${province.name}`}
+                    className="rounded-lg p-1.5 text-ink-400 hover:bg-ink-100 hover:text-ink-700"
+                  >
+                    <Pencil className="size-3.5" />
+                  </button>
+                  <DeleteButton label={province.name} endpoint={`/api/admin/curriculum/provinces/${province.id}`} />
+                </div>
               </TD>
             </TR>
           ))}
@@ -603,7 +730,7 @@ function ProvincesTab({ provinces }) {
 }
 
 /** A small generic create/edit form driven by a field descriptor list. */
-function SimpleForm({ open, entity, onClose, title, endpoint, fields }) {
+function SimpleForm({ open, entity, onClose, title, endpoint, fields, defaults = {} }) {
   const router = useRouter();
   const toast = useToast();
   const isEdit = Boolean(entity?.id);
@@ -612,7 +739,11 @@ function SimpleForm({ open, entity, onClose, title, endpoint, fields }) {
   if (open && form._seeded !== (entity?.id ?? "new")) {
     const seeded = { _seeded: entity?.id ?? "new" };
     for (const field of fields) {
-      seeded[field.key] = entity?.[field.key] ?? field.defaultValue ?? (field.type === "checkbox" ? false : "");
+      const stored = entity?.[field.key];
+      seeded[field.key] =
+        field.type === "list"
+          ? (stored ?? []).join(", ")
+          : (stored ?? defaults[field.key] ?? field.defaultValue ?? (field.type === "checkbox" ? false : ""));
     }
     setForm(seeded);
   }
@@ -621,6 +752,11 @@ function SimpleForm({ open, entity, onClose, title, endpoint, fields }) {
     const payload = {};
     for (const field of fields) {
       const value = form[field.key];
+      // A list is always sent, so emptying it clears it.
+      if (field.type === "list") {
+        payload[field.key] = value ?? "";
+        continue;
+      }
       if (value === "" || value === undefined) continue;
       payload[field.key] = field.type === "number" ? Number(value) : value;
     }

@@ -1,7 +1,7 @@
 import Link from "next/link";
 import {
   TrendingUp, Users, GraduationCap, CalendarDays, Banknote, MapPin, Video,
-  Megaphone, Package, Gift, Sparkles, FileText, ShieldAlert,
+  Megaphone, Package, Gift, Sparkles, FileText, ShieldAlert, Search, SearchX, Globe2,
 } from "lucide-react";
 import { connectToDatabase } from "@/lib/db/connect";
 import { enforceRole } from "@/lib/auth/guards";
@@ -56,7 +56,9 @@ export default async function AdminAnalyticsPage({ searchParams }) {
   ]);
 
   const { supply, demand, commerce, reliability, health } = overview;
+  const { search } = breakdowns;
   const totalModes = breakdowns.lessonModes.online + breakdowns.lessonModes.inPerson;
+  const searchModeTotal = search.byMode.ONLINE + search.byMode.IN_PERSON + search.byMode.ANY;
 
   return (
     <DashboardPage>
@@ -107,7 +109,7 @@ export default async function AdminAnalyticsPage({ searchParams }) {
         <StatCard
           label="Approved tutors"
           value={formatNumber(supply.approvedTutors)}
-          hint={`${supply.approvalRate}% of ${supply.registeredTutors} registered`}
+          hint={`Application approved · ${formatNumber(supply.searchableTutors)} live in search · ${formatNumber(supply.registeredTutors)} registered`}
           icon={<GraduationCap className="size-5" />}
         />
         <StatCard
@@ -118,7 +120,7 @@ export default async function AdminAnalyticsPage({ searchParams }) {
         <StatCard
           label="Active students"
           value={formatNumber(demand.activeStudents)}
-          hint={`booked in the last ${period} days`}
+          hint="Learners with a confirmed or completed lesson in this period"
           icon={<Users className="size-5" />}
         />
         <StatCard
@@ -163,8 +165,9 @@ export default async function AdminAnalyticsPage({ searchParams }) {
           icon={<ShieldAlert className="size-5" />}
         />
         <StatCard
-          label="Average lesson value"
+          label="Average booking value"
           value={formatMoney(commerce.averageBookingValueCents, { compact: true })}
+          hint={`Paid lesson value per lesson · ${formatNumber(commerce.paidLessons)} lessons paid for`}
         />
         <StatCard
           label="Referral credit granted"
@@ -197,7 +200,7 @@ export default async function AdminAnalyticsPage({ searchParams }) {
         </Card>
 
         <Card>
-          <CardHeader title="Online vs in person" description="How families choose to learn." />
+          <CardHeader title="Online vs in person" description="Lessons booked in this period, by format." />
           <CardBody>
             {totalModes === 0 ? (
               <EmptyState compact className="border-0 bg-transparent" title="No lessons yet" />
@@ -328,7 +331,7 @@ export default async function AdminAnalyticsPage({ searchParams }) {
         </Card>
 
         <Card>
-          <CardHeader title="Popular subjects" description="What families book most." />
+          <CardHeader title="Most booked subjects" description="By lessons booked — see search demand for what families look for." />
           <CardBody className="p-0">
             {breakdowns.popularSubjects.length === 0 ? (
               <EmptyState compact className="m-5 border-0 bg-transparent" title="No data yet" />
@@ -354,7 +357,7 @@ export default async function AdminAnalyticsPage({ searchParams }) {
         </Card>
 
         <Card>
-          <CardHeader title="Popular courses" description="Where demand concentrates." />
+          <CardHeader title="Most booked courses" description="By lessons booked in this period." />
           <CardBody className="p-0">
             {breakdowns.popularCourses.length === 0 ? (
               <EmptyState compact className="m-5 border-0 bg-transparent" title="No data yet" />
@@ -388,25 +391,122 @@ export default async function AdminAnalyticsPage({ searchParams }) {
 
         <Card>
           <CardHeader
-            title="Active cities"
-            description="Where approved tutors are based — useful for spotting supply gaps."
+            title="Most active cities"
+            description="Lessons scheduled there plus searches made for it, in this period. Online lessons count toward the family's city."
           />
           <CardBody>
             {breakdowns.activeCities.length === 0 ? (
-              <EmptyState compact className="border-0 bg-transparent" title="No data yet" />
+              <EmptyState compact className="border-0 bg-transparent" title="No activity yet" />
             ) : (
               <div className="grid gap-3 sm:grid-cols-2">
                 {breakdowns.activeCities.map((city) => (
-                  <div key={city.city} className="rounded-xl border border-ink-200 p-4">
-                    <p className="text-sm font-semibold text-ink-900">{city.city}</p>
+                  <div key={`${city.city}-${city.provinceCode}`} className="rounded-xl border border-ink-200 p-4">
+                    <p className="text-sm font-semibold text-ink-900">
+                      {city.city}
+                      {city.provinceCode ? (
+                        <span className="font-normal text-ink-500">, {city.provinceCode}</span>
+                      ) : null}
+                    </p>
                     <p className="mt-1 text-2xl font-bold text-ink-900 tabular-nums">
-                      {city.tutors}
+                      {formatNumber(city.activity)}
                     </p>
                     <p className="text-xs text-ink-500">
-                      {city.tutors === 1 ? "tutor" : "tutors"}
+                      {formatNumber(city.lessons)} {city.lessons === 1 ? "lesson" : "lessons"} ·{" "}
+                      {formatNumber(city.searches)} {city.searches === 1 ? "search" : "searches"}
                     </p>
                   </div>
                 ))}
+              </div>
+            )}
+          </CardBody>
+        </Card>
+      </div>
+
+      <h2 className="mb-4 mt-8 text-sm font-bold text-ink-900">Search demand</h2>
+      <p className="-mt-2 mb-4 text-xs text-ink-500">
+        What families searched for in this period, recorded once per search without anything that
+        identifies who searched. Bookings above show what sold; this shows what was wanted.
+      </p>
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <StatCard
+          label="Searches"
+          value={formatNumber(search.totalSearches)}
+          icon={<Search className="size-5" />}
+        />
+        <StatCard
+          label="Searches with no results"
+          value={formatNumber(search.zeroResultSearches)}
+          hint={`${rateOf(search.zeroResultSearches, search.totalSearches)}% of searches found no tutor`}
+          icon={<SearchX className="size-5" />}
+        />
+        <StatCard
+          label="Locations not recognised"
+          value={formatNumber(search.unresolvedLocations)}
+          hint="A city or postal code we could not place"
+          icon={<MapPin className="size-5" />}
+        />
+        <StatCard
+          label="Provinces searched"
+          value={formatNumber(search.byProvince.length)}
+          hint={search.byProvince.map((p) => `${p.code} ${formatNumber(p.count)}`).join(" · ") || "—"}
+          icon={<Globe2 className="size-5" />}
+        />
+      </div>
+
+      <div className="mt-6 grid gap-6 lg:grid-cols-2">
+        <RankCard
+          title="Most searched subjects"
+          description="Searches that named or resolved to a subject."
+          rows={search.topSubjects.map((row) => ({ key: row.slug, label: row.name, count: row.count }))}
+        />
+        <RankCard
+          title="Most searched courses"
+          description="Searches that resolved to one provincial course."
+          rows={search.topCourses.map((row) => ({
+            key: row.courseId,
+            label: row.code ?? row.name,
+            sub: [row.code ? row.name : null, row.provinceCode].filter(Boolean).join(" · "),
+            count: row.count,
+          }))}
+        />
+        <RankCard
+          title="Most searched locations"
+          description="Cities searches resolved to."
+          rows={search.topLocations.map((row) => ({
+            key: `${row.city}-${row.provinceCode}`,
+            label: row.city,
+            sub: row.provinceCode,
+            count: row.count,
+          }))}
+        />
+        <Card>
+          <CardHeader title="Online vs in-person demand" description="The lesson format families searched for." />
+          <CardBody>
+            {searchModeTotal === 0 ? (
+              <EmptyState compact className="border-0 bg-transparent" title="No searches yet" />
+            ) : (
+              <div className="space-y-5">
+                <ModeBar
+                  icon={<Video className="size-4" />}
+                  label="Online"
+                  count={search.byMode.ONLINE}
+                  total={searchModeTotal}
+                  tone="bg-brand-600"
+                />
+                <ModeBar
+                  icon={<MapPin className="size-4" />}
+                  label="In person"
+                  count={search.byMode.IN_PERSON}
+                  total={searchModeTotal}
+                  tone="bg-accent-500"
+                />
+                <ModeBar
+                  icon={<Search className="size-4" />}
+                  label="Either format"
+                  count={search.byMode.ANY}
+                  total={searchModeTotal}
+                  tone="bg-ink-400"
+                />
               </div>
             )}
           </CardBody>
@@ -419,6 +519,44 @@ export default async function AdminAnalyticsPage({ searchParams }) {
         in this period.
       </p>
     </DashboardPage>
+  );
+}
+
+function rateOf(part, whole) {
+  return whole ? Math.round((part / whole) * 100) : 0;
+}
+
+/** A ranked list with a count per row — the shape every "most searched" panel shares. */
+function RankCard({ title, description, rows }) {
+  return (
+    <Card>
+      <CardHeader title={title} description={description} />
+      <CardBody className="p-0">
+        {rows.length === 0 ? (
+          <EmptyState compact className="m-5 border-0 bg-transparent" title="No searches yet" />
+        ) : (
+          <Table className="min-w-0">
+            <THead>
+              <TH>{title.replace(/^Most searched /, "").replace(/^./, (c) => c.toUpperCase())}</TH>
+              <TH align="right">Searches</TH>
+            </THead>
+            <TBody>
+              {rows.map((row) => (
+                <TR key={row.key}>
+                  <TD>
+                    <span className="font-semibold text-ink-900">{row.label}</span>
+                    {row.sub && <span className="block text-xs text-ink-500">{row.sub}</span>}
+                  </TD>
+                  <TD align="right" className="tabular-nums">
+                    {formatNumber(row.count)}
+                  </TD>
+                </TR>
+              ))}
+            </TBody>
+          </Table>
+        )}
+      </CardBody>
+    </Card>
   );
 }
 

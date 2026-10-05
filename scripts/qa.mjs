@@ -13,6 +13,18 @@ import zlib from "node:zlib";
 const BASE = process.env.QA_BASE_URL || "http://localhost:3000";
 const PASSWORD = "AplusLearn2024!";
 
+/**
+ * The contact and address fields §4 makes part of signing up. Every
+ * registration in this suite carries them, so a test about referrals or
+ * device trust is not accidentally a test of the address validation.
+ */
+const SIGNUP_CONTACT = {
+  phone: "416-555-0123",
+  provinceCode: "ON",
+  city: "Toronto",
+  postalCode: "M5V 2T6",
+};
+
 let passed = 0;
 let failed = 0;
 const failures = [];
@@ -73,7 +85,7 @@ function createClient({ shareDevice = true } = {}) {
     // FormData upload must not have one imposed on it.
     const headers = {
       ...(form ? {} : { "Content-Type": "application/json" }),
-      "x-forwarded-for": RUN_IP,
+      "x-forwarded-for": RUN_IP, "x-real-ip": RUN_IP,
       ...extraHeaders,
     };
     const sent = new Map(cookies);
@@ -310,8 +322,68 @@ async function openStream(client) {
   return stream;
 }
 
+/**
+ * Area suites — `scripts/qa/*.mjs`.
+ *
+ * Each file exports `default async function (kit)` and owns one requirement
+ * area end to end. They receive this suite's own helpers rather than copies,
+ * so a section written there behaves exactly like one written inline here:
+ * the same cookie-jar client, the same shared device, the same run address.
+ *
+ * `QA_ONLY=<regex>` runs only the area suites whose file name matches and
+ * skips the inline sections above — the way to iterate on one area without
+ * the whole fifteen-minute run. Without it, every area suite runs after the
+ * inline sections.
+ */
+async function runAreaSuites(kit) {
+  const { readdir } = await import("node:fs/promises");
+  const { fileURLToPath, pathToFileURL } = await import("node:url");
+  const dir = fileURLToPath(new URL("./qa/", import.meta.url));
+  let files = [];
+  try {
+    files = (await readdir(dir)).filter((name) => name.endsWith(".mjs")).sort();
+  } catch {
+    return;
+  }
+  const only = process.env.QA_ONLY ? new RegExp(process.env.QA_ONLY, "i") : null;
+  for (const file of files) {
+    if (only && !only.test(file)) continue;
+    const suite = await import(pathToFileURL(`${dir}${file}`).href);
+    try {
+      await suite.default(kit);
+    } catch (error) {
+      check(`${file} ran to completion`, false, error?.stack?.split("\n").slice(0, 3).join(" | "));
+    }
+  }
+}
+
+function qaKit() {
+  return {
+    BASE, PASSWORD, RUN_IP, section, check, createClient, login, postLogin,
+    completeLoginVerification, pngBytes, pdfBytes, formWith, openStream,
+    tag: Date.now().toString(36).toUpperCase(),
+  };
+}
+
+function printSummary() {
+  console.log(`\n${"─".repeat(56)}`);
+  console.log(`  ${passed} passed, ${failed} failed`);
+  if (failures.length) {
+    console.log("\nFailures:");
+    for (const f of failures) console.log(`  · ${f.name}${f.detail ? ` — ${f.detail}` : ""}`);
+  }
+  console.log("");
+  process.exit(failed > 0 ? 1 : 0);
+}
+
 async function main() {
   console.log(`\nAPlus Learn QA → ${BASE}\n${"─".repeat(56)}`);
+
+  if (process.env.QA_ONLY) {
+    await runAreaSuites(qaKit());
+    printSummary();
+    return;
+  }
 
   const anon = createClient();
   const parent = createClient();
@@ -1200,6 +1272,7 @@ async function main() {
       email: inviteeEmail,
       password: PASSWORD,
       confirmPassword: PASSWORD,
+      ...SIGNUP_CONTACT,
       acceptTerms: true,
       referralCode,
     },
@@ -1230,6 +1303,7 @@ async function main() {
       email: `qa-badcode-${Date.now()}@example.com`,
       password: PASSWORD,
       confirmPassword: PASSWORD,
+      ...SIGNUP_CONTACT,
       acceptTerms: true,
       referralCode: "NOTACODE",
     },
@@ -3080,6 +3154,7 @@ async function main() {
       email: `qa-nomail-${Date.now()}@example.com`,
       password: PASSWORD,
       confirmPassword: PASSWORD,
+      ...SIGNUP_CONTACT,
       acceptTerms: true,
     },
   });
@@ -4054,35 +4129,26 @@ async function main() {
       `${earningsBefore} -> ${earningsAfterAttack}`,
     );
 
-    const noShowSettings = (await admin("/api/admin/settings")).payload.data.settings;
+    // S2: a COMPLETED lesson was settled as having happened, so even the
+    // learner who paid for it cannot turn it into a refund by reporting a
+    // no-show. Their route is a dispute an administrator decides; a learner's
+    // no-show report on an ended, unsettled lesson opens one (integration
+    // suite 40-money covers that path, which needs a lesson that has ended).
+    const before = (await admin(`/api/bookings/${reportable.id}`)).payload?.data?.booking;
     const realNoShow = await parent(`/api/bookings/${reportable.id}/no-show`, {
       method: "POST",
       body: { party: "TUTOR", note: "QA — the tutor did not attend this lesson." },
     });
     check(
-      "the learner who paid can report a tutor no-show",
-      realNoShow.ok,
-      JSON.stringify(realNoShow.payload?.error),
+      "the learner who paid cannot turn a completed lesson into a refund with a no-show report",
+      !realNoShow.ok && realNoShow.payload?.error?.code === "ALREADY_COMPLETED",
+      `${realNoShow.status} ${realNoShow.payload?.error?.code}`,
     );
+    const after = (await admin(`/api/bookings/${reportable.id}`)).payload?.data?.booking;
     check(
-      "the no-show applies the configured policy exactly",
-      realNoShow.payload?.data?.booking?.cancellation?.refundPercent ===
-        noShowSettings.tutorNoShowRefundPercent,
-      `got ${realNoShow.payload?.data?.booking?.cancellation?.refundPercent}`,
-    );
-    check(
-      "the lesson is recorded as a tutor no-show",
-      realNoShow.payload?.data?.booking?.status === "NO_SHOW_TUTOR",
-    );
-
-    const repeatNoShow = await parent(`/api/bookings/${reportable.id}/no-show`, {
-      method: "POST",
-      body: { party: "TUTOR", note: "QA — reporting the same no-show a second time." },
-    });
-    check(
-      "a second no-show report cannot refund the same lesson twice",
-      !repeatNoShow.ok && repeatNoShow.payload?.error?.code === "NOT_REPORTABLE",
-      `${repeatNoShow.status} ${repeatNoShow.payload?.error?.code}`,
+      "and the lesson and its money are untouched",
+      after?.status === "COMPLETED" && (after?.refundedCents ?? 0) === (before?.refundedCents ?? 0),
+      `${after?.status} ${after?.refundedCents}`,
     );
   }
 
@@ -4656,7 +4722,17 @@ async function main() {
       method: "POST",
       body: { reason: "QA — a stranger trying to report someone else's review." },
     });
-    check("an unrelated user cannot report a review", unrelatedReport.status === 403);
+    // R21.5: any signed-in member may report a review — a parent reading a
+    // profile is exactly who notices an abusive one. A report asks a moderator
+    // to look; it never hides the review by itself.
+    check("any signed-in member can report a review (R21.5)", unrelatedReport.ok,
+      `${unrelatedReport.status} ${unrelatedReport.payload?.error?.code}`);
+    check("and a member's report does not hide it", unrelatedReport.payload?.data?.stillVisible === true);
+    const anonReport = await anon(`/api/reviews/${target.id}/report`, {
+      method: "POST",
+      body: { reason: "QA — an anonymous visitor trying to report a review." },
+    });
+    check("an anonymous visitor cannot report a review", anonReport.status === 401, String(anonReport.status));
 
     const tutorReport = await tutor(`/api/reviews/${target.id}/report`, {
       method: "POST",
@@ -4724,8 +4800,7 @@ async function main() {
       firstName: "Quinn",
       lastName: "Unverified",
       role: "PARENT",
-      provinceCode: "ON",
-      city: "Toronto",
+      ...SIGNUP_CONTACT,
       acceptTerms: true,
     },
   });
@@ -5006,7 +5081,8 @@ async function main() {
     // Sign-in has its own per-client window, which the role logins earlier in
     // this run have already used most of. These two come from their own
     // address so the limiter is not what they end up measuring.
-    const loginFrom = { "x-forwarded-for": `198.51.100.${Math.floor(Math.random() * 200) + 10}` };
+    const loginFromIp = `198.51.100.${Math.floor(Math.random() * 200) + 10}`;
+    const loginFrom = { "x-forwarded-for": loginFromIp, "x-real-ip": loginFromIp };
     const oldLogin = await createClient()("/api/auth/login", {
       method: "POST",
       body: { email: newEmail, password: PASSWORD },
@@ -5054,7 +5130,8 @@ async function main() {
   // isolated cookie jars, because the point is what a *new* browser sees.
   section("Sign-in — new-device verification, trust and revocation");
 
-  const DEVICE_FROM = { "x-forwarded-for": `192.0.2.${Math.floor(Math.random() * 200) + 10}` };
+  const DEVICE_FROM_IP = `192.0.2.${Math.floor(Math.random() * 200) + 10}`;
+  const DEVICE_FROM = { "x-forwarded-for": DEVICE_FROM_IP, "x-real-ip": DEVICE_FROM_IP };
   const deviceEmail = `qa-device-${Date.now()}@example.com`;
   const DEVICE_PASSWORD_2 = "QaDevicePass2024";
   const isolated = () => createClient({ shareDevice: false });
@@ -5069,8 +5146,7 @@ async function main() {
     firstName: "Quinn",
     lastName: "Device",
     role: "PARENT",
-    provinceCode: "ON",
-    city: "Toronto",
+    ...SIGNUP_CONTACT,
     acceptTerms: true,
   });
   check("an account for the device checks registers", deviceSignup.ok,
@@ -6813,19 +6889,19 @@ async function main() {
   check("a course tutors still teach is refused rather than orphaning their profiles",
     taughtCourse.status === 409, `status ${taughtCourse.status}`);
 
+  // R28.11: a subject that courses or learners use can only be deactivated —
+  // deleting it would orphan them — while one created by mistake and used by
+  // nothing can be removed outright.
+  const inUseSubject = (await anon("/api/curriculum/subjects")).payload.data.subjects.find((s) => s.slug === "mathematics");
+  const deleteInUse = await admin(`/api/admin/curriculum/subjects/${inUseSubject?.id}`, { method: "DELETE" });
+  check("a subject courses still use cannot be deleted — deactivation is the path",
+    deleteInUse.status === 409, `status ${deleteInUse.status}`);
+
   const deleteSubject = await admin(`/api/admin/curriculum/subjects/${subjectId}`, {
     method: "DELETE",
   });
-  check("subjects have no delete endpoint — deactivation is the documented path",
-    deleteSubject.status === 404 || deleteSubject.status === 405,
+  check("the fixture subject, now used by nothing, can be deleted", deleteSubject.ok,
     `status ${deleteSubject.status}`);
-
-  // Leave the fixture subject switched off rather than lingering in pickers.
-  const parkSubject = await admin(`/api/admin/curriculum/subjects/${subjectId}`, {
-    method: "PATCH",
-    body: { isActive: false, isPopular: false },
-  });
-  check("the fixture subject is deactivated at the end of the run", parkSubject.ok);
   check("and it leaves the public subject list",
     !(await anon("/api/curriculum/subjects")).payload.data.subjects.some((s) => s.id === subjectId));
 
@@ -7689,15 +7765,9 @@ async function main() {
       unknownFieldsIgnored.status === 422, `status ${unknownFieldsIgnored.status}`);
   }
 
-  // --- Summary -------------------------------------------------------------
-  console.log(`\n${"─".repeat(56)}`);
-  console.log(`  ${passed} passed, ${failed} failed`);
-  if (failures.length) {
-    console.log("\nFailures:");
-    for (const f of failures) console.log(`  · ${f.name}${f.detail ? ` — ${f.detail}` : ""}`);
-  }
-  console.log("");
-  process.exit(failed > 0 ? 1 : 0);
+  await runAreaSuites(qaKit());
+
+  printSummary();
 }
 
 main().catch((error) => {

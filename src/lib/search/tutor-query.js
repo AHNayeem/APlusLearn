@@ -1,4 +1,4 @@
-import { LESSON_MODES, AVAILABILITY_WINDOWS } from "@/constants";
+import { LESSON_MODES } from "@/constants";
 import { escapeRegex } from "@/lib/security/sanitize";
 
 /**
@@ -10,19 +10,21 @@ import { escapeRegex } from "@/lib/security/sanitize";
  * The first clause is always `isSearchable: true` — an unapproved tutor can
  * never appear in search, whatever else the filters say (§42).
  */
-export function buildTutorQuery(params, { coordinates } = {}) {
+export function buildTutorQuery(params, { location, courseIds } = {}) {
   const query = { isSearchable: true };
   const and = [];
 
-  // --- What they teach ---
-  if (params.courseId) query.courseIds = params.courseId;
+  // --- What they teach. `courseIds` is the curriculum the search service
+  //     resolved (a code, a course name or slug, an alias). ---
+  if (courseIds?.length) query.courseIds = { $in: courseIds };
+  else if (params.courseId) query.courseIds = params.courseId;
   else if (params.courseCode) query.courseCodes = String(params.courseCode).toUpperCase();
 
   if (params.subject) query.subjectSlugs = params.subject;
   if (params.gradeLevel !== undefined) query.gradeLevels = params.gradeLevel;
   if (params.province) query.provinceCodes = String(params.province).toUpperCase();
 
-  // --- Free text over headline/bio, and the tutor's own course names ---
+  // --- Free text, only when the words were not a course or a subject ---
   if (params.q) {
     const pattern = new RegExp(escapeRegex(params.q), "i");
     and.push({
@@ -36,20 +38,15 @@ export function buildTutorQuery(params, { coordinates } = {}) {
     });
   }
 
-  // --- Lesson mode ---
-  if (params.mode && params.mode !== "ANY") {
+  // --- Lesson format ---
+  if (params.mode === LESSON_MODES.ONLINE || params.mode === LESSON_MODES.IN_PERSON) {
     query.lessonModes = params.mode;
+  } else if (params.mode === "BOTH") {
+    query.lessonModes = { $all: [LESSON_MODES.ONLINE, LESSON_MODES.IN_PERSON] };
   }
 
-  // --- Location. In-person implies a geo constraint; online is borderless. ---
-  if (coordinates && params.mode !== LESSON_MODES.ONLINE) {
-    const radiusKm = params.distanceKm ?? 25;
-    query.location = {
-      $geoWithin: { $centerSphere: [coordinates, radiusKm / 6378.1] },
-    };
-  } else if (params.city && params.mode !== LESSON_MODES.ONLINE) {
-    query.city = new RegExp(`^${escapeRegex(params.city)}$`, "i");
-  }
+  const where = locationClause(params.mode, location);
+  if (where) and.push(where);
 
   // --- Price. Compare against the tutor's lowest rate so a per-course
   //     override inside the range still surfaces the tutor. ---
@@ -65,7 +62,9 @@ export function buildTutorQuery(params, { coordinates } = {}) {
   // --- Quality and credentials ---
   if (params.minRating) query["stats.ratingAverage"] = { $gte: params.minRating };
   if (params.minExperience) query.yearsExperience = { $gte: params.minExperience };
-  if (params.qualifications?.length) query.qualifications = { $all: params.qualifications };
+  // Any of the chosen qualifications (a parent ticking "Master's" and "PhD"
+  // wants either); every chosen verification (each is a requirement).
+  if (params.qualifications?.length) query.qualifications = { $in: params.qualifications };
   if (params.verified?.length) query.verifiedTypes = { $all: params.verified };
   if (params.languages?.length) query.languages = { $in: params.languages };
   if (params.freeIntro) query.offersFreeIntro = true;
@@ -75,24 +74,55 @@ export function buildTutorQuery(params, { coordinates } = {}) {
   return query;
 }
 
-/**
- * Availability windows live on a separate collection, so the search service
- * resolves matching tutor ids first and passes them in as a constraint.
- */
-export function availabilityWindowFilter(windows = []) {
-  const selected = AVAILABILITY_WINDOWS.filter((w) => windows.includes(w.value));
-  if (!selected.length) return null;
+const EARTH_RADIUS_KM = 6378.1;
 
+/**
+ * Where a lesson can happen, given the visitor's location (§7, §29).
+ *
+ * Distance only constrains *in-person* teaching. An online lesson has no
+ * distance, so a search with a location and no format still returns every
+ * online tutor for the course — the location decides which in-person tutors
+ * join them, it never removes online ones (R7.7).
+ *
+ * `location.status`:
+ *   RESOLVED      — coordinates known: in-person tutors within `radiusKm`
+ *                   (null radius = any distance, R8.5), among tutors who
+ *                   have a known location at all.
+ *   UNRESOLVED    — the place is not known to the geocoder: in-person tutors
+ *                   whose own profile names that city (or postal prefix),
+ *                   never a guessed coordinate (R29.1).
+ *   OUT_OF_REGION / INVALID — the place cannot be served in person for this
+ *                   search (a postal code in another province, a malformed
+ *                   code): no in-person tutors; online ones still match.
+ */
+export function locationClause(mode, location) {
+  if (!location || location.status === "NONE" || mode === LESSON_MODES.ONLINE) return null;
+
+  let nearby = null;
+  if (location.status === "RESOLVED" && location.coordinates) {
+    nearby = location.radiusKm
+      ? {
+          location: {
+            $geoWithin: { $centerSphere: [location.coordinates, location.radiusKm / EARTH_RADIUS_KM] },
+          },
+        }
+      : { "location.coordinates": { $exists: true } };
+  } else if (location.status === "UNRESOLVED") {
+    if (location.postalPrefix) nearby = { postalCodePrefix: location.postalPrefix };
+    else if (location.cityName) nearby = { city: new RegExp(`^${escapeRegex(location.cityName)}$`, "i") };
+  }
+
+  const inPersonNearby = nearby ? { lessonModes: LESSON_MODES.IN_PERSON, ...nearby } : null;
+
+  if (mode === LESSON_MODES.IN_PERSON || mode === "BOTH") {
+    // Nothing can be met in person here: say so with an empty result rather
+    // than quietly dropping the location.
+    return inPersonNearby ?? { _id: { $in: [] } };
+  }
+
+  // "Online or in person": online tutors, plus in-person tutors nearby.
   return {
-    $or: selected.map((w) => ({
-      weeklyRules: {
-        $elemMatch: {
-          weekday: { $in: w.days },
-          startMinutes: { $lt: w.to * 60 },
-          endMinutes: { $gt: w.from * 60 },
-        },
-      },
-    })),
+    $or: [{ lessonModes: LESSON_MODES.ONLINE }, ...(inPersonNearby ? [inPersonNearby] : [])],
   };
 }
 
@@ -115,11 +145,11 @@ export function buildTutorSort(sort) {
     case "EXPERIENCE":
       return { yearsExperience: -1, "stats.ratingAverage": -1, _id: 1 };
     case "AVAILABILITY":
-      return { nextAvailableAt: 1, "stats.ratingAverage": -1, _id: 1 };
     case "DISTANCE":
-      // Distance ordering is applied after the geo query resolves; fall back
-      // to quality so the result is still deterministic.
-      return { "stats.ratingAverage": -1, _id: 1 };
+      // Both are ranked by the search service over the whole matched set —
+      // distance from the resolved location, soonest real open slot — not
+      // by an index. This is the tie-break order inside that ranking.
+      return { "stats.ratingAverage": -1, "stats.ratingCount": -1, _id: 1 };
     case "RELEVANCE":
     default:
       // Verified, well-rated, active tutors first — the marketplace's default

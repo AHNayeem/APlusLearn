@@ -1,4 +1,5 @@
 import "server-only";
+import { learnerForTutor, maskLearnersForTutor } from "@/lib/privacy/learner";
 import { Types } from "mongoose";
 import {
   Booking,
@@ -9,9 +10,12 @@ import {
   Availability,
   Payment,
   User,
+  GroupSession,
+  Conversation,
 } from "@/models";
 import {
   BOOKING_STATUS,
+  DISPUTE_REASONS,
   BLOCKING_BOOKING_STATUSES,
   CANCELLED_STATUSES,
   LESSON_MODES,
@@ -25,6 +29,11 @@ import {
   ROLES,
   FEATURES,
   PAYMENT_STATUS,
+  IN_PERSON_LOCATIONS,
+  IN_PERSON_LOCATION_LABELS,
+  MEETING_PROVIDER_LABELS,
+  MESSAGE_SYSTEM_EVENTS,
+  BLOCKING_GROUP_SESSION_STATUSES,
 } from "@/constants";
 import {
   NotFoundError,
@@ -50,6 +59,10 @@ import {
   cancellationPolicyText,
   shouldReleaseHold,
   holdMinutes,
+  noShowReportEligibility,
+  disputeEligibility,
+  assessNoShowAbuse,
+  lessonCompletionCutoff,
 } from "@/lib/booking/policy";
 import { isSlotBookable } from "@/lib/booking/slots";
 import { getSettings } from "./settings.service";
@@ -62,17 +75,17 @@ import {
 import { brandedEmailTemplates } from "./external/email-provider";
 import {
   createPaymentForBooking,
-  refundPayment,
   providerPaymentStatus,
   markPaymentPaid,
   returnAppliedCredit,
+  refundLessonValue,
+  voidUnpaidPayment,
 } from "./payment.service";
 import { notify } from "./notification.service";
 import { recordAudit } from "./audit.service";
 import { reportCancellationAbuse, checkNoShowPattern } from "./risk.service";
-import { refreshNextAvailable } from "./availability.service";
+import { refreshNextAvailable, tutorBusyPeriods } from "./availability.service";
 import {
-  externalBusyPeriods,
   pushBookingEvent,
   updateBookingEvent,
   removeBookingEvent,
@@ -86,6 +99,12 @@ import {
   returnPackageSession,
 } from "./package.service";
 import { onGroupBookingConfirmed, releaseGroupSeat } from "./group.service";
+import {
+  announceBookingConfirmed,
+  announceBookingRescheduled,
+  announceBookingCancelled,
+} from "./booking-messages.service";
+import { validateRequestForBooking, recordRequestBooking } from "./request.service";
 
 /**
  * Booking lifecycle (§19, §26).
@@ -124,6 +143,44 @@ function assertTutorTeachesCourse(tutor, courseId) {
   if (!teaches) {
     throw new BusinessRuleError("This tutor does not teach that course.", "COURSE_NOT_TAUGHT");
   }
+}
+
+/**
+ * Where an in-person lesson happens, as it will be stored (§26, R26.5).
+ *
+ * The kind of place has to be one this tutor said they teach at — the picker
+ * only offers those, but the picker is not the control. "Somewhere else" is
+ * only an arrangement once it says where, so OTHER carries a description,
+ * which is withheld and released exactly like a street address. The label is
+ * derived here rather than trusted, so a lesson cannot claim to be at "Tutor's
+ * studio" while its type says the student's home.
+ */
+function inPersonLocation(tutor, location) {
+  const type = location?.type;
+  if (!type || !(tutor.inPersonLocationTypes ?? []).includes(type)) {
+    throw new BusinessRuleError(
+      "This tutor does not teach at that kind of location.",
+      "LOCATION_NOT_OFFERED",
+    );
+  }
+
+  const description = location.description?.trim();
+  if (type === IN_PERSON_LOCATIONS.OTHER && !description) {
+    throw new BusinessRuleError(
+      "Say where the lesson will take place.",
+      "LOCATION_DESCRIPTION_REQUIRED",
+    );
+  }
+
+  return {
+    type,
+    label: IN_PERSON_LOCATION_LABELS[type],
+    addressLine: location.addressLine || undefined,
+    description: type === IN_PERSON_LOCATIONS.OTHER ? description : undefined,
+    city: location.city || undefined,
+    postalCode: location.postalCode || undefined,
+    notes: location.notes || undefined,
+  };
 }
 
 // --- Create ----------------------------------------------------------------
@@ -208,6 +265,19 @@ export async function createBooking(input, actor) {
     );
   }
 
+  const location = input.mode === LESSON_MODES.IN_PERSON ? inPersonLocation(tutor, input.location) : undefined;
+
+  // Arriving from a tutor request (R18.10). The ids stored on the booking are
+  // the ones the request service resolved from its own records; the client
+  // only ever names the request, and naming one it does not own is refused.
+  const requestLink = input.requestId
+    ? await validateRequestForBooking({
+        requestId: input.requestId,
+        purchaserId: actor.id,
+        tutorProfileId: tutor._id,
+      })
+    : null;
+
   const availability = await Availability.findOne({ tutorProfileId: tutor._id }).lean();
   if (!availability) {
     throw new BusinessRuleError("This tutor has not published any availability yet.");
@@ -217,22 +287,19 @@ export async function createBooking(input, actor) {
   const startTimes = seriesStartTimes(input.startAt, input.recurrence, input.occurrences);
   const lastEnd = addMinutes(startTimes.at(-1), input.durationMinutes);
 
-  const [storedBookings, external] = await Promise.all([
-    Booking.find({
-      tutorProfileId: tutor._id,
-      status: { $in: BLOCKING_BOOKING_STATUSES },
-      startAt: { $lt: lastEnd },
-      endAt: { $gt: new Date(startTimes[0]) },
-    })
-      .select("startAt endAt")
-      .lean(),
-    // The picker already subtracts these, but the picker is display. This is
-    // the guarantee: a direct API call cannot book over a tutor's external
-    // commitment just because it skipped the UI (§18, §42).
-    externalBusyPeriods(tutor._id, { from: new Date(startTimes[0]), to: lastEnd }),
-  ]);
-
-  const existing = [...storedBookings, ...external];
+  // The one definition of a tutor's busy time — lessons, published group
+  // sessions and connected external calendars (§18, R14.4). The picker
+  // already subtracts these, but the picker is display; this is the
+  // guarantee, so a direct API call cannot book over a group session or an
+  // external commitment just because it skipped the UI (§42).
+  // Widened by the tutor's buffer, which `isSlotBookable` applies around
+  // every busy period — a lesson ending ten minutes before this one starts
+  // is a clash when the tutor asked for fifteen.
+  const buffer = availability.bufferMinutes ?? 0;
+  const existing = await tutorBusyPeriods(tutor._id, {
+    from: addMinutes(new Date(startTimes[0]), -buffer),
+    to: addMinutes(lastEnd, buffer),
+  });
 
   // Validate every occurrence before writing any of them.
   for (const startAt of startTimes) {
@@ -314,7 +381,7 @@ export async function createBooking(input, actor) {
       // Intent, recorded now and acted on later. The room itself is created
       // after payment, by a webhook that has no access to this request (§27).
       meetingProvider: input.mode === LESSON_MODES.ONLINE ? input.meetingProvider : undefined,
-      location: input.mode === LESSON_MODES.IN_PERSON ? input.location : undefined,
+      location,
       startAt: start,
       endAt: end,
       durationMinutes: input.durationMinutes,
@@ -331,6 +398,8 @@ export async function createBooking(input, actor) {
       seriesId: input.recurrence === RECURRENCE.NONE ? undefined : seriesId,
       seriesIndex: index,
       studentNotes: input.studentNotes,
+      requestId: requestLink?.requestId,
+      tutorMatchId: requestLink?.tutorMatchId,
     });
 
     // Reserve the slot against subsequent occurrences in this same series.
@@ -401,8 +470,10 @@ export async function createBooking(input, actor) {
     { $set: { paymentId: payment.id } },
   );
 
+  // Re-read rather than return the in-memory documents: those still hold the
+  // private address fields the schema keeps `select: false` (R26.5, §27).
   return {
-    bookings: toPlain(created),
+    bookings: toPlain(await Booking.find({ _id: { $in: created.map((b) => b._id) } }).sort({ startAt: 1 })),
     payment,
     total: calculateSeriesTotal(price, created.length),
     meetingProvider: input.meetingProvider,
@@ -425,9 +496,37 @@ async function confirmPackageBooking(booking) {
   await Promise.all([
     refreshNextAvailable(booking.tutorProfileId),
     notifyBookingConfirmed([booking]),
+    recordConfirmation([booking]),
     pushBookingEvent(booking).catch((error) =>
       console.warn("[booking] calendar push failed:", error.message),
     ),
+  ]);
+}
+
+/**
+ * What a confirmed lesson changes beyond itself — run by both confirmation
+ * paths, so a package lesson and a paid one are recorded identically.
+ *
+ *   - The thread between the family and the tutor says so (R17.3).
+ *   - A lesson booked from a tutor request closes the request and marks the
+ *     tutor's match booked (R18.10). Only now, not at checkout: an abandoned
+ *     checkout must leave the request open for the family to try again.
+ *
+ * Both are best-effort by contract — neither callee throws — because a lesson
+ * somebody has paid for is confirmed whatever happens to its paperwork.
+ */
+async function recordConfirmation(bookings) {
+  const fromRequest = bookings.find((b) => b.requestId && b.tutorMatchId);
+  await Promise.all([
+    announceBookingConfirmed(bookings),
+    fromRequest
+      ? recordRequestBooking({
+          requestId: String(fromRequest.requestId),
+          tutorMatchId: String(fromRequest.tutorMatchId),
+          bookingId: String(fromRequest._id),
+          tutorProfileId: String(fromRequest.tutorProfileId),
+        })
+      : null,
   ]);
 }
 
@@ -567,15 +666,20 @@ async function releaseSlots(bookings, tutorProfileId) {
  */
 async function settleSlotRace(created, tutor) {
   const ids = created.map((b) => b._id);
-  const found = await Booking.find(overlapQuery(created, tutor._id, ids))
-    .select("_id startAt groupSessionId")
-    .lean();
+  const [found, session] = await Promise.all([
+    Booking.find(overlapQuery(created, tutor._id, ids))
+      .select("_id startAt groupSessionId")
+      .lean(),
+    liveGroupSessionOverlapping(created, tutor._id),
+  ]);
 
+  // A group session published in the same instant (R14.4). It claims no
+  // lock, so it is settled the same way: whichever side writes second reads
+  // the other back — `publishGroupSession` re-reads lessons after it saves —
+  // and stands down. Both standing down is possible, and safe.
   const conflicts = withoutSettledClaims(found, created);
-  if (!conflicts.length) return;
-
-  const ourEarliest = ids.map(String).sort()[0];
-  const lost = conflicts.filter((c) => String(c._id) < ourEarliest);
+  const lost = conflicts.filter((c) => String(c._id) < ids.map(String).sort()[0]);
+  if (session) lost.unshift({ startAt: session.startAt });
   if (!lost.length) return;
 
   // We were second. Withdraw cleanly — nothing has been charged yet. The
@@ -608,6 +712,21 @@ function withoutSettledClaims(conflicts, created) {
   return conflicts.filter(
     (c) => c.groupSessionId || !ourInstants.has(new Date(c.startAt).getTime()),
   );
+}
+
+/**
+ * A published or confirmed group session sharing time with any of these
+ * lessons (R14.4). The session holds the tutor's hour for all its learners,
+ * so a one-to-one lesson on top of it is a double booking.
+ */
+function liveGroupSessionOverlapping(lessons, tutorProfileId) {
+  return GroupSession.findOne({
+    tutorProfileId,
+    status: { $in: BLOCKING_GROUP_SESSION_STATUSES },
+    $or: lessons.map((l) => ({ startAt: { $lt: l.endAt }, endAt: { $gt: l.startAt } })),
+  })
+    .select("_id startAt")
+    .lean();
 }
 
 /** Start instants for a one-off or recurring series. */
@@ -705,6 +824,7 @@ export async function confirmBookings(paymentId, { meetingProvider } = {}) {
   await Promise.all([
     refreshNextAvailable(confirmed[0].tutorProfileId),
     notifyBookingConfirmed(confirmed),
+    recordConfirmation(confirmed),
     // Best-effort and deliberately last: a calendar that is down must never
     // leave a paid lesson unconfirmed. Failures are recorded on the booking
     // and retried by the `calendar-sync` job (§18, §41 Phase 2).
@@ -1157,25 +1277,45 @@ export async function releaseBookingsForFailedPayment(paymentId, { reason, now =
 
 /** Is this lesson's window still clear of every booking that blocks a slot? */
 async function slotStillFree(booking) {
-  const clash = await Booking.exists(
-    overlapQuery([{ startAt: booking.startAt, endAt: booking.endAt }], booking.tutorProfileId, [
-      booking._id,
-    ]),
-  );
-  return !clash;
+  const window = [{ startAt: booking.startAt, endAt: booking.endAt }];
+  const [clash, session] = await Promise.all([
+    Booking.exists(overlapQuery(window, booking.tutorProfileId, [booking._id])),
+    // A group session published while the hold was lapsed took the hour too.
+    booking.groupSessionId ? null : liveGroupSessionOverlapping(window, booking.tutorProfileId),
+  ]);
+  return !clash && !session;
 }
 
 async function notifyBookingConfirmed(bookings) {
   const first = bookings[0];
-  const [purchaser, tutorUser, student] = await Promise.all([
+  const isInPerson = first.mode === LESSON_MODES.IN_PERSON;
+  const [purchaser, tutorUser, student, settings, payment, withPlace, templates] = await Promise.all([
     User.findById(first.purchaserId).select("firstName email").lean(),
     User.findById(first.tutorUserId).select("firstName lastName email").lean(),
     StudentProfile.findById(first.studentProfileId).select("firstName lastName isMinor shareFullNameWithTutor").lean(),
+    getSettings(),
+    first.paymentId && !first.packagePurchaseId
+      ? Payment.findById(first.paymentId).select("totalCents creditAppliedCents").lean()
+      : null,
+    // The confirmation goes to the two people the address is released to,
+    // at the moment it is released, so it carries it (R24.7, §27).
+    isInPerson
+      ? Booking.findById(first._id).select("+location.addressLine +location.description").lean()
+      : null,
+    brandedEmailTemplates(),
   ]);
 
   const countLabel =
     bookings.length > 1 ? `${bookings.length} lessons` : "Your lesson";
   const tutorName = publicName(tutorUser?.firstName ?? "", tutorUser?.lastName ?? "");
+  const shared = {
+    whereLabel: whereLabel(first, withPlace?.location),
+    joinNote: joinNote(first),
+    // Read from Settings on every send — the window and percentages are an
+    // administrator's to change, and an email must not promise old terms (R24.9).
+    policyLines: cancellationPolicyText(settings),
+  };
+  const seriesSuffix = bookings.length > 1 ? ` for ${bookings.length} lessons` : "";
 
   await notify({
     userId: first.purchaserId,
@@ -1186,15 +1326,20 @@ async function notifyBookingConfirmed(bookings) {
     entityType: "Booking",
     entityId: first._id,
     channels: [NOTIFICATION_CHANNELS.IN_APP, NOTIFICATION_CHANNELS.EMAIL],
-    email: (await brandedEmailTemplates()).bookingConfirmed({
+    email: templates.bookingConfirmed({
       firstName: purchaser?.firstName ?? "there",
-      booking: bookingEmailPayload(first, tutorName),
+      booking: bookingEmailPayload(first, tutorName, {
+        ...shared,
+        amountHeading: "Amount paid",
+        amountLabel: amountPaidLabel(bookings, payment, seriesSuffix),
+      }),
     }),
   });
 
   // The masking rule lives in one place, so a minor's surname cannot leak
   // here while staying hidden everywhere else (§35, §42).
   const studentName = learnerDisplayName(student);
+  const earnings = bookings.reduce((sum, b) => sum + (b.price?.tutorEarningsCents ?? 0), 0);
 
   await notify({
     userId: first.tutorUserId,
@@ -1205,16 +1350,81 @@ async function notifyBookingConfirmed(bookings) {
     entityType: "Booking",
     entityId: first._id,
     channels: [NOTIFICATION_CHANNELS.IN_APP, NOTIFICATION_CHANNELS.EMAIL],
-    email: (await brandedEmailTemplates()).bookingConfirmed({
+    email: templates.bookingConfirmed({
       firstName: tutorUser?.firstName ?? "there",
-      booking: bookingEmailPayload(first, studentName),
+      // The tutor's link is the tutor's lesson page — `/bookings/:id` is the
+      // family's, and sends a tutor away (R24.1). What the tutor is told about
+      // money is what they earn, never the family's card total.
+      booking: bookingEmailPayload(first, studentName, {
+        ...shared,
+        forTutor: true,
+        amountHeading: "Your earnings",
+        amountLabel: `${formatMoney(earnings)}${seriesSuffix}`,
+      }),
     }),
   });
 }
 
-function bookingEmailPayload(booking, otherPartyName) {
+/**
+ * What the purchaser actually paid (R24.8): the payment's charged total,
+ * which already reflects a whole series and any account credit applied — not
+ * one lesson's list price.
+ */
+function amountPaidLabel(bookings, payment, seriesSuffix) {
+  if (bookings[0].packagePurchaseId) return "Covered by your lesson package";
+  if (!payment) {
+    const listed = bookings.reduce((sum, b) => sum + (b.price?.totalCents ?? 0), 0);
+    return `${formatMoney(listed)}${seriesSuffix}`;
+  }
+  const credit = payment.creditAppliedCents > 0
+    ? ` (after ${formatMoney(payment.creditAppliedCents)} account credit)`
+    : "";
+  return `${formatMoney(payment.totalCents)}${seriesSuffix}${credit}`;
+}
+
+/** Where the lesson is, as the confirmation says it (R24.7, R26.5). */
+function whereLabel(booking, location) {
+  if (booking.mode === LESSON_MODES.ONLINE) {
+    const platform = MEETING_PROVIDER_LABELS[booking.meeting?.provider ?? booking.meetingProvider];
+    return platform ? `Online — ${platform}` : "Online";
+  }
+  const place = location ?? booking.location ?? {};
+  return [
+    place.label ?? IN_PERSON_LOCATION_LABELS[place.type] ?? "In person",
+    place.description,
+    place.addressLine,
+    place.city,
+  ]
+    .filter(Boolean)
+    .join(", ");
+}
+
+/**
+ * How to get into an online lesson. Never the link itself: a room credential
+ * belongs on the lesson page behind a session, not in a mailbox (§27).
+ */
+function joinNote(booking) {
+  if (booking.mode !== LESSON_MODES.ONLINE) {
+    return "The full location and any changes are always on your lesson page.";
+  }
+  return booking.meeting?.joinUrl
+    ? "The joining link is on your lesson page — open it from there when it's time."
+    : "The tutor will add the joining link to your lesson page before the lesson starts.";
+}
+
+/**
+ * The lesson as every booking email describes it.
+ *
+ * @param {object} booking
+ * @param {string} otherPartyName
+ * @param {object} [extras]  Per-recipient additions. `forTutor` points every
+ *   link at the tutor's own lesson pages (R24.1); the confirmation adds where
+ *   (R24.7), what was paid (R24.8) and the policy (R24.9).
+ */
+function bookingEmailPayload(booking, otherPartyName, extras = {}) {
+  const { forTutor = false, ...rest } = extras;
   return {
-    id: String(booking._id),
+    id: String(booking._id ?? booking.id),
     reference: booking.reference,
     courseName: booking.courseName,
     courseCode: booking.courseCode,
@@ -1224,6 +1434,9 @@ function bookingEmailPayload(booking, otherPartyName) {
     durationLabel: formatDuration(booking.durationMinutes),
     modeLabel: booking.mode === LESSON_MODES.ONLINE ? "Online" : "In person",
     totalLabel: formatMoney(booking.price.totalCents),
+    forTutor,
+    path: `${forTutor ? "/tutor" : ""}/bookings/${booking._id ?? booking.id}`,
+    ...rest,
   };
 }
 
@@ -1235,14 +1448,18 @@ export async function listBookings(actor, params = {}) {
 
   const now = new Date();
   switch (params.scope) {
+    // Split on the lesson's *end*, by the clock (R22.2): a lesson in progress
+    // is still upcoming, and one that has ended is past whether or not
+    // anybody has marked it complete yet — nothing waits on a job to appear.
     case "UPCOMING":
-      query.startAt = { $gte: now };
+      query.endAt = { $gt: now };
       query.status = { $in: [BOOKING_STATUS.CONFIRMED, BOOKING_STATUS.PENDING_PAYMENT] };
       break;
     case "PAST":
-      query.startAt = { $lt: now };
+      query.endAt = { $lte: now };
       query.status = {
         $in: [
+          BOOKING_STATUS.CONFIRMED,
           BOOKING_STATUS.COMPLETED,
           BOOKING_STATUS.NO_SHOW_STUDENT,
           BOOKING_STATUS.NO_SHOW_TUTOR,
@@ -1292,8 +1509,10 @@ export async function listBookings(actor, params = {}) {
    * lesson's credentials, have to be withheld here too or withdrawing one is
    * no control at all.
    */
+  const plain = toPlain(items).map((booking) => withReleasedMeeting(booking, actor));
   return {
-    items: toPlain(items).map((booking) => withReleasedMeeting(booking, actor)),
+    // A tutor's list carries a minor's initial, never their surname (S5).
+    items: actor.role === ROLES.TUTOR ? maskLearnersForTutor(plain) : plain,
     total,
     page: params.page,
     pageSize,
@@ -1319,7 +1538,10 @@ export async function getBooking(id, actor) {
     .populate({
       path: "tutorProfileId",
       select: "slug city province timeZone userId hourlyRateCents verifiedTypes stats",
-      populate: { path: "userId", select: "firstName lastName avatarUrl email phone" },
+      // No email or phone: the two parties talk through messages, where
+      // off-platform contact details are filtered (§17). Nothing renders
+      // them, and a payload is not a place to leak what the UI withholds.
+      populate: { path: "userId", select: "firstName lastName avatarUrl" },
     })
     .populate("paymentId")
     .lean();
@@ -1334,14 +1556,25 @@ export async function getBooking(id, actor) {
   if (!allowed) throw new AuthorizationError("You do not have access to this lesson.");
 
   const plain = toPlain(booking);
+  if (String(booking.tutorUserId) === String(actor.id) && actor.role !== ROLES.ADMIN) {
+    plain.studentProfileId = learnerForTutor(plain.studentProfileId);
+    // The tutor sees whether the lesson is paid, refunded or still pending
+    // (R16.6) — never the family's card, their checkout link or the charge
+    // references, which the populated payment carries.
+    plain.paymentId = paymentForTutor(plain.paymentId);
+  }
 
-  // The in-person street address is released only to the two parties, and
-  // only once the lesson is actually confirmed (§27, §42).
+  // The in-person street address — and, for an OTHER location, the
+  // description of where, which pins a place just as precisely — is released
+  // only to the two parties, and only once the lesson is actually confirmed
+  // (§27, §42, R26.5).
   if (booking.mode === LESSON_MODES.IN_PERSON && booking.location) {
     const canSeeAddress =
       booking.status === BOOKING_STATUS.CONFIRMED || booking.status === BOOKING_STATUS.COMPLETED;
     if (canSeeAddress) {
-      const withAddress = await Booking.findById(id).select("+location.addressLine").lean();
+      const withAddress = await Booking.findById(id)
+        .select("+location.addressLine +location.description")
+        .lean();
       plain.location = toPlain(withAddress.location);
     }
   }
@@ -1375,14 +1608,33 @@ export async function getBooking(id, actor) {
       booking.status === BOOKING_STATUS.COMPLETED &&
       !booking.reviewId &&
       String(booking.purchaserId) === String(actor.id),
+    // The same rules the dispute and no-show services apply (S2, S4), so a
+    // button is shown exactly when the request behind it would be accepted.
     canDispute:
-      [BOOKING_STATUS.COMPLETED, BOOKING_STATUS.NO_SHOW_STUDENT, BOOKING_STATUS.NO_SHOW_TUTOR].includes(
-        booking.status,
-      ) && booking.status !== BOOKING_STATUS.DISPUTED,
+      actor.role !== ROLES.ADMIN &&
+      disputeEligibility(booking, { settings, payment: booking.paymentId }).ok,
+    canReportNoShow:
+      String(booking.purchaserId) === String(actor.id) &&
+      noShowReportEligibility(booking, { settings }).ok,
+    noShowReportClosesAt: noShowReportEligibility(booking, { settings }).closesAt ?? null,
   };
   plain.cancellationPolicy = cancellationPolicyText(settings);
 
   return plain;
+}
+
+/**
+ * The part of a lesson's payment its tutor may see (R16.6): whether it is
+ * paid, refunded or pending, and when — nothing that identifies the card, the
+ * purchaser's account or the provider's objects.
+ */
+function paymentForTutor(payment) {
+  if (!payment || typeof payment !== "object") return payment ? { id: String(payment) } : null;
+  return {
+    id: payment.id,
+    status: payment.status,
+    paidAt: payment.paidAt,
+  };
 }
 
 /**
@@ -1433,19 +1685,44 @@ export async function cancelBooking(id, { reason, cancelSeries }, actor) {
         })
       : [booking];
 
-  // Kept only to size the notification and the audit entry; the money that
-  // actually moves is `cashRefund` below, which excludes package lessons.
-  let policyRefundTotal = 0;
-  const cancelled = [];
-
-  for (const target of targets) {
+  /**
+   * Decide every outcome, and move the money, before any lesson is saved as
+   * cancelled (R16.7). A refund the payment cannot cover — credit applied,
+   * an earlier partial refund — then fails the cancellation as a whole,
+   * rather than leaving a lesson cancelled with nothing given back.
+   *
+   * An unpaid lesson is not refunded: nothing was taken. Its checkout is
+   * voided so it can no longer be paid, and applied credit goes back
+   * (R27.2). A late payment that still arrives is refunded on settlement.
+   */
+  const plans = targets.map((target) => {
+    const paid = target.status !== BOOKING_STATUS.PENDING_PAYMENT;
     const outcome = resolveCancellation({
       startAt: target.startAt,
       totalCents: target.price.totalCents,
       cancelledBy: role === "ADMIN" ? "ADMIN" : role,
       settings,
+      paid,
     });
+    return { target, paid, outcome };
+  });
 
+  // Package lessons go back to the package, not to a card (below).
+  const cashPlans = plans.filter((p) => p.paid && !p.target.packagePurchaseId && p.outcome.refundCents > 0);
+  const refunded = new Map();
+  if (cashPlans.length && booking.paymentId) {
+    const result = await refundLessonValue(booking.paymentId, {
+      allocations: cashPlans.map((p) => ({ bookingId: p.target._id, valueCents: p.outcome.refundCents })),
+      reason: `Cancellation — ${cashPlans[0].outcome.policyApplied}`,
+      issuedBy: actor.id,
+    });
+    for (const row of result.perBooking) refunded.set(row.bookingId, row.refundedCents);
+  }
+
+  let policyRefundTotal = 0;
+  const cancelled = [];
+
+  for (const { target, outcome } of plans) {
     target.status =
       role === "TUTOR"
         ? BOOKING_STATUS.CANCELLED_BY_TUTOR
@@ -1460,7 +1737,9 @@ export async function cancelBooking(id, { reason, cancelSeries }, actor) {
       reason,
       hoursBeforeStart: outcome.hoursBeforeStart,
       refundPercent: outcome.refundPercent,
-      refundCents: outcome.refundCents,
+      // What actually went back, which a credit-applied payment can make
+      // smaller than the policy's figure.
+      refundCents: refunded.get(String(target._id)) ?? (target.packagePurchaseId ? outcome.refundCents : 0),
       policyApplied: outcome.policyApplied,
     };
 
@@ -1484,6 +1763,13 @@ export async function cancelBooking(id, { reason, cancelSeries }, actor) {
     cancelled.push(target);
   }
 
+  // Nothing left on an unpaid checkout: it can no longer be paid for.
+  if (booking.paymentId && plans.some((p) => !p.paid)) {
+    await voidUnpaidPayment(booking.paymentId, {
+      reason: "The booking was cancelled before it was paid for.",
+    }).catch((error) => console.warn("[booking] unpaid checkout not voided:", error.message));
+  }
+
   /**
    * A cancelled package lesson goes back to the package, not to a card
    * (§41 Phase 2).
@@ -1496,7 +1782,6 @@ export async function cancelBooking(id, { reason, cancelSeries }, actor) {
    * costs a single-lesson purchaser.
    */
   const packageReturns = [];
-  const cashCancellations = [];
   for (const target of cancelled) {
     // A seat in a group session goes back into the session, so somebody on
     // the waiting list can be offered it (§41 Phase 2).
@@ -1506,31 +1791,15 @@ export async function cancelBooking(id, { reason, cancelSeries }, actor) {
       }).catch((error) => console.warn("[booking] group seat release failed:", error.message));
     }
 
-    if (!target.packagePurchaseId) {
-      cashCancellations.push(target);
-      continue;
-    }
-    if (target.cancellation?.refundPercent === 100) {
+    if (target.packagePurchaseId && target.cancellation?.refundPercent === 100) {
       const returned = await returnPackageSession(target.packagePurchaseId, target._id);
       if (returned.returned) packageReturns.push(target);
     }
   }
 
-  // Only lessons actually paid for on their own refund money. Summing every
-  // cancellation here would refund a package lesson twice over — once as a
-  // returned session and once as cash.
-  const cashRefund = cashCancellations.reduce(
-    (sum, target) => sum + (target.cancellation?.refundCents ?? 0),
-    0,
-  );
-
-  if (cashRefund > 0 && booking.paymentId && !booking.packagePurchaseId) {
-    await refundPayment(booking.paymentId, {
-      amountCents: cashRefund,
-      reason: `Cancellation — ${cancelled[0].cancellation.policyApplied}`,
-      issuedBy: actor.id,
-    });
-  }
+  // Only money actually returned to a card or as credit. Package lessons
+  // came back as sessions and are not counted twice.
+  const cashRefund = [...refunded.values()].reduce((sum, cents) => sum + cents, 0);
 
   // A tutor cancelling frees the slot again.
   if (role === "TUTOR") {
@@ -1553,6 +1822,10 @@ export async function cancelBooking(id, { reason, cancelSeries }, actor) {
 
   const abuse = await assessAbuse(actor, role, settings);
   await notifyCancellation(cancelled, role, cashRefund);
+  // Said in the conversation too, where the two of them are talking (R17.3).
+  await announceBookingCancelled(cancelled, role).catch((error) =>
+    console.warn("[booking] cancellation message not posted:", error.message),
+  );
 
   await recordAudit({
     actor,
@@ -1661,9 +1934,6 @@ async function notifyCancellation(bookings, role, refundCents) {
 
 // --- Completion and no-shows ----------------------------------------------
 
-/** A no-show can only be recorded against a lesson whose outcome is still open. */
-const NO_SHOW_REPORTABLE_STATUSES = [BOOKING_STATUS.CONFIRMED, BOOKING_STATUS.COMPLETED];
-
 export async function completeBooking(id, { outcome, tutorNotes }, actor) {
   const booking = await Booking.findById(id);
   if (!booking) throw new NotFoundError("That lesson no longer exists.");
@@ -1678,35 +1948,16 @@ export async function completeBooking(id, { outcome, tutorNotes }, actor) {
     );
   }
 
+  if (outcome === BOOKING_STATUS.NO_SHOW_STUDENT) {
+    // The tutor's "nobody came" is the same report as the no-show button,
+    // with the same window and the same settlement (R27.5, R27.7).
+    if (tutorNotes) booking.tutorNotes = tutorNotes;
+    return reportNoShow(id, { party: "STUDENT", note: tutorNotes, booking }, actor);
+  }
+
   booking.status = outcome;
   booking.completedAt = new Date();
   if (tutorNotes) booking.tutorNotes = tutorNotes;
-
-  if (outcome === BOOKING_STATUS.NO_SHOW_STUDENT) {
-    const settings = await getSettings();
-    const refund = resolveNoShow({
-      party: "STUDENT",
-      totalCents: booking.price.totalCents,
-      settings,
-    });
-    booking.cancellation = {
-      cancelledAt: new Date(),
-      cancelledBy: actor.id,
-      cancelledByRole: "TUTOR",
-      reason: "Student did not attend",
-      refundPercent: refund.refundPercent,
-      refundCents: refund.refundCents,
-      policyApplied: refund.policyApplied,
-    };
-    if (refund.refundCents > 0 && booking.paymentId) {
-      await refundPayment(booking.paymentId, {
-        amountCents: refund.refundCents,
-        reason: "Student no-show",
-        issuedBy: actor.id,
-      });
-    }
-  }
-
   await booking.save();
   await refreshTutorStats(booking.tutorProfileId);
 
@@ -1739,16 +1990,23 @@ export async function completeBooking(id, { outcome, tutorNotes }, actor) {
 }
 
 /**
- * Reporting that the other party did not attend (§26).
+ * Reporting that the other party did not attend (§26, R27.5).
  *
- * This reverses money — it can refund the learner in full and strip the
- * lesson out of the tutor's payout eligibility — so it is authorized against
- * the stored participants, and only ever against the *opposite* party: a
- * learner reports the tutor, a tutor reports the learner. An administrator
- * may record either, which is the documented adjudication path.
+ * This can move money, so it is authorized against the stored participants
+ * and only ever against the *opposite* party, and only on a CONFIRMED lesson
+ * that has ended, has not been paid out, and is still inside the window
+ * (`noShowReportWindowHours`). A lesson already completed, cancelled or under
+ * dispute has had its outcome decided.
+ *
+ * - A learner reporting the tutor opens a dispute (S2). Nothing is refunded
+ *   until an administrator decides it; a learner can no longer refund a
+ *   lesson by saying so.
+ * - A tutor reporting the learner records NO_SHOW_STUDENT and applies the
+ *   policy's student no-show refund, attributed to the lesson.
+ * - An administrator may record either outcome, outside the window too.
  */
-export async function reportNoShow(id, { party, note }, actor) {
-  const booking = await Booking.findById(id);
+export async function reportNoShow(id, { party, note, booking: loaded }, actor) {
+  const booking = loaded ?? (await Booking.findById(id));
   if (!booking) throw new NotFoundError("That lesson no longer exists.");
 
   const role = requireBookingRole(
@@ -1763,41 +2021,57 @@ export async function reportNoShow(id, { party, note }, actor) {
   if (party === "STUDENT" && role !== "TUTOR" && role !== "ADMIN") {
     throw new AuthorizationError("Only the tutor can report a student no-show.");
   }
-  if (new Date(booking.endAt) > new Date()) {
-    throw new BusinessRuleError("You can report a no-show once the lesson has finished.");
-  }
-  // A lesson that is already cancelled, already reported or under dispute has
-  // had its outcome decided; re-reporting it would refund it a second time.
-  if (!NO_SHOW_REPORTABLE_STATUSES.includes(booking.status)) {
-    throw new BusinessRuleError(
-      "This lesson is no longer open to a no-show report.",
-      "NOT_REPORTABLE",
-    );
-  }
 
   const settings = await getSettings();
-  const refund = resolveNoShow({ party, totalCents: booking.price.totalCents, settings });
+  const eligible = noShowReportEligibility(booking, { settings, enforceWindow: role !== "ADMIN" });
+  if (!eligible.ok) throw new BusinessRuleError(eligible.message, eligible.code);
 
-  booking.status =
-    party === "TUTOR" ? BOOKING_STATUS.NO_SHOW_TUTOR : BOOKING_STATUS.NO_SHOW_STUDENT;
+  if (party === "TUTOR" && role === "STUDENT") {
+    const { createDispute } = await import("./dispute.service");
+    const dispute = await createDispute(
+      {
+        bookingId: booking._id,
+        reason: DISPUTE_REASONS.TUTOR_NO_SHOW,
+        description: note || "The tutor did not attend the lesson.",
+      },
+      actor,
+    );
+    await recordAudit({
+      actor,
+      action: AUDIT_ACTIONS.BOOKING_NO_SHOW_REPORTED,
+      entityType: "Booking",
+      entityId: booking._id,
+      metadata: { party, role, disputeId: String(dispute.id), note },
+    });
+    return { ...toPlain(await Booking.findById(booking._id).lean()), disputeId: dispute.id };
+  }
+
+  // The money moves first, so a refund the payment cannot cover refuses the
+  // report rather than leaving a no-show recorded with nothing given back.
+  const refund = resolveNoShow({ party, totalCents: booking.price.totalCents, settings });
+  let refundedCents = 0;
+  if (refund.refundCents > 0 && booking.paymentId && !booking.packagePurchaseId) {
+    const result = await refundLessonValue(booking.paymentId, {
+      allocations: [{ bookingId: booking._id, valueCents: refund.refundCents }],
+      reason: `${party === "TUTOR" ? "Tutor" : "Student"} no-show`,
+      issuedBy: actor.id,
+    });
+    refundedCents = result.refundedCents;
+  }
+
+  booking.status = party === "TUTOR" ? BOOKING_STATUS.NO_SHOW_TUTOR : BOOKING_STATUS.NO_SHOW_STUDENT;
+  booking.completedAt = new Date();
   booking.cancellation = {
     cancelledAt: new Date(),
     cancelledBy: actor.id,
     cancelledByRole: role,
     reason: note,
     refundPercent: refund.refundPercent,
-    refundCents: refund.refundCents,
+    refundCents: refundedCents,
     policyApplied: refund.policyApplied,
   };
   await booking.save();
-
-  if (refund.refundCents > 0 && booking.paymentId) {
-    await refundPayment(booking.paymentId, {
-      amountCents: refund.refundCents,
-      reason: `${party === "TUTOR" ? "Tutor" : "Student"} no-show`,
-      issuedBy: actor.id,
-    });
-  }
+  await refreshTutorStats(booking.tutorProfileId);
 
   const otherParty = party === "TUTOR" ? booking.tutorUserId : booking.purchaserId;
   await notify({
@@ -1810,24 +2084,99 @@ export async function reportNoShow(id, { party, note }, actor) {
     entityId: booking._id,
   });
 
-  // A no-show reverses a settled lesson, so who asked for it is recorded.
+  // A no-show settles a lesson, so who recorded it is recorded.
   await recordAudit({
     actor,
     action: AUDIT_ACTIONS.BOOKING_NO_SHOW_REPORTED,
     entityType: "Booking",
     entityId: booking._id,
-    metadata: { party, role, refundCents: refund.refundCents, note },
+    metadata: { party, role, refundCents: refundedCents, note },
   });
 
-  // One missed lesson is life; a pattern of them is worth a look. The count
-  // is taken from the bookings themselves, not from this report (§41).
-  await checkNoShowPattern({
-    userId: party === "TUTOR" ? booking.tutorUserId : booking.purchaserId,
-    role: party,
-    bookingId: booking._id,
-  });
-
+  await settleNoShowPattern({ booking, party, settings });
   return toPlain(booking);
+}
+
+/**
+ * One missed lesson is life; a pattern of them is worth a look (R27.7) and a
+ * warning to the person missing them (R27.8). Counted from the bookings
+ * themselves, on every path that records a no-show, with the same two steps
+ * as repeated cancellations.
+ */
+async function settleNoShowPattern({ booking, party, settings }) {
+  const userId = party === "TUTOR" ? booking.tutorUserId : booking.purchaserId;
+  await checkNoShowPattern({ userId, role: party, bookingId: booking._id }).catch((error) =>
+    console.warn("[booking] no-show risk check failed:", error.message),
+  );
+
+  const since = addDays(new Date(), -(settings.risk?.signalWindowDays ?? 30));
+  const recent = await Booking.countDocuments({
+    [party === "TUTOR" ? "tutorUserId" : "purchaserId"]: userId,
+    status: party === "TUTOR" ? BOOKING_STATUS.NO_SHOW_TUTOR : BOOKING_STATUS.NO_SHOW_STUDENT,
+    startAt: { $gte: since },
+  });
+  const assessment = assessNoShowAbuse(recent, settings);
+  if (assessment.action !== "NONE") {
+    await notify({
+      userId,
+      type: NOTIFICATION_TYPES.BOOKING_CHANGED,
+      title: assessment.action === "WARN" ? "A note about missed lessons" : "Your account is under review",
+      body: assessment.message,
+      href: party === "TUTOR" ? "/tutor/bookings" : "/bookings",
+    });
+  }
+  return assessment;
+}
+
+/**
+ * Settle lessons nobody marked (R22.2), for the `lesson-completion` job.
+ *
+ * A CONFIRMED lesson whose no-show window has closed with no report and no
+ * dispute (either would have moved it off CONFIRMED) happened, as far as the
+ * platform can know: it becomes COMPLETED, which is what makes it reviewable
+ * and, after the hold, payable. Each lesson is claimed with a conditional
+ * update, so overlapping runs complete it once. Reads never wait on this —
+ * an ended lesson is already listed as past by the clock.
+ */
+export async function completeEndedLessons({ now = new Date(), limit = 200 } = {}) {
+  const settings = await getSettings();
+  const cutoff = lessonCompletionCutoff(settings, now);
+
+  const due = await Booking.find({ status: BOOKING_STATUS.CONFIRMED, endAt: { $lte: cutoff } })
+    .select("_id")
+    .sort({ endAt: 1 })
+    .limit(limit)
+    .lean();
+
+  const completed = [];
+  for (const { _id } of due) {
+    const booking = await Booking.findOneAndUpdate(
+      { _id, status: BOOKING_STATUS.CONFIRMED, endAt: { $lte: cutoff } },
+      { $set: { status: BOOKING_STATUS.COMPLETED, completedAt: now } },
+      { returnDocument: "after" },
+    ).lean();
+    if (!booking) continue;
+    completed.push(booking);
+
+    await qualifyReferralFor(booking.purchaserId).catch((error) =>
+      console.warn("[booking] referral qualification failed:", error.message),
+    );
+    await notify({
+      userId: booking.purchaserId,
+      type: NOTIFICATION_TYPES.BOOKING_COMPLETED,
+      title: "How did the lesson go?",
+      body: `Leave a review for your ${booking.courseName} lesson to help other families.`,
+      href: `/bookings/${booking._id}`,
+      entityType: "Booking",
+      entityId: booking._id,
+    });
+  }
+
+  for (const tutorProfileId of new Set(completed.map((b) => String(b.tutorProfileId)))) {
+    await refreshTutorStats(tutorProfileId);
+  }
+
+  return { examined: due.length, completed: completed.length };
 }
 
 // --- Reschedule ------------------------------------------------------------
@@ -1841,22 +2190,27 @@ export async function rescheduleBooking(id, { startAt, durationMinutes, reason }
   if (booking.status !== BOOKING_STATUS.CONFIRMED) {
     throw new BusinessRuleError("Only a confirmed lesson can be rescheduled.");
   }
+  // A seat in a group session is the session's hour, shared with everyone
+  // else in it; one learner cannot carry it somewhere else (§41 Phase 2).
+  if (booking.groupSessionId) {
+    throw new BusinessRuleError(
+      "This is a place in a group session, so it moves only if the session does.",
+      "GROUP_SEAT_NOT_RESCHEDULABLE",
+    );
+  }
 
   const settings = await getSettings();
   const duration = durationMinutes ?? booking.durationMinutes;
 
-  const [availability, clashes] = await Promise.all([
-    Availability.findOne({ tutorProfileId: booking.tutorProfileId }).lean(),
-    Booking.find({
-      tutorProfileId: booking.tutorProfileId,
-      _id: { $ne: booking._id },
-      status: { $in: BLOCKING_BOOKING_STATUSES },
-      startAt: { $lt: addMinutes(new Date(startAt), duration) },
-      endAt: { $gt: new Date(startAt) },
-    })
-      .select("startAt endAt")
-      .lean(),
-  ]);
+  const availability = await Availability.findOne({ tutorProfileId: booking.tutorProfileId }).lean();
+  const buffer = availability?.bufferMinutes ?? 0;
+  // The same busy time a new booking is checked against — group sessions and
+  // external calendars included (R14.4) — less this lesson's own hour.
+  const clashes = await tutorBusyPeriods(booking.tutorProfileId, {
+    from: addMinutes(new Date(startAt), -buffer),
+    to: addMinutes(new Date(startAt), duration + buffer),
+    excludeBookingId: booking._id,
+  });
 
   const check = isSlotBookable({
     availability,
@@ -1904,14 +2258,17 @@ export async function rescheduleBooking(id, { startAt, durationMinutes, reason }
     );
   }
 
-  const [raced] = withoutSettledClaims(
-    await Booking.find(overlapQuery([booking], booking.tutorProfileId, [booking._id]))
+  const [[racedBooking], racedSession] = await Promise.all([
+    Booking.find(overlapQuery([booking], booking.tutorProfileId, [booking._id]))
       .select("_id startAt groupSessionId")
-      .lean(),
-    [booking],
-  );
+      .lean()
+      .then((found) => withoutSettledClaims(found, [booking])),
+    liveGroupSessionOverlapping([booking], booking.tutorProfileId),
+  ]);
+  const raced =
+    racedSession ?? (racedBooking && String(racedBooking._id) < String(booking._id) ? racedBooking : null);
 
-  if (raced && String(raced._id) < String(booking._id)) {
+  if (raced) {
     await releaseSlots([booking], booking.tutorProfileId);
     Object.assign(booking, previous);
     await booking.save();
@@ -1974,11 +2331,14 @@ export async function rescheduleBooking(id, { startAt, durationMinutes, reason }
     channels: [NOTIFICATION_CHANNELS.IN_APP, NOTIFICATION_CHANNELS.EMAIL],
     email: (await brandedEmailTemplates()).bookingRescheduled({
       firstName: recipient?.firstName ?? "there",
-      booking: bookingEmailPayload(booking, ""),
+      booking: bookingEmailPayload(booking, "", { forTutor: role !== "TUTOR" }),
       previousLabel,
       reason,
     }),
   });
+
+  // The thread between the two says so too, once per move (R17.3).
+  await announceBookingRescheduled(booking, previous.startAt);
 
   return toPlain(booking);
 }
@@ -2078,7 +2438,7 @@ async function notifyBookingReminder(booking, reminder) {
       channels: [NOTIFICATION_CHANNELS.IN_APP, NOTIFICATION_CHANNELS.EMAIL],
       email: templates.bookingReminder({
         firstName: recipient.firstName,
-        booking: bookingEmailPayload(booking, recipient.otherName),
+        booking: bookingEmailPayload(booking, recipient.otherName, { forTutor: recipient.isTutor }),
         whenLabel: reminder.label,
         isTutor: recipient.isTutor,
       }),
@@ -2134,7 +2494,12 @@ export async function bookingSummary(actor) {
     upcoming,
     completed,
     awaitingReview,
-    nextLesson: nextLesson ? withReleasedMeeting(toPlain(nextLesson), actor) : null,
+    nextLesson: nextLesson
+      ? withReleasedMeeting(
+          actor.role === ROLES.TUTOR ? maskLearnersForTutor([toPlain(nextLesson)])[0] : toPlain(nextLesson),
+          actor,
+        )
+      : null,
   };
 }
 

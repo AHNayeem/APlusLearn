@@ -51,6 +51,11 @@ export const OAUTH_ERROR_MESSAGES = {
     title: "This account has been suspended",
     message: "Contact support if you think this is a mistake.",
   },
+  ACCOUNT_BANNED: {
+    tone: "danger",
+    title: "This account has been closed",
+    message: "Contact support if you think this is a mistake.",
+  },
   RATE_LIMITED: {
     tone: "warning",
     title: "Too many sign-in attempts",
@@ -86,6 +91,7 @@ export function oauthErrorCode(code) {
     case "EMAIL_NOT_SHARED":
     case "EMAIL_NOT_VERIFIED_BY_PROVIDER":
     case "ACCOUNT_SUSPENDED":
+    case "ACCOUNT_BANNED":
     case "RATE_LIMITED":
       return code;
     default:

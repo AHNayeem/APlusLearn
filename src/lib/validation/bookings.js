@@ -51,12 +51,24 @@ export const createBookingSchema = z
         type: z.enum(Object.values(IN_PERSON_LOCATIONS)),
         label: z.string().trim().max(120).optional(),
         addressLine: z.string().trim().max(200).optional(),
+        /** Where an OTHER location is (R26.5). Required for OTHER, below. */
+        description: z.string().trim().max(300).optional(),
         city: z.string().trim().max(80).optional(),
         postalCode: z.string().trim().toUpperCase().max(8).optional(),
         notes: z.string().trim().max(500).optional(),
       })
+      .refine((l) => l.type !== IN_PERSON_LOCATIONS.OTHER || (l.description ?? "").length >= 3, {
+        message: "Say where the lesson will take place.",
+        path: ["description"],
+      })
       .optional(),
     studentNotes: z.string().trim().max(1000).optional(),
+    /**
+     * The tutor request this booking answers (R18.10). A claim only: the
+     * service checks it is the purchaser's own live request and that this
+     * tutor is on it, and stores the ids *it* resolved, never these.
+     */
+    requestId: objectId.optional(),
   })
   .refine((d) => d.mode !== LESSON_MODES.ONLINE || !!d.meetingProvider, {
     message: "Choose a meeting platform for an online lesson.",

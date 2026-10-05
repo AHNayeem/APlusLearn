@@ -4,7 +4,7 @@ import { SearchX, Sparkles } from "lucide-react";
 import { connectToDatabase } from "@/lib/db/connect";
 import { courseSearchSchema } from "@/lib/validation/search";
 import {
-  listCourses, courseFacets, listGrades, listSubjects, listProvinces,
+  listCourses, courseFacets, listGrades, listSubjects, listProvinces, defaultProvinceCode,
 } from "@/services/curriculum.service";
 import { Button, EmptyState, Pagination, Skeleton } from "@/components/ui";
 import { CourseCard } from "@/components/course/CourseCard";
@@ -26,7 +26,7 @@ export async function generateMetadata({ searchParams }) {
     title,
     description: what
       ? `Every ${what} course APlus Learn covers. Filter by stream, grade and tutor availability, then find a tutor for the exact course on your child's timetable.`
-      : "Every Ontario course APlus Learn covers, from Grade 1 numeracy to MCV4U. Filter by grade, subject, stream and tutor availability.",
+      : "Every course APlus Learn covers, by province, grade and subject — with course codes where the province uses them. Filter by grade, subject, stream and tutor availability.",
     alternates: { canonical: "/courses" },
     // Filtered permutations shouldn't compete with the canonical course pages.
     robots: Object.keys(params).length > 2 ? { index: false, follow: true } : undefined,
@@ -55,10 +55,13 @@ export default async function CoursesPage({ searchParams }) {
 
 async function CoursesHeader({ params }) {
   await connectToDatabase();
+  // The searched province, else the first live one in the administrator's
+  // order — read from the data, never a literal (§6).
+  const province = params.province ?? (await defaultProvinceCode());
   const [provinces, grades, subjects] = await Promise.all([
     listProvinces({ activeOnly: false }),
-    listGrades({ provinceCode: params.province ?? "ON" }),
-    listSubjects(),
+    province ? listGrades({ provinceCode: province }) : [],
+    province ? listSubjects({ provinceCode: province }) : listSubjects(),
   ]);
 
   return (
@@ -68,12 +71,13 @@ async function CoursesHeader({ params }) {
           Browse courses
         </h1>
         <p className="mt-1 text-sm text-ink-500">
-          Search by the code on the report card — an Ontario course code maps to exactly one set
-          of curriculum expectations, so it&rsquo;s the most precise place to start.
+          Search by the code on the report card where your province uses one — a course code
+          maps to exactly one set of curriculum expectations, so it&rsquo;s the most precise place to start.
         </p>
         <RefineCourseSearch
           className="mt-5"
           provinces={provinces}
+          province={province ?? ""}
           grades={grades}
           subjects={subjects}
         />
@@ -85,8 +89,8 @@ async function CoursesHeader({ params }) {
 async function CourseResults({ params, rawParams }) {
   await connectToDatabase();
 
-  const province = params.province ?? "ON";
-  const query = { ...params, province };
+  const province = params.province ?? (await defaultProvinceCode());
+  const query = { ...params, province: province ?? undefined };
 
   const [result, facets, grades, subjects] = await Promise.all([
     listCourses({ ...query, pageSize: params.pageSize ?? 24 }),

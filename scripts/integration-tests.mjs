@@ -144,7 +144,51 @@ async function main() {
   }
 }
 
+/**
+ * Area suites — `scripts/integration/*.mjs`.
+ *
+ * Each exports `default async function (kit)`; the kit is this file's own
+ * helpers, so an area suite reads exactly like a section written inline.
+ * `INTEGRATION_ONLY=<regex>` runs only the area suites whose file name
+ * matches and skips the inline sections.
+ */
+async function connectForSuite() {
+  const uri = process.env.MONGODB_URI;
+  if (!uri) return false;
+  if (mongoose.connection.readyState === 1) return true;
+  try {
+    await mongoose.connect(uri, { serverSelectionTimeoutMS: 2500 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function runAreaSuites() {
+  const { pathToFileURL, fileURLToPath } = await import("node:url");
+  const dir = fileURLToPath(new URL("./integration/", import.meta.url));
+  let files = [];
+  try {
+    files = (await readdir(dir)).filter((name) => name.endsWith(".mjs")).sort();
+  } catch {
+    return;
+  }
+  const only = process.env.INTEGRATION_ONLY ? new RegExp(process.env.INTEGRATION_ONLY, "i") : null;
+  const kit = { section, check, skip, throws, stubFetch, fakePng, fakePdf, connectForSuite, mongoose, randomUUID };
+  for (const file of files) {
+    if (only && !only.test(file)) continue;
+    const suite = await import(pathToFileURL(`${dir}${file}`).href);
+    try {
+      await suite.default(kit);
+    } catch (error) {
+      check(`${file} ran to completion`, false, error?.stack?.split("\n").slice(0, 3).join(" | "));
+    }
+  }
+}
+
 async function runSections() {
+  if (process.env.INTEGRATION_ONLY) return runAreaSuites();
+
   await configurationTests();
   await paymentTests();
   await webhookTests();
@@ -186,6 +230,7 @@ async function runSections() {
   await studentAnalyticsTests();
   await realtimeTests();
   await installPromptTests();
+  await runAreaSuites();
 }
 
 /**
@@ -2046,8 +2091,9 @@ async function geocodingTests() {
   const local = new LocalTableGeocodingProvider();
   check("the development table still resolves a known FSA",
     (await local.lookup({ postalCode: "M5V 3L9" }))?.city === "Toronto");
-  check("an unknown FSA degrades to the province rather than nothing",
-    (await local.lookup({ postalCode: "K9Z 1A1" }))?.precision === "PROVINCE");
+  // R29.1: an unknown place is unknown — never the province's first city.
+  check("an unknown FSA resolves to nothing, not to another city in the province",
+    (await local.lookup({ postalCode: "K9Z 1A1" })) === null);
 
   const toronto = [-79.3832, 43.6532];
   const mississauga = [-79.6441, 43.589];
@@ -2496,8 +2542,9 @@ async function meetingSelectionTests() {
     check("production honours an explicit list of platforms",
       getMeetingProvider("ZOOM").name === "ZOOM" &&
         getMeetingProvider("MICROSOFT_TEAMS").name === "MICROSOFT_TEAMS");
+    // R25.1: and production never falls back to a fabricated room either.
     check("a platform left out of the list is NOT used even with credentials present",
-      getMeetingProvider("GOOGLE_MEET").name === "MOCK");
+      getMeetingProvider("GOOGLE_MEET").name === "NONE");
   });
 
   await withEnv({ APP_ENV: "production", MEETING_PROVIDER: "zoom,google_meet", ...NONE, ...ZOOM }, () => {
@@ -9473,6 +9520,7 @@ async function disputeTests() {
     Settings,
   } = await import("@/models");
   const disputes = await import("@/services/dispute.service");
+  const payments = await import("@/services/payment.service");
   const {
     DISPUTE_STATUS, DISPUTE_REASONS, BOOKING_STATUS, PAYMENT_STATUS, ROLES,
     RESOLVED_DISPUTE_STATUSES, OPEN_DISPUTE_STATUSES,
@@ -9507,10 +9555,11 @@ async function disputeTests() {
   const madeDisputes = [];
 
   // Far enough back that the lessons have genuinely finished — a dispute can
-  // only be raised on a lesson that is over — and old enough to sit outside
-  // every analytics window, so this fixture cannot move a reported figure.
-  // Stepped per fixture so two of these can never collide with each other.
-  let pastCursor = new Date("2024-03-03T14:00:00.000Z");
+  // only be raised on a lesson that is over — and recent enough to be inside
+  // the dispute window (S4, `disputeWindowDays`). The analytics sections run
+  // before this one and every fixture is removed below, so no reported
+  // figure is moved. Stepped per fixture so two can never collide.
+  let pastCursor = new Date(Date.now() - 20 * 24 * 60 * 60 * 1000);
 
   /**
    * A finished, fully paid lesson — the only shape a dispute can be raised
@@ -9868,27 +9917,25 @@ async function disputeTests() {
 
     // --- 8. A payment that has already given everything back ---------------
     //
-    // The first dispute took the whole lesson price. A second one on the same
-    // lesson must not be able to award it again — the ledger would refuse the
-    // refund, and without this the dispute record would claim one anyway.
-    const secondBite = await disputes.createDispute(
-      {
-        bookingId: String(fullBooking._id),
-        reason: DISPUTE_REASONS.BILLING,
-        description: "A second dispute on a lesson whose money has already been returned.",
-      },
-      purchaser,
+    // The first dispute took the whole lesson price, which settled the lesson
+    // as cancelled. A second dispute must not be able to award it again —
+    // and since S4 it cannot even be opened: a cancelled lesson has no
+    // outcome left for a dispute to change.
+    const secondBite = await throws(
+      () =>
+        disputes.createDispute(
+          {
+            bookingId: String(fullBooking._id),
+            reason: DISPUTE_REASONS.BILLING,
+            description: "A second dispute on a lesson whose money has already been returned.",
+          },
+          purchaser,
+        ),
+      (e) => e.status === 422,
     );
-    madeDisputes.push(secondBite.id);
-
-    const secondDecision = await disputes.resolveDispute(
-      secondBite.id,
-      { resolution: "RESOLVED_REFUND", note: "Nothing is left to refund on this one." },
-      admin,
-    );
-    check("a refund decision on an already-refunded lesson issues nothing",
-      secondDecision.refundIssuedCents === 0);
-    check("and the ledger is untouched by it",
+    check("a lesson already refunded in full cannot be disputed again", secondBite.threw && secondBite.matched,
+      secondBite.error?.message);
+    check("and the ledger is untouched by the attempt",
       (await paymentDoc(fullPayment._id)).refundedCents === 6000);
 
     const disputeTotal = (
@@ -9913,44 +9960,34 @@ async function disputeTests() {
     check("and a new dispute cannot ask for what an earlier one already returned",
       askingTooMuch.threw && askingTooMuch.matched, askingTooMuch.error?.message);
 
-    // --- 9. A refund the ledger refuses leaves the dispute decidable -------
+    // --- 9. A lesson priced above what was collected ------------------------
     //
-    // A lesson priced above what was actually collected. The decision asks
-    // for the lesson price, the ledger refuses, and the dispute has to end up
-    // exactly where it started rather than closed on a refund that never
-    // happened.
-    const { dispute: mismatched, payment: shortPayment } = await openDispute(purchaser, {
+    // Credit, a discount or a data fault can leave a lesson priced above what
+    // its payment actually took. A full refund returns what was collected —
+    // never the list price — so the decision succeeds instead of failing on a
+    // refund the ledger would refuse (R16.7), and the ledger still refuses any
+    // direct attempt to send back more than it holds.
+    const { dispute: mismatched, booking: shortBooking, payment: shortPayment } = await openDispute(purchaser, {
       lesson: { totalCents: 9000, paidTotal: 6000 },
     });
-
-    const refused = await throws(
-      () =>
-        disputes.resolveDispute(
-          mismatched.id,
-          { resolution: "RESOLVED_REFUND", note: "Refunding more than was ever collected." },
-          admin,
-        ),
+    const ledgerOverAsk = await throws(
+      () => payments.refundPayment(shortPayment._id, { amountCents: 9000, reason: "More than was collected" }),
       (e) => e.code === "REFUND_EXCEEDS_BALANCE",
     );
-    check("a decision whose refund the ledger refuses fails",
-      refused.threw && refused.matched, refused.error?.message);
-
-    const released = await disputeDoc(mismatched.id);
-    check("and leaves the dispute open for another attempt",
-      OPEN_DISPUTE_STATUSES.includes(released.status), released.status);
-    check("with nothing recorded as decided",
-      !released.resolvedAt && !released.resolvedBy && (released.refundIssuedCents ?? 0) === 0);
-    check("and nothing taken from the payment",
+    check("the ledger refuses to refund more than it collected", ledgerOverAsk.threw && ledgerOverAsk.matched, ledgerOverAsk.error?.code);
+    check("and the refusal takes nothing from the payment",
       ((await paymentDoc(shortPayment._id)).refundedCents ?? 0) === 0);
 
-    const retried = await disputes.resolveDispute(
+    const collected = await disputes.resolveDispute(
       mismatched.id,
-      { resolution: "RESOLVED_PARTIAL_REFUND", refundCents: 6000, note: "Returning what was paid." },
+      { resolution: "RESOLVED_REFUND", note: "Refunding the lesson." },
       admin,
     );
-    check("so the administrator can decide it correctly on the second attempt",
-      retried.status === DISPUTE_STATUS.RESOLVED_PARTIAL_REFUND &&
-        retried.refundIssuedCents === 6000);
+    check("a full refund returns exactly what was collected",
+      collected.refundIssuedCents === 6000 && (await paymentDoc(shortPayment._id)).refundedCents === 6000,
+      String(collected.refundIssuedCents));
+    check("and records it against the lesson for the payout",
+      (await bookingDoc(shortBooking._id)).refundedCents === 6000);
 
     // --- 10. Two administrators, at the same moment ------------------------
     const { dispute: raced, payment: racedPayment } = await openDispute();
@@ -11046,10 +11083,12 @@ async function rateLimitTests() {
       ["x-real-ip", "10.0.0.1"],
     ]);
     const request = { headers: { get: (name) => headers.get(name) ?? null } };
-    check("the caller's address comes from the proxy header, left-most first",
-      clientKey(request) === "203.0.113.7");
+    // S11: the left-most X-Forwarded-For entry is whatever the client wrote,
+    // so with no trusted-hop count the platform's own X-Real-IP is used.
+    check("the caller's address comes from the trusted proxy header, not the client-written one",
+      clientKey(request) === "10.0.0.1");
     check("and a suffix keeps two limits on one address apart",
-      clientKey(request, "login") === "203.0.113.7:login");
+      clientKey(request, "login") === "10.0.0.1:login");
     check("with a sensible fallback when there is no proxy at all",
       clientKey({ headers: { get: () => null } }, "login") === "local:login");
 
@@ -11483,8 +11522,17 @@ async function attachmentTests() {
     check("and an id that is not an attachment resolves to nothing",
       guessed.threw && guessed.matched);
 
+    // S8: an administrator is not a participant. They reach a thread's files
+    // only once it has been reported into the moderation queue.
+    const adminUnreported = await throws(
+      () => messages.readMessageAttachment(attachment.id, admin),
+      (e) => e.status === 403,
+    );
+    check("an administrator cannot open a file in a thread nobody reported",
+      adminUnreported.threw && adminUnreported.matched);
+    await Conversation.updateOne({ _id: sent.conversationId }, { $set: { reportStatus: "OPEN" } });
     const byAdmin = await messages.readMessageAttachment(attachment.id, admin);
-    check("an administrator can, for moderation", byAdmin.buffer.length === 2048);
+    check("an administrator can once it is reported, for moderation", byAdmin.buffer.length === 2048);
 
     const adminRead = await AuditLog.findOne({
       action: "ATTACHMENT_ADMIN_VIEWED",

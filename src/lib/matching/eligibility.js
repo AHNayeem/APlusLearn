@@ -49,9 +49,41 @@ export function matchCandidateQuery(request) {
   return query;
 }
 
-/** A request that is not open cannot gain new matches. */
-export function requestAcceptsMatches(request) {
-  return request?.status === REQUEST_STATUS.OPEN;
+/**
+ * Whether a request is live right now (R18.11).
+ *
+ * OPEN alone is not enough: the daily `request-expiry` job is what moves an
+ * aged-out request to EXPIRED, and no read or write may depend on that job
+ * having run. So "live" is derived from the clock on every call — OPEN, and
+ * either no expiry or one still in the future — and the job only settles the
+ * stored record afterwards.
+ */
+export function isRequestLive(request, now = new Date()) {
+  if (request?.status !== REQUEST_STATUS.OPEN) return false;
+  if (!request.expiresAt) return true;
+  return new Date(request.expiresAt).getTime() > new Date(now).getTime();
+}
+
+/** OPEN but past its expiry — expired in everything but the stored status. */
+export function isRequestLapsed(request, now = new Date()) {
+  return request?.status === REQUEST_STATUS.OPEN && !isRequestLive(request, now);
+}
+
+/**
+ * The same rule as `isRequestLive`, as a MongoDB filter, for the reads that
+ * select live requests (the tutor board, the per-family open-request cap).
+ * `expiresAt: null` matches both an explicit null and an absent field.
+ */
+export function liveRequestFilter(now = new Date()) {
+  return {
+    status: REQUEST_STATUS.OPEN,
+    $or: [{ expiresAt: null }, { expiresAt: { $gt: new Date(now) } }],
+  };
+}
+
+/** A request that is not live cannot gain new matches. */
+export function requestAcceptsMatches(request, now = new Date()) {
+  return isRequestLive(request, now);
 }
 
 /**

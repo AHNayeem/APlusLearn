@@ -7,10 +7,8 @@ import {
   ROLES, TUTOR_STATUS, TUTOR_STATUS_LABELS, LESSON_MODE_LABELS,
   QUALIFICATION_LABELS, VERIFICATION_STATUS,
 } from "@/constants";
-import { TutorApplication } from "@/models";
-import { toPlain } from "@/lib/utils/serialize";
-import { listVerificationRecords } from "@/services/verification.service";
-import { Badge, Card, CardBody, CardHeader } from "@/components/ui";
+import { getApplicationForReview } from "@/services/tutor.service";
+import { Avatar, Badge, Card, CardBody, CardHeader } from "@/components/ui";
 import { DashboardPage, PageHeader } from "@/components/layout/DashboardShell";
 import { ApplicationReview } from "@/components/admin/ApplicationReview";
 import { formatDate, formatRate, formatMoney } from "@/lib/utils/format";
@@ -25,18 +23,15 @@ export default async function AdminApplicationDetailPage({ params }) {
   await enforceRole(ROLES.ADMIN, `/admin/applications/${id}`);
   await connectToDatabase();
 
-  const doc = await TutorApplication.findById(id)
-    .populate("userId", "firstName lastName email phone city province createdAt emailVerifiedAt")
-    .populate("tutorProfileId")
-    .lean();
+  // Loaded by the id on the application, not populated through it: before
+  // submission that id is only a reservation, and the documents uploaded in
+  // the wizard already hang off it (R13.11).
+  const review = await getApplicationForReview(id);
+  if (!review) notFound();
 
-  if (!doc) notFound();
-
-  const application = toPlain(doc);
-  const profile = application.tutorProfileId;
+  const { application, profile, verification } = review;
   const user = application.userId;
 
-  const verification = profile ? await listVerificationRecords(profile.id) : [];
   const data = application.data ?? {};
 
   return (
@@ -65,6 +60,13 @@ export default async function AdminApplicationDetailPage({ params }) {
           <Card>
             <CardHeader title="Applicant" />
             <CardBody>
+              {/* The photo families will see on every card (R13.2). */}
+              <div className="mb-4 flex items-center gap-3">
+                <Avatar src={user?.avatarUrl} name={`${user?.firstName ?? ""} ${user?.lastName ?? ""}`} size="lg" />
+                <p className="text-sm text-ink-600">
+                  {user?.avatarUrl ? "Profile photo uploaded" : "No profile photo uploaded yet"}
+                </p>
+              </div>
               <dl className="grid gap-4 text-sm sm:grid-cols-2">
                 <Row icon={<Mail className="size-3.5" />} label="Email" value={user?.email} />
                 <Row icon={<Phone className="size-3.5" />} label="Phone" value={user?.phone} />
@@ -162,6 +164,12 @@ export default async function AdminApplicationDetailPage({ params }) {
                     </Badge>
                   ))}
                 </div>
+                {profile?.otherCredentials?.length > 0 && (
+                  <p className="mt-3 text-sm">
+                    <span className="text-ink-500">Other credentials: </span>
+                    {profile.otherCredentials.join(", ")}
+                  </p>
+                )}
                 {profile?.octNumber && (
                   <p className="mt-3 text-sm">
                     <span className="text-ink-500">OCT number: </span>
@@ -277,7 +285,11 @@ export default async function AdminApplicationDetailPage({ params }) {
         </div>
 
         <div className="space-y-6">
-          <ApplicationReview application={application} verification={verification} />
+          <ApplicationReview
+            application={application}
+            verification={verification}
+            education={profile?.education ?? []}
+          />
 
           <Card>
             <CardHeader

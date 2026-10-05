@@ -6,11 +6,12 @@ import { Button, Card, CardBody, Reveal, RevealGroup, RevealItem } from "@/compo
 import { PageHero } from "@/components/marketing/PageHero";
 import { Section } from "@/components/home/Sections";
 import { getAppConfig } from "@/services/settings.service";
+import { supportResponseLabel } from "@/lib/utils/format";
 
 export const metadata = {
   title: "Support",
   description:
-    "Get help with bookings, payments, refunds, verification or safety on APlus Learn. We reply within one business day.",
+    "Get help with bookings, payments, refunds, verification or safety on APlus Learn. A person reads every message.",
   alternates: { canonical: "/support" },
 };
 
@@ -54,14 +55,16 @@ const TOPICS = [
 ];
 
 export default async function SupportPage() {
-  const { contact } = await getAppConfig();
+  const { contact, policy } = await getAppConfig();
+  // The promised reply time is the operator's setting, worded one way (§33).
+  const reply = supportResponseLabel(policy);
 
   return (
     <>
       <PageHero
         eyebrow="Support"
         title="Get help"
-        description="Most answers are in the FAQ. If yours isn't, email us — a person reads every message and we reply within one business day."
+        description={`Most answers are in the FAQ. If yours isn't, email us — a person reads every message and we usually reply within ${reply}.`}
       >
         <div className="flex flex-wrap gap-3">
           <Button href={`mailto:${contact.supportEmail}`} size="lg" iconLeft={<Mail className="size-4" />}>
@@ -129,7 +132,7 @@ export default async function SupportPage() {
                           {contact.supportEmail}
                         </a>
                         <p className="mt-0.5 text-xs text-ink-500">
-                          Replies within one business day
+                          Usually replies within {reply}
                         </p>
                       </div>
                     </li>

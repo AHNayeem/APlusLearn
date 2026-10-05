@@ -1,266 +1,303 @@
-import { notFound } from "next/navigation";
-import Link from "next/link";
-import { ArrowRight, MapPin, Video, Users } from "lucide-react";
+import { cache } from "react";
+import { notFound, permanentRedirect } from "next/navigation";
+import { ArrowRight, MapPin, Video } from "lucide-react";
 import { connectToDatabase } from "@/lib/db/connect";
-import { getCourseByCode, listProvinces } from "@/services/curriculum.service";
-import { searchTutors } from "@/services/search.service";
-import { CITY_CENTROIDS, SERVICE_CITIES } from "@/lib/geo";
-import { deslugify } from "@/lib/utils/slug";
-import { formatMoney } from "@/lib/utils/format";
+import { getProvince } from "@/services/curriculum.service";
 import {
-  Badge, Button, Card, CardBody, EmptyState, Reveal, RevealGroup, RevealItem,
-} from "@/components/ui";
-import { TutorCard } from "@/components/tutor/TutorCard";
+  resolveTopicCity, topicSearchParams, citiesWithTutors, coursePath,
+} from "@/services/landing.service";
+import { searchTutors } from "@/services/search.service";
+import { siteBaseUrl } from "@/lib/config/base-url";
+import { formatMoney, formatNumber } from "@/lib/utils/format";
+import { Badge, Button, Card, CardBody, Reveal } from "@/components/ui";
 import { PageHero } from "@/components/marketing/PageHero";
 import { Section, Faq } from "@/components/home/Sections";
-import { SITE } from "@/constants";
+import { JsonLd } from "@/components/seo/JsonLd";
+import { Breadcrumbs, LandingHeading, TutorResults, CityLinks } from "@/components/seo/Landing";
 
 /**
- * Course + city landing page (§29).
+ * Topic + city landing page (§29, R32.2–R32.4, R32.6, R32.8).
  *
- * URL shape: /tutors/mhf4u/scarborough
+ * URL shape: /tutors/:topic/:city, where the topic is any of
  *
- * This is the long-tail counterpart to the curriculum page — the search a
- * parent actually types when they want someone who can come to them.
+ *   /tutors/mhf4u/scarborough            a course code
+ *   /tutors/mathematics/scarborough      a subject  (/tutors/math/… redirects here)
+ *   /tutors/grade-12-mathematics/…       a grade + subject (grade-12-math redirects)
+ *   /tutors/calculus/toronto             a course alias — redirects to the code
+ *
+ * Both segments are resolved from the database (`resolveTopicCity`); the
+ * city decides the province, so "calculus" in Toronto and in Vancouver are
+ * two different courses. A city search cannot locate is never swapped for a
+ * nearby big one: it only resolves when a tutor gives it as their own city,
+ * and then the page lists tutors by that exact city. Anything unresolvable
+ * is a real 404.
+ *
+ * The tutor list is `searchTutors` with the same parameters the search page
+ * would send, so this page and `/find-a-tutor` cannot disagree.
  */
 
 export const revalidate = 3600;
 
-function cityFromSlug(slug) {
-  const key = String(slug).replace(/-/g, " ").toLowerCase();
-  return CITY_CENTROIDS[key] ?? CITY_CENTROIDS[key.replace(/\s+/g, "")] ?? null;
+const PAGE_SIZE = 9;
+
+const load = cache(async (topic, city) => {
+  await connectToDatabase();
+  const hit = await resolveTopicCity({ topic, city });
+  if (!hit) return null;
+
+  const [nearby, province] = await Promise.all([
+    searchTutors({ ...topicSearchParams(hit), page: 1, pageSize: PAGE_SIZE, sort: "RELEVANCE" }),
+    getProvince(hit.topic.provinceCode),
+  ]);
+  return { ...hit, nearby, province };
+});
+
+/** "MHF4U", "Mathematics", "Grade 12 mathematics" — what the page is about. */
+function topicLabel(topic) {
+  if (topic.kind === "COURSE") return topic.course.code ?? topic.course.name;
+  if (topic.kind === "GRADE_SUBJECT") return `${topic.grade.name} ${topic.subject.name.toLowerCase()}`;
+  return topic.subject.name;
+}
+
+/** The topic's full name, for descriptions: "MHF4U (Advanced Functions)". */
+function topicFullName(topic) {
+  if (topic.kind === "COURSE" && topic.course.code) return `${topic.course.code} (${topic.course.name})`;
+  return topicLabel(topic);
 }
 
 export async function generateMetadata({ params }) {
-  // The segment is named `slug` to match the sibling tutor-profile route;
-  // here it always carries a course code.
-  const { slug: code, city } = await params;
-  await connectToDatabase();
+  const { slug, city } = await params;
+  const hit = await load(slug, city);
+  if (!hit) return { title: "Page not found", robots: { index: false, follow: false } };
 
-  const course = await getCourseByCode(code);
-  const location = cityFromSlug(city);
-
-  if (!course || !location) return { title: "Not found" };
+  const label = topicLabel(hit.topic);
+  const where = hit.province ? `${hit.city.name}, ${hit.province.name}` : hit.city.name;
+  const title = `${label} tutors in ${hit.city.name}`;
+  const description = `Find ${topicFullName(hit.topic)} tutors in ${where}. Compare rates and reviews, then book online or in-person lessons.`;
 
   return {
-    title: `${course.code} tutors in ${location.city}`,
-    description: `Find verified ${course.code} (${course.name}) tutors in ${location.city}, ${location.province}. Compare rates and reviews, then book online or in-person lessons.`,
-    alternates: { canonical: `/tutors/${code.toLowerCase()}/${city}` },
+    title,
+    description,
+    alternates: { canonical: hit.canonicalPath },
+    openGraph: { title, description },
+    // A page with nobody on it is not worth a search result; it stays
+    // reachable for the visitor who followed a link to it.
+    ...(hit.nearby.total === 0 ? { robots: { index: false, follow: true } } : {}),
   };
 }
 
-export default async function CourseCityPage({ params }) {
-  const { slug: code, city } = await params;
-  await connectToDatabase();
+export default async function TopicCityPage({ params }) {
+  const { slug, city } = await params;
+  const hit = await load(slug, city);
+  if (!hit) notFound();
+  if (!hit.canonical) permanentRedirect(hit.canonicalPath);
 
-  const course = await getCourseByCode(code);
-  const location = cityFromSlug(city);
-  if (!course || !location) notFound();
+  const { topic, city: place, nearby, province } = hit;
+  // A city search cannot locate is only a page because tutors list it as
+  // theirs; if none of them teach this topic, there is nothing to show.
+  if (!place.coordinates && nearby.total === 0) notFound();
 
-  const provinces = await listProvinces({ activeOnly: true });
-  const provinceSlug =
-    provinces.find((p) => p.code === course.provinceCode)?.slug ?? "ontario";
+  const label = topicLabel(topic);
+  const lower = topic.kind === "COURSE" ? label : label.toLowerCase();
+  const courseCode = topic.kind === "COURSE" ? topic.course.code : undefined;
 
-  // In-person first (that's what the city qualifier implies), then online as a
-  // fallback so the page is never empty in a thin market.
-  const [inPerson, online] = await Promise.all([
+  const [online, otherCities, baseUrl] = await Promise.all([
     searchTutors({
-      courseCode: course.code,
-      province: course.provinceCode,
-      city: location.city,
-      mode: "IN_PERSON",
-      distanceKm: 25,
-      page: 1,
-      pageSize: 6,
-      sort: "DISTANCE",
-    }),
-    searchTutors({
-      courseCode: course.code,
-      province: course.provinceCode,
-      mode: "ONLINE",
+      ...topicSearchParams(hit, { mode: "ONLINE", withCity: false }),
       page: 1,
       pageSize: 3,
       sort: "RELEVANCE",
     }),
+    citiesWithTutors({
+      provinceCode: topic.provinceCode,
+      courseId: topic.kind === "COURSE" ? topic.course.id : undefined,
+      subjectSlug: topic.kind === "COURSE" ? undefined : topic.subject.slug,
+      gradeLevel: topic.kind === "GRADE_SUBJECT" ? topic.grade.level : undefined,
+      limit: 13,
+    }),
+    siteBaseUrl(),
   ]);
 
-  const rates = inPerson.items.map((t) => t.displayRateCents ?? t.hourlyRateCents);
+  // Online tutors already listed above are not listed twice.
+  const shown = new Set(nearby.items.map((t) => t.id));
+  const onlineOnly = online.items.filter((t) => !shown.has(t.id));
+
+  const query = new URLSearchParams(topicSearchParams(hit));
+  query.delete("mode");
+  const searchHref = `/find-a-tutor?${query.toString()}`;
+
+  const rates = nearby.items.map((t) => t.displayRateCents ?? t.hourlyRateCents).filter(Boolean);
   const minRate = rates.length ? Math.min(...rates) : null;
 
-  const cityFaqs = [
+  const upPath =
+    topic.kind === "COURSE" && province
+      ? coursePath(province.slug, topic.course)
+      : topic.kind === "GRADE_SUBJECT" && province
+        ? `/${province.slug}/${topic.grade.slug}/${topic.subject.slug}`
+        : province
+          ? `/${province.slug}/${topic.subject.slug}`
+          : null;
+
+  const faqs = [
     {
-      q: `Are there ${course.code} tutors near me in ${location.city}?`,
-      a: inPerson.total
-        ? `Yes — ${inPerson.total} ${inPerson.total === 1 ? "tutor teaches" : "tutors teach"} ${course.code} and travel within ${location.city}. Each profile shows roughly how far away they are, and you can filter by distance.`
-        : `We don't have a ${course.code} tutor travelling to ${location.city} right now, but ${online.total} ${online.total === 1 ? "tutor teaches" : "tutors teach"} it online. You can also post a request and we'll notify you when a local tutor joins.`,
+      q: `Are there ${lower} tutors near me in ${place.name}?`,
+      a: nearby.total
+        ? `Yes — ${formatNumber(nearby.total)} ${nearby.total === 1 ? "tutor teaches" : "tutors teach"} ${lower} ${place.coordinates ? `in or around ${place.name}` : `and list ${place.name} as their city`}. ${place.coordinates ? "Each profile shows roughly how far away they are." : ""}`.trim()
+        : `No ${lower} tutor lists ${place.name} yet${online.total ? `, but ${formatNumber(online.total)} ${online.total === 1 ? "tutor teaches" : "tutors teach"} it online` : ""}. You can also post a request so tutors who join can respond.`,
     },
     {
-      q: `Where do in-person ${course.code} lessons take place?`,
-      a: "Wherever you both agree — your home, a branch of the public library, or another public place. You choose when booking, and your address is only shared with the tutor once the lesson is confirmed.",
+      q: `Where do in-person ${lower} lessons take place?`,
+      a: "Wherever you both agree — your home, a public library, or another public place. You choose when booking, and your address is only shared with the tutor once the lesson is confirmed.",
     },
     {
-      q: `Is online cheaper than in person in ${location.city}?`,
-      a: "Often slightly, since there's no travel time involved. Many tutors offer both and charge the same rate for each. You can compare directly in search.",
+      q: `Can ${lower} lessons be online instead?`,
+      a: "Yes, with any tutor who offers online lessons. A meeting link is generated when you book, and many tutors offer both formats.",
     },
   ];
 
   return (
     <>
+      <Breadcrumbs
+        baseUrl={baseUrl}
+        items={[
+          { label: "Home", href: "/" },
+          ...(province ? [{ label: province.name, href: `/${province.slug}` }] : []),
+          ...(upPath ? [{ label: `${label} tutors`, href: upPath }] : []),
+          { label: place.name, href: hit.canonicalPath },
+        ]}
+      />
+
       <PageHero
-        eyebrow={`${location.city}, ${location.province}`}
-        title={`${course.code} tutors in ${location.city}`}
-        description={`${course.name} — find a verified tutor who can teach in person around ${location.city}, or online from anywhere in ${course.provinceCode}.`}
+        eyebrow={province ? `${place.name}, ${province.name}` : place.name}
+        title={`${label} tutors in ${place.name}`}
+        description={
+          topic.kind === "COURSE"
+            ? `${topic.course.name} — tutors who teach it around ${place.name}, in person or online.`
+            : `${label} tutors around ${place.name}, in person or online${province ? `, for the ${province.name} curriculum` : ""}.`
+        }
       >
         <div className="flex flex-wrap items-center gap-3">
-          <Button
-            href={`/find-a-tutor?courseCode=${course.code}&city=${encodeURIComponent(location.city)}&province=${course.provinceCode}`}
-            size="lg"
-            iconRight={<ArrowRight className="size-4" />}
-          >
-            See all tutors
+          <Button href={searchHref} size="lg" iconRight={<ArrowRight className="size-4" />}>
+            Search these tutors
           </Button>
-          {inPerson.total > 0 && (
+          {nearby.total > 0 && (
             <Badge tone="success">
-              {inPerson.total} available near {location.city}
+              {formatNumber(nearby.total)} {nearby.total === 1 ? "tutor" : "tutors"} in {place.name}
             </Badge>
           )}
         </div>
       </PageHero>
 
-      <Section tone="muted">
-        <Reveal>
-          <h2 className="flex items-center gap-2 text-2xl font-extrabold tracking-tight text-ink-900">
-            <MapPin className="size-5 text-brand-600" />
-            In person around {location.city}
-          </h2>
-        </Reveal>
-
-        {inPerson.items.length === 0 ? (
-          <EmptyState
-            className="mt-6"
-            icon={<MapPin className="size-7" />}
-            title={`No ${course.code} tutors travelling to ${location.city} yet`}
-            description="Online tutors teach the same course from anywhere in the province — or post a request and we'll notify you when a local tutor joins."
-            action={
-              <Button
-                href={`/find-a-tutor?courseCode=${course.code}&mode=ONLINE&province=${course.provinceCode}`}
-              >
-                See online tutors
-              </Button>
-            }
-            secondaryAction={
-              <Button href="/requests/new" variant="secondary">
-                Post a request
-              </Button>
-            }
-          />
-        ) : (
-          <RevealGroup className="mt-6 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
-            {inPerson.items.map((tutor) => (
-              <RevealItem key={tutor.id}>
-                <TutorCard tutor={tutor} courseCode={course.code} />
-              </RevealItem>
-            ))}
-          </RevealGroup>
-        )}
+      <Section tone="muted" align="start">
+        <LandingHeading
+          title={
+            <span className="flex items-center gap-2">
+              <MapPin className="size-5 text-brand-600" aria-hidden="true" />
+              {label} tutors in {place.name}
+            </span>
+          }
+          description={
+            place.coordinates
+              ? "Tutors who teach in person nearby and tutors based here who teach online — the same results search gives for this city."
+              : `Tutors who list ${place.name} as their city — the same results search gives for it.`
+          }
+        />
+        <TutorResults
+          results={nearby}
+          courseCode={courseCode}
+          searchHref={searchHref}
+          emptyTitle={`No ${lower} tutors in ${place.name} yet`}
+          emptyDescription="Online tutors teach from anywhere in the province — or post a request and tutors who join can respond."
+        />
       </Section>
 
-      {online.items.length > 0 && (
-        <Section>
-          <Reveal>
-            <h2 className="flex items-center gap-2 text-2xl font-extrabold tracking-tight text-ink-900">
-              <Video className="size-5 text-brand-600" />
-              Online {course.code} tutors
-            </h2>
-            <p className="mt-2 text-sm text-ink-500">
-              No travel time, and you&rsquo;re not limited to who happens to live nearby.
-            </p>
-          </Reveal>
-
-          <RevealGroup className="mt-6 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
-            {online.items.map((tutor) => (
-              <RevealItem key={tutor.id}>
-                <TutorCard tutor={tutor} courseCode={course.code} />
-              </RevealItem>
-            ))}
-          </RevealGroup>
+      {onlineOnly.length > 0 && (
+        <Section align="start">
+          <LandingHeading
+            title={
+              <span className="flex items-center gap-2">
+                <Video className="size-5 text-brand-600" aria-hidden="true" />
+                Online {lower} tutors{province ? ` across ${province.name}` : ""}
+              </span>
+            }
+            description="No travel time, and you're not limited to who happens to live nearby."
+          />
+          <TutorResults results={{ items: onlineOnly, total: onlineOnly.length }} courseCode={courseCode} searchHref={searchHref} />
         </Section>
       )}
 
-      <Section tone="muted">
+      <Section tone="muted" align="start">
         <div className="grid gap-6 lg:grid-cols-2">
           <Reveal>
             <Card className="h-full">
               <CardBody>
-                <h3 className="text-sm font-bold text-ink-900">About {course.code}</h3>
+                <h3 className="text-sm font-bold text-ink-900">About {label}</h3>
                 <p className="mt-2 text-sm leading-relaxed text-ink-600">
-                  {course.description ??
-                    `${course.name} is a Grade ${course.gradeLevel} ${course.subjectName} course.`}
+                  {topic.kind === "COURSE"
+                    ? (topic.course.description ??
+                      `${topic.course.name} is a Grade ${topic.course.gradeLevel} ${topic.course.subjectName} course.`)
+                    : (topic.subject.description ?? `${label} tutoring for the ${province?.name ?? "provincial"} curriculum.`)}
                 </p>
-                <dl className="mt-4 flex flex-wrap gap-x-6 gap-y-2 border-t border-ink-100 pt-4 text-sm">
-                  <div>
-                    <dt className="text-xs text-ink-400">Grade</dt>
-                    <dd className="font-semibold text-ink-800">Grade {course.gradeLevel}</dd>
-                  </div>
-                  <div>
-                    <dt className="text-xs text-ink-400">Subject</dt>
-                    <dd className="font-semibold text-ink-800">{course.subjectName}</dd>
-                  </div>
-                  {minRate && (
-                    <div>
-                      <dt className="text-xs text-ink-400">From</dt>
-                      <dd className="font-semibold text-ink-800">
-                        {formatMoney(minRate, { compact: true })}/hr
-                      </dd>
-                    </div>
-                  )}
-                </dl>
-                <Button
-                  href={`/${provinceSlug}/${course.gradeSlug}/${course.subjectSlug}/${course.code.toLowerCase()}`}
-                  variant="secondary"
-                  size="sm"
-                  className="mt-4"
-                  iconRight={<ArrowRight className="size-3.5" />}
-                >
-                  All {course.code} tutors
-                </Button>
+                {minRate && (
+                  <p className="mt-3 text-sm text-ink-600">
+                    Rates here start from{" "}
+                    <strong className="text-ink-900">{formatMoney(minRate, { compact: true })}/hr</strong>.
+                  </p>
+                )}
+                {upPath && (
+                  <Button href={upPath} variant="secondary" size="sm" className="mt-4" iconRight={<ArrowRight className="size-3.5" />}>
+                    All {label} tutors{province ? ` in ${province.name}` : ""}
+                  </Button>
+                )}
               </CardBody>
             </Card>
           </Reveal>
 
-          <Reveal delay={0.08}>
-            <Card className="h-full">
-              <CardBody>
-                <h3 className="flex items-center gap-2 text-sm font-bold text-ink-900">
-                  <Users className="size-4 text-ink-400" />
-                  {course.code} in other cities
-                </h3>
-                <ul className="mt-3 grid gap-1 sm:grid-cols-2">
-                  {SERVICE_CITIES.filter(
-                    (c) => c.province === course.provinceCode && c.city !== location.city,
-                  )
-                    .slice(0, 10)
-                    .map((other) => (
-                      <li key={other.city}>
-                        <Link
-                          href={`/tutors/${course.code.toLowerCase()}/${other.city.toLowerCase().replace(/\s+/g, "-")}`}
-                          className="text-sm text-ink-600 hover:text-brand-600"
-                        >
-                          {other.city}
-                        </Link>
-                      </li>
-                    ))}
-                </ul>
-              </CardBody>
-            </Card>
-          </Reveal>
+          {otherCities.some((c) => c.slug !== place.slug) && (
+            <Reveal delay={0.08}>
+              <Card className="h-full">
+                <CardBody>
+                  <CityLinks
+                    title={`${label} in other cities`}
+                    columns="sm:grid-cols-2"
+                    cities={otherCities.filter((c) => c.slug !== place.slug).slice(0, 12)}
+                    hrefFor={(other) => `/tutors/${topic.slug}/${other.slug}`}
+                  />
+                </CardBody>
+              </Card>
+            </Reveal>
+          )}
         </div>
       </Section>
 
-      <Faq
-        faqs={cityFaqs}
-        title={`${course.code} tutoring in ${location.city}`}
-        showAllLink={false}
+      <Faq faqs={faqs} title={`${label} tutoring in ${place.name}`} showAllLink={false} />
+
+      {/* What this page lists, for search engines (R32.8). */}
+      <JsonLd
+        data={{
+          "@context": "https://schema.org",
+          "@type": "ItemList",
+          name: `${label} tutors in ${place.name}`,
+          url: `${baseUrl}${hit.canonicalPath}`,
+          numberOfItems: nearby.items.length,
+          itemListElement: nearby.items.map((tutor, index) => ({
+            "@type": "ListItem",
+            position: index + 1,
+            url: `${baseUrl}/tutors/${tutor.slug}`,
+            name: tutor.displayName,
+          })),
+        }}
+      />
+      <JsonLd
+        data={{
+          "@context": "https://schema.org",
+          "@type": "FAQPage",
+          mainEntity: faqs.map((faq) => ({
+            "@type": "Question",
+            name: faq.q,
+            acceptedAnswer: { "@type": "Answer", text: faq.a },
+          })),
+        }}
       />
     </>
   );

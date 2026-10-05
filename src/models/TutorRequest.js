@@ -6,6 +6,8 @@ import {
   MATCH_STATUS,
   LESSON_MODES,
   QUALIFICATION_TYPES,
+  REPORT_STATUS,
+  REQUEST_REPORT_REASONS,
 } from "../constants/index.js";
 import { MATCH_FACTOR_KEYS } from "../lib/matching/weights.js";
 import { ModerationEntrySchema } from "./Engagement.js";
@@ -21,6 +23,20 @@ import { ModerationEntrySchema } from "./Engagement.js";
  * MVP behaved as if it had, and the moderation fields are simply absent until
  * a moderator touches the record.
  */
+/** One member's report of a request (R28.24). */
+const ReportEntrySchema = new mongoose.Schema(
+  {
+    reporterId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    reporterRole: { type: String, trim: true },
+    reason: { type: String, enum: Object.keys(REQUEST_REPORT_REASONS), required: true },
+    note: { type: String, trim: true, maxlength: 600 },
+    createdAt: { type: Date, default: Date.now },
+    /** Stamped when a moderator rules on the case this report belonged to. */
+    resolvedAt: { type: Date },
+  },
+  { _id: false },
+);
+
 const TutorRequestSchema = new mongoose.Schema(
   {
     reference: { type: String, required: true, unique: true, index: true },
@@ -133,11 +149,30 @@ const TutorRequestSchema = new mongoose.Schema(
     removedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     moderationNote: { type: String, trim: true, maxlength: 600 },
     moderationHistory: { type: [ModerationEntrySchema], default: [] },
+
+    /**
+     * The *report case* (R28.24), kept apart from `status` exactly as a
+     * review's is: a report asks a moderator to look, it does not take the
+     * request off the board. `reportCount` counts the reports in the case
+     * that is open now and returns to zero when a moderator rules;
+     * `reportHistory` keeps every report ever made. An entry with no
+     * `resolvedAt` belongs to the open case, which is what lets one member be
+     * refused a second report while their first is still waiting.
+     */
+    reportStatus: { type: String, enum: Object.values(REPORT_STATUS), index: true },
+    reportCount: { type: Number, default: 0 },
+    reportedAt: { type: Date },
+    reportHistory: {
+      type: [ReportEntrySchema],
+      default: [],
+    },
   },
   { timestamps: true },
 );
 
 TutorRequestSchema.index({ status: 1, courseId: 1, createdAt: -1 });
+// The admin "Reported" queue.
+TutorRequestSchema.index({ reportStatus: 1, reportedAt: -1 });
 TutorRequestSchema.index({ ownerId: 1, createdAt: -1 });
 TutorRequestSchema.index({ location: "2dsphere" }, { sparse: true });
 // The tutor board: open, publicly visible requests for a subject, newest first.

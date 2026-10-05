@@ -1,7 +1,9 @@
 import { z } from "zod";
+import { slugify } from "@/lib/utils/slug";
 import {
   ROLES, USER_STATUS, TUTOR_STATUS, PAYOUT_STATUS,
   BRANDING_ASSET_KEYS, FEATURES, SETTINGS_GROUPS, AUDIT_ACTIONS,
+  SUPPORT_TOPICS, SUPPORT_TICKET_STATUS,
 } from "@/constants";
 import {
   isLegible, isUsableAsSolid, isUsableAsSurface, MIN_TEXT_CONTRAST, normalizeHex,
@@ -17,15 +19,8 @@ export const adminUserQuerySchema = z.object({
   pageSize: z.coerce.number().int().min(1).max(100).optional(),
 });
 
-export const adminUserActionSchema = z
-  .object({
-    action: z.enum(["SUSPEND", "REINSTATE", "VERIFY_EMAIL", "FORCE_LOGOUT", "DELETE"]),
-    reason: z.string().trim().max(600).optional(),
-  })
-  .refine((d) => !["SUSPEND", "DELETE"].includes(d.action) || (d.reason?.length ?? 0) >= 10, {
-    message: "Record a reason of at least 10 characters.",
-    path: ["reason"],
-  });
+// Account actions (suspend, ban, restore, delete) are validated by
+// `adminAccountActionSchema` in ./admin-users.js.
 
 export const adminApplicationQuerySchema = z.object({
   status: z.enum(Object.values(TUTOR_STATUS)).optional(),
@@ -136,6 +131,7 @@ const seoSchema = z.object({
 });
 
 const contactSchema = z.object({
+  legalName: z.string().trim().max(160).optional(),
   supportEmail: optionalEmail,
   contactEmail: optionalEmail,
   supportPhone: z.string().trim().max(30).optional(),
@@ -325,6 +321,8 @@ export const platformSettingsSchema = z
     lateCancellationRefundPercent: z.coerce.number().int().min(0).max(100).optional(),
     studentNoShowRefundPercent: z.coerce.number().int().min(0).max(100).optional(),
     tutorNoShowRefundPercent: z.coerce.number().int().min(0).max(100).optional(),
+    noShowReportWindowHours: z.coerce.number().int().min(1).max(720).optional(),
+    disputeWindowDays: z.coerce.number().int().min(1).max(365).optional(),
     cancellationAbuseThreshold: z.coerce.number().int().min(1).max(20).optional(),
     cancellationAbuseWindowDays: z.coerce.number().int().min(1).max(365).optional(),
     minimumBookingNoticeHours: z.coerce.number().int().min(0).max(168).optional(),
@@ -336,6 +334,10 @@ export const platformSettingsSchema = z
     minHourlyRate: z.coerce.number().int().min(0).max(500).optional(),
     maxHourlyRate: z.coerce.number().int().min(1).max(1000).optional(),
     payoutHoldDays: z.coerce.number().int().min(0).max(60).optional(),
+    backgroundCheckValidityMonths: z.coerce.number().int().min(1).max(120).optional(),
+    verificationDocumentRetentionDays: z.coerce.number().int().min(1).max(3650).optional(),
+    applicationReviewBusinessDays: z.coerce.number().int().min(1).max(30).optional(),
+    supportResponseBusinessDays: z.coerce.number().int().min(1).max(30).optional(),
     autoPayouts: z.boolean().optional(),
     defaultSearchRadiusKm: z.coerce.number().int().min(1).max(500).optional(),
     autoModerateReviews: z.boolean().optional(),
@@ -376,6 +378,19 @@ export const SETTINGS_GROUP_KEYS = SETTINGS_GROUPS;
 
 // --- Curriculum management (§24 admin, §13) ---
 
+/**
+ * Alternative URL slugs for a curriculum record (§32). Accepts a list or a
+ * comma-separated string from a text field, normalised to slug form.
+ */
+const aliasList = z
+  .union([z.array(z.string()), z.string()])
+  .transform((value) =>
+    (Array.isArray(value) ? value : value.split(","))
+      .map((alias) => slugify(alias))
+      .filter(Boolean),
+  )
+  .pipe(z.array(z.string().max(60)).max(12));
+
 export const provinceSchema = z.object({
   code: provinceCode,
   name: z.string().trim().min(2).max(60),
@@ -383,6 +398,7 @@ export const provinceSchema = z.object({
   usesCourseCodes: z.boolean().default(false),
   courseCodeHint: z.string().trim().max(120).optional(),
   displayOrder: z.coerce.number().int().min(0).max(100).default(0),
+  aliases: aliasList.optional(),
 });
 
 export const gradeSchema = z.object({
@@ -391,6 +407,7 @@ export const gradeSchema = z.object({
   level: z.coerce.number().int().min(0).max(13),
   stage: z.enum(["ELEMENTARY", "MIDDLE", "SECONDARY"]),
   isActive: z.boolean().default(true),
+  aliases: aliasList.optional(),
 });
 
 export const subjectSchema = z.object({
@@ -402,6 +419,7 @@ export const subjectSchema = z.object({
   isPopular: z.boolean().default(false),
   displayOrder: z.coerce.number().int().min(0).max(200).default(0),
   isActive: z.boolean().default(true),
+  aliases: aliasList.optional(),
 });
 
 export const courseSchema = z.object({
@@ -415,6 +433,7 @@ export const courseSchema = z.object({
   stream: z.string().trim().max(40).optional(),
   isPopular: z.boolean().default(false),
   isActive: z.boolean().default(true),
+  aliases: aliasList.optional(),
 });
 
 /**
@@ -460,3 +479,33 @@ export const auditLogQuerySchema = z.object({
   page: z.coerce.number().int().min(1).max(500).default(1),
   pageSize: z.coerce.number().int().min(1).max(100).optional(),
 });
+
+// --- Support queue (§33, R28.20) ---
+
+/**
+ * The admin support list. Same conventions as the audit filter above: every
+ * filter optional, blank means "no filter", enumerations checked rather than
+ * taken as free text.
+ */
+export const supportTicketQuerySchema = z.object({
+  status: blankToUndefined(z.enum(Object.values(SUPPORT_TICKET_STATUS))),
+  topic: blankToUndefined(z.enum(Object.values(SUPPORT_TOPICS))),
+  q: blankToUndefined(z.string().trim().max(120)),
+  page: z.coerce.number().int().min(1).max(500).default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).optional(),
+});
+
+/**
+ * One change to a ticket: a status move, an internal note, or both at once
+ * ("resolved — refunded the late fee"). At least one is required; an empty
+ * PATCH is a mistake, not a no-op worth recording.
+ */
+export const supportTicketUpdateSchema = z
+  .object({
+    status: z.enum(Object.values(SUPPORT_TICKET_STATUS)).optional(),
+    note: z.string().trim().min(3, "Write at least a few words.").max(2000).optional(),
+  })
+  .refine((v) => v.status !== undefined || v.note !== undefined, {
+    message: "Change the status or add a note.",
+    path: ["status"],
+  });

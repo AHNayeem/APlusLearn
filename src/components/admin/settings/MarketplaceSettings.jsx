@@ -22,6 +22,8 @@ const MARKETPLACE_KEYS = [
   "lateCancellationRefundPercent",
   "studentNoShowRefundPercent",
   "tutorNoShowRefundPercent",
+  "noShowReportWindowHours",
+  "disputeWindowDays",
   "cancellationAbuseThreshold",
   "cancellationAbuseWindowDays",
   "minimumBookingNoticeHours",
@@ -30,6 +32,8 @@ const MARKETPLACE_KEYS = [
   "minHourlyRate",
   "maxHourlyRate",
   "payoutHoldDays",
+  "backgroundCheckValidityMonths",
+  "verificationDocumentRetentionDays",
   "defaultSearchRadiusKm",
   "autoModerateReviews",
   "autoPayouts",
@@ -211,6 +215,39 @@ export function MarketplaceSettings({ settings }) {
 
           <div className="grid gap-4 sm:grid-cols-2">
             <Field
+              label="No-show reporting window"
+              htmlFor="set-noshow-window"
+              hint="Hours after a lesson ends when either side can report a no-show. After this, an unmarked lesson is completed automatically."
+              error={s.errorFor("noShowReportWindowHours")}
+            >
+              <Input
+                id="set-noshow-window"
+                type="number"
+                min={1}
+                max={720}
+                value={s.form.noShowReportWindowHours}
+                onChange={s.set("noShowReportWindowHours")}
+              />
+            </Field>
+            <Field
+              label="Dispute window"
+              htmlFor="set-dispute-window"
+              hint="Days after a lesson ends when a dispute can still be opened."
+              error={s.errorFor("disputeWindowDays")}
+            >
+              <Input
+                id="set-dispute-window"
+                type="number"
+                min={1}
+                max={365}
+                value={s.form.disputeWindowDays}
+                onChange={s.set("disputeWindowDays")}
+              />
+            </Field>
+          </div>
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field
               label="Cancellation abuse threshold"
               htmlFor="set-abuse"
               hint="Cancellations before a warning is issued."
@@ -323,6 +360,47 @@ export function MarketplaceSettings({ settings }) {
               max={500}
               value={s.form.defaultSearchRadiusKm}
               onChange={s.set("defaultSearchRadiusKm")}
+              className="max-w-32"
+            />
+          </Field>
+        </CardBody>
+      </Card>
+
+      <Card>
+        <CardHeader
+          title="Verification"
+          description="How long a badge stays valid and how long declined paperwork is kept."
+        />
+        <CardBody className="space-y-5">
+          <Field
+            label="Background check validity"
+            htmlFor="set-bgcheck"
+            hint="Months a Background Check badge lasts unless the administrator granting it sets a date. It comes off the profile when it lapses."
+            error={s.errorFor("backgroundCheckValidityMonths")}
+          >
+            <Input
+              id="set-bgcheck"
+              type="number"
+              min={1}
+              max={120}
+              value={s.form.backgroundCheckValidityMonths}
+              onChange={s.set("backgroundCheckValidityMonths")}
+              className="max-w-32"
+            />
+          </Field>
+          <Field
+            label="Document retention"
+            htmlFor="set-doc-retention"
+            hint="Days after a badge is declined or expires before its uploaded documents are deleted. The decision itself is kept."
+            error={s.errorFor("verificationDocumentRetentionDays")}
+          >
+            <Input
+              id="set-doc-retention"
+              type="number"
+              min={1}
+              max={3650}
+              value={s.form.verificationDocumentRetentionDays}
+              onChange={s.set("verificationDocumentRetentionDays")}
               className="max-w-32"
             />
           </Field>

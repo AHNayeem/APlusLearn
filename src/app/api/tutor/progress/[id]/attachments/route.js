@@ -4,6 +4,7 @@ import { objectId } from "@/lib/validation/common";
 import { addHomeworkAttachments } from "@/services/progress.service";
 import { attachmentsFromForm, ATTACHMENT_LIMITS } from "@/services/attachment.service";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
+import { readBoundedFormData } from "@/lib/security/upload-size";
 import { PERMISSIONS } from "@/constants";
 
 /**
@@ -16,7 +17,12 @@ import { PERMISSIONS } from "@/constants";
  */
 export const POST = routeHandler(
   async ({ request, user, params }) => {
-    const form = await request.formData();
+    // Capped before it is buffered (S19); each file keeps its own limit.
+    const form = await readBoundedFormData(
+      request,
+      ATTACHMENT_LIMITS.maxBytes * ATTACHMENT_LIMITS.maxPerReport,
+      `Attachments must be smaller than ${Math.round(ATTACHMENT_LIMITS.maxBytes / 1024 / 1024)} MB each.`,
+    );
     const files = attachmentsFromForm(form);
 
     if (!files.length) {

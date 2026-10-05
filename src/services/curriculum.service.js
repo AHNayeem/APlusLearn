@@ -1,11 +1,13 @@
 import "server-only";
-import { Province, Grade, Subject, Course, TutorProfile } from "@/models";
+import { revalidatePath } from "next/cache";
+import { Province, Grade, Subject, Course, TutorProfile, StudentProfile } from "@/models";
 import { PAGE_SIZES, AUDIT_ACTIONS, GRADE_STAGES } from "@/constants";
-import { NotFoundError, ConflictError } from "@/lib/api/errors";
+import { NotFoundError, ConflictError, BusinessRuleError } from "@/lib/api/errors";
 import { toPlain, compact } from "@/lib/utils/serialize";
 import { slugify } from "@/lib/utils/slug";
 import { escapeRegex } from "@/lib/security/sanitize";
 import { recordAudit } from "./audit.service";
+import { rebuildTaughtCourses, flattenTaughtCourses } from "@/lib/curriculum/taught";
 
 /**
  * Canadian curriculum (§13).
@@ -27,8 +29,20 @@ async function cached(key, loader) {
   return value;
 }
 
+/**
+ * Forget every memoised curriculum read, and tell Next that pages rendered
+ * from the curriculum are stale. The homepage and other public pages are
+ * cached (ISR), and a province an administrator has just switched on must
+ * not stay "coming soon" there for an hour (§6). Outside a Next request (a
+ * script, the integration suite) there is nothing to revalidate.
+ */
 function invalidate() {
   refCache.clear();
+  try {
+    revalidatePath("/", "layout");
+  } catch {
+    // Not inside a request Next is rendering — nothing cached to drop.
+  }
 }
 
 // --- Reads -----------------------------------------------------------------
@@ -72,25 +86,64 @@ export async function activeProvinceCodes() {
   });
 }
 
-export async function listGrades({ provinceCode, provinceId } = {}) {
-  return cached(`grades:${provinceCode ?? provinceId ?? "all"}`, async () => {
+/**
+ * The province a picker starts on when the visitor has not chosen one.
+ *
+ * Read from the data — the first *live* province in the administrator's
+ * display order — never a literal. A deployment that launches another
+ * province first, or reorders them, changes every picker's starting point
+ * without a code change (§6). `null` when nothing is live yet.
+ */
+export async function defaultProvinceCode() {
+  return cached("provinceCode:default", async () => {
+    const doc = await Province.findOne({ isActive: true })
+      .sort({ displayOrder: 1, name: 1 })
+      .select("code")
+      .lean();
+    return doc?.code ?? null;
+  });
+}
+
+/**
+ * Grades of one province, in order.
+ *
+ * `activeOnly: false` is the administrator's view: a deactivated grade must
+ * stay listed there, or it could never be switched back on (R28.10).
+ */
+export async function listGrades({ provinceCode, provinceId, activeOnly = true } = {}) {
+  return cached(`grades:${provinceCode ?? provinceId ?? "all"}:${activeOnly}`, async () => {
     let id = provinceId;
     if (!id && provinceCode) {
       const province = await getProvince(provinceCode);
       if (!province) return [];
       id = province.id;
     }
-    const query = { isActive: true };
+    const query = activeOnly ? { isActive: true } : {};
     if (id) query.provinceId = id;
     const docs = await Grade.find(query).sort({ level: 1 }).lean();
     return toPlain(docs);
   });
 }
 
-export async function listSubjects({ popularOnly = false } = {}) {
-  return cached(`subjects:${popularOnly}`, async () => {
-    const query = { isActive: true };
+/**
+ * Subjects, optionally narrowed to the ones a province (and grade) actually
+ * teaches.
+ *
+ * Subjects are a shared list, but a picker scoped to a province should only
+ * offer what that province has courses for — otherwise choosing "Ontario,
+ * Grade 3, Chemistry" is possible and finds nothing. Narrowing reads the
+ * live courses, so it follows the curriculum as an administrator edits it.
+ */
+export async function listSubjects({ popularOnly = false, provinceCode, gradeSlug, activeOnly = true } = {}) {
+  const key = `subjects:${popularOnly}:${provinceCode ?? "*"}:${gradeSlug ?? "*"}:${activeOnly}`;
+  return cached(key, async () => {
+    const query = activeOnly ? { isActive: true } : {};
     if (popularOnly) query.isPopular = true;
+    if (provinceCode) {
+      const courseQuery = { isActive: true, provinceCode: String(provinceCode).toUpperCase() };
+      if (gradeSlug) courseQuery.gradeSlug = gradeSlug;
+      query._id = { $in: await Course.distinct("subjectId", courseQuery) };
+    }
     const docs = await Subject.find(query).sort({ displayOrder: 1, name: 1 }).lean();
     return toPlain(docs);
   });
@@ -296,9 +349,21 @@ export async function getCourseById(id) {
   return doc ? toPlain(doc) : null;
 }
 
-export async function getCourseByCode(code, provinceCode) {
+/**
+ * A live course by its provincial code. Public callers (the SEO city pages)
+ * go through here, so an inactive course — or one under a "coming soon"
+ * province — resolves to nothing, exactly as `getCourseByPath` does.
+ */
+export async function getCourseByCode(code, provinceCode, { activeOnly = true } = {}) {
   const query = { code: String(code).toUpperCase() };
-  if (provinceCode) query.provinceCode = String(provinceCode).toUpperCase();
+  if (activeOnly) {
+    query.isActive = true;
+    const codes = await activeProvinceCodes();
+    const wanted = provinceCode ? String(provinceCode).toUpperCase() : null;
+    query.provinceCode = wanted ? { $in: codes.filter((c) => c === wanted) } : { $in: codes };
+  } else if (provinceCode) {
+    query.provinceCode = String(provinceCode).toUpperCase();
+  }
   const doc = await Course.findOne(query).lean();
   return doc ? toPlain(doc) : null;
 }
@@ -335,9 +400,18 @@ export async function getCourseByPath({ province, grade, subject, course }) {
   return doc ? toPlain(doc) : null;
 }
 
-export async function popularCourses(limit = 8, provinceCode = "ON") {
-  return cached(`popularCourses:${provinceCode}:${limit}`, async () => {
-    const docs = await Course.find({ isActive: true, isPopular: true, provinceCode })
+/**
+ * Courses flagged popular, for one province — or, with no province, across
+ * every live one. There is no implicit province: a caller that means one
+ * says which (§6).
+ */
+export async function popularCourses(limit = 8, provinceCode) {
+  return cached(`popularCourses:${provinceCode ?? "*"}:${limit}`, async () => {
+    const codes = await activeProvinceCodes();
+    const scope = provinceCode
+      ? codes.filter((code) => code === String(provinceCode).toUpperCase())
+      : codes;
+    const docs = await Course.find({ isActive: true, isPopular: true, provinceCode: { $in: scope } })
       .sort({ tutorCount: -1, name: 1 })
       .limit(limit)
       .lean();
@@ -345,49 +419,85 @@ export async function popularCourses(limit = 8, provinceCode = "ON") {
   });
 }
 
-/** Autocomplete for the hero search and header (§12). */
+/**
+ * Autocomplete for the hero search and header (§12).
+ *
+ * Each suggestion carries the exact search parameters it stands for — a
+ * course by its code (or by slug *and* grade when it has none, since a
+ * codeless name like "English" exists in several grades), a subject by slug
+ * — so picking one searches for precisely that, and the rest of the form
+ * still applies. Matches names, codes and curriculum aliases ("math",
+ * "calculus"), live provinces only.
+ */
 export async function suggest({ q, province, limit = 8 }) {
   const pattern = new RegExp(`^${escapeRegex(q)}`, "i");
   const contains = new RegExp(escapeRegex(q), "i");
-  const courseQuery = { isActive: true, $or: [{ name: contains }, { code: pattern }] };
-  if (province) courseQuery.provinceCode = String(province).toUpperCase();
+  const aliasPrefix = new RegExp(`^${escapeRegex(slugify(q))}`);
+  const codes = await activeProvinceCodes();
+  const scope = province
+    ? codes.filter((code) => code === String(province).toUpperCase())
+    : codes;
+  const courseQuery = {
+    isActive: true,
+    provinceCode: { $in: scope },
+    $or: [{ name: contains }, { code: pattern }, { aliases: aliasPrefix }],
+  };
 
   const [courses, subjects] = await Promise.all([
     Course.find(courseQuery)
-      .sort({ isPopular: -1, tutorCount: -1 })
+      .sort({ isPopular: -1, tutorCount: -1, gradeLevel: -1 })
       .limit(limit)
       .select("name code slug subjectSlug gradeSlug gradeLevel provinceCode")
       .lean(),
-    Subject.find({ isActive: true, name: contains }).limit(4).select("name slug icon").lean(),
+    Subject.find({ isActive: true, $or: [{ name: contains }, { aliases: aliasPrefix }] })
+      .limit(4)
+      .select("name slug icon")
+      .lean(),
   ]);
 
   return {
-    courses: toPlain(courses).map((c) => ({
-      type: "COURSE",
-      id: c.id,
-      label: c.code ? `${c.code} — ${c.name}` : c.name,
-      sublabel: `Grade ${c.gradeLevel} · ${c.provinceCode}`,
-      href: `/find-a-tutor?course=${c.slug}&province=${c.provinceCode}`,
-      code: c.code,
-      slug: c.slug,
-    })),
-    subjects: toPlain(subjects).map((s) => ({
-      type: "SUBJECT",
-      id: s.id,
-      label: s.name,
-      sublabel: "Subject",
-      href: `/find-a-tutor?subject=${s.slug}`,
-      slug: s.slug,
-    })),
+    courses: toPlain(courses).map((c) => {
+      const params = c.code
+        ? { courseCode: c.code, province: c.provinceCode }
+        : { course: c.slug, grade: c.gradeSlug, province: c.provinceCode };
+      return {
+        type: "COURSE",
+        id: c.id,
+        label: c.code ? `${c.code} — ${c.name}` : c.name,
+        sublabel: `Grade ${c.gradeLevel} · ${c.provinceCode}`,
+        href: `/find-a-tutor?${new URLSearchParams(params).toString()}`,
+        params,
+        code: c.code,
+        slug: c.slug,
+      };
+    }),
+    subjects: toPlain(subjects).map((s) => {
+      const params = { subject: s.slug, ...(province ? { province: String(province).toUpperCase() } : {}) };
+      return {
+        type: "SUBJECT",
+        id: s.id,
+        label: s.name,
+        sublabel: "Subject",
+        href: `/find-a-tutor?${new URLSearchParams(params).toString()}`,
+        params,
+        slug: s.slug,
+      };
+    }),
   };
 }
 
-/** Full hierarchy for the curriculum picker in one round trip. */
-export async function getCurriculumTree(provinceCode = "ON") {
+/**
+ * Full hierarchy for a curriculum picker in one round trip: the province,
+ * its grades, and the subjects it has courses for. Without a province it
+ * resolves the default one from the data.
+ */
+export async function getCurriculumTree(provinceCode) {
+  const code = provinceCode ?? (await defaultProvinceCode());
+  if (!code) return { province: null, grades: [], subjects: [] };
   const [province, grades, subjects] = await Promise.all([
-    getProvince(provinceCode),
-    listGrades({ provinceCode }),
-    listSubjects(),
+    getProvince(code),
+    listGrades({ provinceCode: code }),
+    listSubjects({ provinceCode: code }),
   ]);
   return { province, grades, subjects };
 }
@@ -412,10 +522,25 @@ export async function createProvince(input, actor) {
 }
 
 export async function updateProvince(id, patch, actor) {
+  const before = await Province.findById(id).lean();
+  if (!before) throw new NotFoundError("That province no longer exists.");
+
   const update = compact(patch);
   if (update.name) update.slug = slugify(update.name);
+  const aliases = withRetiredSlug(update.aliases ?? before.aliases, before.slug, update.slug);
+  if (aliases) update.aliases = aliases;
+
   const doc = await Province.findByIdAndUpdate(id, { $set: update }, { returnDocument: "after", runValidators: true }).lean();
   if (!doc) throw new NotFoundError("That province no longer exists.");
+
+  // Courses carry the province code for search; a changed code has to reach
+  // them and every tutor who teaches them, or search filters on a code that
+  // no longer exists.
+  if (doc.code !== before.code) {
+    await Course.updateMany({ provinceId: id }, { $set: { provinceCode: doc.code } });
+    await resyncTutorsTeaching({ provinceId: id });
+  }
+
   invalidate();
   await recordAudit({ actor, action: AUDIT_ACTIONS.CURRICULUM_UPDATED, entityType: "Province", entityId: id });
   return toPlain(doc);
@@ -429,10 +554,24 @@ export async function createGrade(input, actor) {
 }
 
 export async function updateGrade(id, patch, actor) {
+  const before = await Grade.findById(id).lean();
+  if (!before) throw new NotFoundError("That grade no longer exists.");
+
   const update = compact(patch);
   if (update.name) update.slug = slugify(update.name);
+  const aliases = withRetiredSlug(update.aliases ?? before.aliases, before.slug, update.slug);
+  if (aliases) update.aliases = aliases;
+
   const doc = await Grade.findByIdAndUpdate(id, { $set: update }, { returnDocument: "after", runValidators: true }).lean();
   if (!doc) throw new NotFoundError("That grade no longer exists.");
+
+  // A rename changes the slug search and the course URLs use; a new level
+  // changes the grade filter. Both are copied onto courses and tutors.
+  if (doc.slug !== before.slug || doc.level !== before.level) {
+    await Course.updateMany({ gradeId: id }, { $set: { gradeSlug: doc.slug, gradeLevel: doc.level } });
+    await resyncTutorsTeaching({ gradeId: id });
+  }
+
   invalidate();
   await recordAudit({ actor, action: AUDIT_ACTIONS.CURRICULUM_UPDATED, entityType: "Grade", entityId: id });
   return toPlain(doc);
@@ -446,10 +585,22 @@ export async function createSubject(input, actor) {
 }
 
 export async function updateSubject(id, patch, actor) {
+  const before = await Subject.findById(id).lean();
+  if (!before) throw new NotFoundError("That subject no longer exists.");
+
   const update = compact(patch);
   if (update.name) update.slug = slugify(update.name);
+  const aliases = withRetiredSlug(update.aliases ?? before.aliases, before.slug, update.slug);
+  if (aliases) update.aliases = aliases;
+
   const doc = await Subject.findByIdAndUpdate(id, { $set: update }, { returnDocument: "after", runValidators: true }).lean();
   if (!doc) throw new NotFoundError("That subject no longer exists.");
+
+  if (doc.slug !== before.slug || doc.name !== before.name) {
+    await Course.updateMany({ subjectId: id }, { $set: { subjectSlug: doc.slug, subjectName: doc.name } });
+    await resyncTutorsTeaching({ subjectId: id });
+  }
+
   invalidate();
   await recordAudit({ actor, action: AUDIT_ACTIONS.CURRICULUM_UPDATED, entityType: "Subject", entityId: id });
   return toPlain(doc);
@@ -464,6 +615,9 @@ export async function createCourse(input, actor) {
   ]);
   if (!province || !grade || !subject) {
     throw new NotFoundError("Choose a valid province, grade and subject.");
+  }
+  if (String(grade.provinceId) !== String(province._id)) {
+    throw new BusinessRuleError("That grade belongs to a different province.", "GRADE_PROVINCE_MISMATCH");
   }
 
   const doc = await Course.create({
@@ -488,33 +642,144 @@ export async function createCourse(input, actor) {
 }
 
 export async function updateCourse(id, patch, actor) {
+  const before = await Course.findById(id).lean();
+  if (!before) throw new NotFoundError("That course no longer exists.");
+
   const update = compact(patch);
   if (update.name) update.slug = slugify(update.name);
+  const aliases = withRetiredSlug(update.aliases ?? before.aliases, before.slug, update.slug);
+  if (aliases) update.aliases = aliases;
 
+  const provinceId = update.provinceId ?? before.provinceId;
   if (update.gradeId) {
     const grade = await Grade.findById(update.gradeId).lean();
-    if (grade) {
-      update.gradeSlug = grade.slug;
-      update.gradeLevel = grade.level;
+    if (!grade) throw new NotFoundError("Choose a valid grade.");
+    if (String(grade.provinceId) !== String(provinceId)) {
+      throw new BusinessRuleError("That grade belongs to a different province.", "GRADE_PROVINCE_MISMATCH");
     }
+    update.gradeSlug = grade.slug;
+    update.gradeLevel = grade.level;
   }
   if (update.subjectId) {
     const subject = await Subject.findById(update.subjectId).lean();
-    if (subject) {
-      update.subjectSlug = subject.slug;
-      update.subjectName = subject.name;
-    }
+    if (!subject) throw new NotFoundError("Choose a valid subject.");
+    update.subjectSlug = subject.slug;
+    update.subjectName = subject.name;
   }
   if (update.provinceId) {
     const province = await Province.findById(update.provinceId).lean();
-    if (province) update.provinceCode = province.code;
+    if (!province) throw new NotFoundError("Choose a valid province.");
+    update.provinceCode = province.code;
   }
 
   const doc = await Course.findByIdAndUpdate(id, { $set: update }, { returnDocument: "after", runValidators: true }).lean();
   if (!doc) throw new NotFoundError("That course no longer exists.");
+
+  // Tutors copy the code and name onto their profiles, so a corrected code
+  // or a renamed course is re-copied to every profile that teaches it.
+  await resyncTutorsTeaching({ _id: id });
+
   invalidate();
   await recordAudit({ actor, action: AUDIT_ACTIONS.CURRICULUM_UPDATED, entityType: "Course", entityId: id });
   return toPlain(doc);
+}
+
+/**
+ * Keep a slug that a rename retired, so links to it still resolve (§32).
+ * Returns the new alias list, or null when nothing changes.
+ */
+function withRetiredSlug(aliases = [], previousSlug, nextSlug) {
+  const list = [...new Set((aliases ?? []).filter(Boolean))];
+  if (nextSlug && previousSlug && nextSlug !== previousSlug && !list.includes(previousSlug)) {
+    list.push(previousSlug);
+  }
+  return list.filter((alias) => alias !== nextSlug);
+}
+
+/**
+ * Re-copy the curriculum onto every tutor profile that teaches a course
+ * matching `courseFilter` (see lib/curriculum/taught.js). Each profile is
+ * rebuilt from *all* of its courses, so one edit cannot leave a profile
+ * half updated.
+ */
+async function resyncTutorsTeaching(courseFilter) {
+  const affected = await Course.find(courseFilter).select("_id").lean();
+  if (!affected.length) return { updated: 0 };
+
+  const profiles = await TutorProfile.find({ courseIds: { $in: affected.map((c) => c._id) } })
+    .select("courses")
+    .lean();
+  if (!profiles.length) return { updated: 0 };
+
+  const courseIds = [...new Set(profiles.flatMap((p) => (p.courses ?? []).map((c) => String(c.courseId))))];
+  const courses = await Course.find({ _id: { $in: courseIds } }).lean();
+  const courseMap = new Map(courses.map((c) => [String(c._id), c]));
+
+  const ops = profiles.map((profile) => {
+    const taught = rebuildTaughtCourses(profile.courses ?? [], courseMap);
+    return {
+      updateOne: {
+        filter: { _id: profile._id },
+        update: { $set: { courses: taught, ...flattenTaughtCourses(taught) } },
+      },
+    };
+  });
+  await TutorProfile.bulkWrite(ops);
+  return { updated: ops.length };
+}
+
+/**
+ * Remove a province, grade or subject that nothing uses yet — a record
+ * created by mistake. Anything referenced by a course, a learner or a
+ * request is deactivated instead, which keeps history intact (R28.9–R28.11).
+ */
+export async function deleteProvince(id, actor) {
+  const province = await Province.findById(id).lean();
+  if (!province) throw new NotFoundError("That province no longer exists.");
+  const [grades, courses, learners] = await Promise.all([
+    Grade.countDocuments({ provinceId: id }),
+    Course.countDocuments({ provinceId: id }),
+    StudentProfile.countDocuments({ provinceCode: province.code }),
+  ]);
+  if (grades + courses + learners > 0) {
+    throw new ConflictError("This province has grades, courses or learners. Deactivate it instead of deleting it.");
+  }
+  await Province.deleteOne({ _id: id });
+  invalidate();
+  await recordAudit({ actor, action: AUDIT_ACTIONS.CURRICULUM_UPDATED, entityType: "Province", entityId: id, metadata: { deleted: province.code } });
+  return { deleted: true };
+}
+
+export async function deleteGrade(id, actor) {
+  const grade = await Grade.findById(id).lean();
+  if (!grade) throw new NotFoundError("That grade no longer exists.");
+  const [courses, learners] = await Promise.all([
+    Course.countDocuments({ gradeId: id }),
+    StudentProfile.countDocuments({ gradeId: id }),
+  ]);
+  if (courses + learners > 0) {
+    throw new ConflictError("This grade has courses or learners. Deactivate it instead of deleting it.");
+  }
+  await Grade.deleteOne({ _id: id });
+  invalidate();
+  await recordAudit({ actor, action: AUDIT_ACTIONS.CURRICULUM_UPDATED, entityType: "Grade", entityId: id, metadata: { deleted: grade.slug } });
+  return { deleted: true };
+}
+
+export async function deleteSubject(id, actor) {
+  const subject = await Subject.findById(id).lean();
+  if (!subject) throw new NotFoundError("That subject no longer exists.");
+  const [courses, learners] = await Promise.all([
+    Course.countDocuments({ subjectId: id }),
+    StudentProfile.countDocuments({ subjectsOfInterest: id }),
+  ]);
+  if (courses + learners > 0) {
+    throw new ConflictError("This subject has courses or learners. Deactivate it instead of deleting it.");
+  }
+  await Subject.deleteOne({ _id: id });
+  invalidate();
+  await recordAudit({ actor, action: AUDIT_ACTIONS.CURRICULUM_UPDATED, entityType: "Subject", entityId: id, metadata: { deleted: subject.slug } });
+  return { deleted: true };
 }
 
 export async function deleteCourse(id, actor) {

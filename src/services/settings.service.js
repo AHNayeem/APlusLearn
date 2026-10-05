@@ -150,6 +150,62 @@ function assetUrl(key, asset) {
 }
 
 /**
+ * The policy numbers the public pages quote (§12, §20, §33).
+ *
+ * Every figure a visitor reads about money, notice or timing — the commission,
+ * the cancellation window, the refund on a late cancellation, how long a
+ * payout is held, how long an application review takes — is this object, so
+ * the page that describes a rule and the engine that applies it read the same
+ * document. A literal in copy is a second copy of a setting, and the first
+ * time an operator changes the setting it becomes a false statement.
+ *
+ * Exposed to the browser on purpose: these are the published terms of the
+ * marketplace, not configuration. Nothing here is a credential or an
+ * internal identifier.
+ */
+export const PUBLIC_POLICY_KEYS = [
+  "commissionPercent",
+  "freeCancellationWindowHours",
+  "lateCancellationRefundPercent",
+  "studentNoShowRefundPercent",
+  "tutorNoShowRefundPercent",
+  "cancellationAbuseThreshold",
+  "cancellationAbuseWindowDays",
+  "minimumBookingNoticeHours",
+  "bookingHorizonDays",
+  "minHourlyRate",
+  "maxHourlyRate",
+  "payoutHoldDays",
+  "autoPayouts",
+  "autoModerateReviews",
+  "applicationReviewBusinessDays",
+  "supportResponseBusinessDays",
+  "noShowReportWindowHours",
+  "disputeWindowDays",
+  "verificationDocumentRetentionDays",
+];
+
+export function publicPolicy(settings) {
+  const s = withDefaults(settings ?? {});
+  return Object.fromEntries(PUBLIC_POLICY_KEYS.map((key) => [key, s[key]]));
+}
+
+/**
+ * Phone numbers that shipped as placeholders in earlier builds.
+ *
+ * A settings document created before the default became blank carries the
+ * placeholder as if an operator had typed it, and Mongoose wrote it there, not
+ * a person. It is not anybody's support line, so it is treated as unset on the
+ * way out; an operator who sets a real number is unaffected (§33).
+ */
+const PLACEHOLDER_PHONES = new Set(["1-888-555-0142"]);
+
+function publicContact(contact) {
+  const phone = String(contact?.supportPhone ?? "").trim();
+  return { ...contact, supportPhone: PLACEHOLDER_PHONES.has(phone) ? "" : phone };
+}
+
+/**
  * The single shape every part of the application reads branding from.
  *
  * Blank optional fields are resolved here — once — so no component has to
@@ -200,7 +256,8 @@ export function resolveAppConfig(settings) {
       ogDescription: seo.ogDescription || metaDescription,
       ogImage: assets.ogImage,
     },
-    contact,
+    contact: publicContact(contact),
+    policy: publicPolicy(s),
     social,
     footer: {
       ...footer,

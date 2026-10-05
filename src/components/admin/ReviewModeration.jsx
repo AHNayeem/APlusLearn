@@ -10,9 +10,15 @@ import {
 } from "@/components/ui";
 import { REVIEW_STATUS } from "@/constants";
 
-/** Keep or remove a reported review (§23). */
+/**
+ * Keep or remove a reported review, or approve or remove one awaiting
+ * approval (§23, R21.5). Both rulings go through the same endpoint; only the
+ * wording changes, because "keep published" means nothing for a review that
+ * was never published.
+ */
 export function ReviewModeration({ review }) {
   const [decision, setDecision] = useState(null);
+  const pendingApproval = review.status === REVIEW_STATUS.PENDING_MODERATION;
 
   return (
     <>
@@ -22,7 +28,7 @@ export function ReviewModeration({ review }) {
           onClick={() => setDecision(REVIEW_STATUS.PUBLISHED)}
           iconLeft={<Check className="size-3.5" />}
         >
-          Keep published
+          {pendingApproval ? "Approve" : "Keep published"}
         </Button>
         <Button
           variant="dangerGhost"
@@ -49,6 +55,8 @@ function ModerationModal({ decision, onClose, review }) {
   const [note, setNote] = useState("");
 
   const isRemove = decision === REVIEW_STATUS.REMOVED;
+  const pendingApproval = review.status === REVIEW_STATUS.PENDING_MODERATION;
+  const keepLabel = pendingApproval ? "Approve review" : "Keep published";
 
   const { submit, pending, error, fieldErrors } = useSubmit(async () => {
     await api.post(`/api/admin/reviews/${review.id}`, {
@@ -56,7 +64,7 @@ function ModerationModal({ decision, onClose, review }) {
       note: note || undefined,
     });
     toast.success(
-      isRemove ? "Review removed" : "Review kept",
+      isRemove ? "Review removed" : pendingApproval ? "Review approved" : "Review kept",
       "The tutor's rating has been recalculated.",
     );
     onClose();
@@ -70,11 +78,21 @@ function ModerationModal({ decision, onClose, review }) {
     <Modal
       open
       onClose={onClose}
-      title={isRemove ? "Remove this review" : "Keep this review published"}
+      title={
+        isRemove
+          ? "Remove this review"
+          : pendingApproval
+            ? "Approve this review"
+            : "Keep this review published"
+      }
       description={
         isRemove
-          ? "It disappears from the tutor's profile and stops counting towards their rating."
-          : "It stays on the profile and counts towards the tutor's rating."
+          ? pendingApproval
+            ? "It is never published and never counts towards the tutor's rating."
+            : "It disappears from the tutor's profile and stops counting towards their rating."
+          : pendingApproval
+            ? "It is published on the tutor's profile and starts counting towards their rating."
+            : "It stays on the profile and counts towards the tutor's rating."
       }
       footer={
         <>
@@ -82,7 +100,7 @@ function ModerationModal({ decision, onClose, review }) {
             Cancel
           </Button>
           <Button variant={isRemove ? "danger" : "primary"} onClick={submit} loading={pending}>
-            {isRemove ? "Remove review" : "Keep published"}
+            {isRemove ? "Remove review" : keepLabel}
           </Button>
         </>
       }
@@ -90,9 +108,13 @@ function ModerationModal({ decision, onClose, review }) {
       <div className="space-y-4">
         <FormErrorSummary error={error} fieldErrors={fieldErrors} />
 
-        <blockquote className="rounded-xl bg-ink-50 p-3 text-sm leading-relaxed text-ink-600">
-          {review.body}
-        </blockquote>
+        {review.body ? (
+          <blockquote className="rounded-xl bg-ink-50 p-3 text-sm leading-relaxed text-ink-600">
+            {review.body}
+          </blockquote>
+        ) : (
+          <p className="text-sm italic text-ink-500">A {review.rating}-star rating with no written review.</p>
+        )}
 
         {review.reportReason && (
           <div className="rounded-xl border border-warning-100 bg-warning-50 p-3">

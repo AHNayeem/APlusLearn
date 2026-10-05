@@ -204,6 +204,13 @@ export const INTEGRATIONS = {
      * announces itself loudly in production (`storage-provider.js`), and a
      * deployment that would rather fail than fall back sets
      * `STORAGE_REQUIRE_EXTERNAL=true` to restore the hard failure.
+     *
+     * One scope is never allowed to fall back silently: identity documents
+     * (`documents`). In production the local store refuses to *write* one
+     * unless `STORAGE_ALLOW_LOCAL_DOCUMENTS=true` says the operator has
+     * decided the disk is persistent and encrypted (audit S10). Branding,
+     * avatars and attachments are unchanged, and reads are never refused —
+     * see `allowsLocalIdentityDocuments`.
      */
     fakeAllowedInProduction: true,
     fallback: {
@@ -215,7 +222,9 @@ export const INTEGRATIONS = {
       warning:
         "File storage: no S3-compatible endpoint is configured, so uploads are written to the local filesystem. " +
         "That does not survive a redeploy on an ephemeral host and is not shared between instances. " +
-        "Set STORAGE_ENDPOINT, STORAGE_BUCKET, STORAGE_ACCESS_KEY and STORAGE_SECRET_KEY to use object storage.",
+        "Set STORAGE_ENDPOINT, STORAGE_BUCKET, STORAGE_ACCESS_KEY and STORAGE_SECRET_KEY to use object storage. " +
+        "In production, verification documents are refused rather than written to local disk unless " +
+        "STORAGE_ALLOW_LOCAL_DOCUMENTS=true.",
     },
     providers: {
       minio: {
@@ -451,6 +460,19 @@ export function requireIntegration(key) {
   const resolved = resolveIntegration(key);
   if (!resolved.configured) throw new ConfigurationError(resolved.error);
   return resolved;
+}
+
+/**
+ * Whether the local filesystem may hold identity documents (audit S10).
+ *
+ * Development: always — that is what the local store is for. Production: only
+ * when `STORAGE_ALLOW_LOCAL_DOCUMENTS=true`, an explicit statement that this
+ * host's disk is persistent and encrypted at rest. Without it a tutor's
+ * passport or police check is refused at upload rather than written somewhere
+ * that a redeploy erases and nothing encrypts.
+ */
+export function allowsLocalIdentityDocuments() {
+  return !isProduction() || truthy(process.env.STORAGE_ALLOW_LOCAL_DOCUMENTS);
 }
 
 export class ConfigurationError extends Error {

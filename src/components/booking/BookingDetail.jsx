@@ -10,8 +10,9 @@ import {
 } from "@/lib/utils/format";
 import {
   BOOKING_STATUS, BOOKING_STATUS_LABELS, LESSON_MODES, MEETING_PROVIDER_LABELS,
-  CANCELLED_STATUSES, ROLES, PAYMENT_STATUS,
+  CANCELLED_STATUSES, ROLES, PAYMENT_STATUS, PAYMENT_STATUS_LABELS, IN_PERSON_LOCATIONS,
 } from "@/constants";
+import { bookingWidgetHref } from "@/lib/booking/widget-params";
 import { statusTone } from "./BookingRow";
 import { BookingActions } from "./BookingActions";
 import { MeetingPanel } from "./MeetingPanel";
@@ -34,6 +35,24 @@ export function BookingDetail({ booking, viewerRole, justConfirmed }) {
   const isCancelled = CANCELLED_STATUSES.includes(booking.status);
   const isConfirmed = booking.status === BOOKING_STATUS.CONFIRMED;
 
+  /**
+   * "Book again" reopens the tutor's widget with this lesson's choices
+   * already made (§37 step 18). The widget keeps only what the tutor still
+   * offers, and the server checks the rest when it is submitted.
+   */
+  const rebook = (extra = {}) =>
+    tutorProfile?.slug
+      ? bookingWidgetHref(tutorProfile.slug, {
+          courseId: booking.courseId?.id ?? booking.courseId,
+          studentProfileId: student?.id,
+          mode: booking.mode,
+          durationMinutes: booking.durationMinutes,
+          locationType: booking.location?.type,
+          meetingProvider: booking.meetingProvider,
+          ...extra,
+        })
+      : null;
+
   return (
     <div className="grid gap-6 lg:grid-cols-[1fr_20rem]">
       <div className="min-w-0 space-y-6">
@@ -49,7 +68,8 @@ export function BookingDetail({ booking, viewerRole, justConfirmed }) {
           payment" is how somebody pays twice. PROCESSING is only ever set
           from the provider's own answer, never from a browser.
         */}
-        {booking.status === BOOKING_STATUS.PENDING_PAYMENT &&
+        {!isTutorView &&
+          booking.status === BOOKING_STATUS.PENDING_PAYMENT &&
           payment?.status === PAYMENT_STATUS.PROCESSING && (
             <Alert tone="info" title="Payment is being processed">
               Your payment provider is still clearing this payment. The lesson time is held, and it
@@ -57,7 +77,8 @@ export function BookingDetail({ booking, viewerRole, justConfirmed }) {
             </Alert>
           )}
 
-        {booking.status === BOOKING_STATUS.PENDING_PAYMENT &&
+        {!isTutorView &&
+          booking.status === BOOKING_STATUS.PENDING_PAYMENT &&
           payment?.status !== PAYMENT_STATUS.PROCESSING && (
             <Alert
               tone="warning"
@@ -77,8 +98,13 @@ export function BookingDetail({ booking, viewerRole, justConfirmed }) {
             tone="neutral"
             title="This time has been released"
             action={
-              tutorProfile?.slug ? (
-                <Button href={`/tutors/${tutorProfile.slug}`} size="sm" variant="secondary">
+              !isTutorView && tutorProfile?.slug ? (
+                // The same time too, if it is still free — the widget drops it if not.
+                <Button
+                  href={rebook({ startAt: new Date(booking.startAt).toISOString() })}
+                  size="sm"
+                  variant="secondary"
+                >
                   Book again
                 </Button>
               ) : null
@@ -175,6 +201,9 @@ export function BookingDetail({ booking, viewerRole, justConfirmed }) {
               <div className="rounded-xl border border-accent-200 bg-accent-50/60 p-4">
                 <p className="text-sm font-bold text-accent-900">Where to meet</p>
                 <p className="mt-1 text-sm text-ink-700">{booking.location.label}</p>
+                {booking.location.type === IN_PERSON_LOCATIONS.OTHER && booking.location.description && (
+                  <p className="mt-0.5 text-sm text-ink-600">{booking.location.description}</p>
+                )}
                 {booking.location.addressLine && (
                   <p className="mt-0.5 text-sm text-ink-600">{booking.location.addressLine}</p>
                 )}
@@ -256,17 +285,29 @@ export function BookingDetail({ booking, viewerRole, justConfirmed }) {
                 >
                   Message
                 </Button>
-                <Button
-                  href={`/tutors/${tutorProfile.slug}#availability`}
-                  size="sm"
-                  fullWidth
-                >
+                <Button href={rebook()} size="sm" fullWidth>
                   Book again
                 </Button>
               </div>
             </CardBody>
           </Card>
         )}
+
+        {/* A tutor's only way to write to a family first is from their booking (R17.1). */}
+        {isTutorView &&
+          !isCancelled &&
+          booking.status !== BOOKING_STATUS.PENDING_PAYMENT &&
+          booking.status !== BOOKING_STATUS.EXPIRED && (
+            <Button
+              href={`/tutor/messages/new?booking=${booking.id}`}
+              variant="secondary"
+              size="sm"
+              fullWidth
+              iconLeft={<MessageSquare className="size-3.5" />}
+            >
+              Message family
+            </Button>
+          )}
 
         <Card>
           <CardHeader title={isTutorView ? "Your earnings" : "Payment"} />
@@ -306,6 +347,21 @@ export function BookingDetail({ booking, viewerRole, justConfirmed }) {
                   label="Refunded"
                   value={formatMoney(booking.cancellation.refundCents)}
                   tone="success"
+                />
+              )}
+
+              {/* Whether the family's payment has come in, or gone back (R16.6).
+                  The service hands a tutor the status and nothing else. */}
+              {isTutorView && (
+                <Row
+                  label="Payment"
+                  value={
+                    booking.packagePurchaseId
+                      ? "Paid (lesson package)"
+                      : (PAYMENT_STATUS_LABELS[payment?.status] ?? "Not started")
+                  }
+                  tone={payment?.status === PAYMENT_STATUS.PAID ? "success" : undefined}
+                  muted={payment?.status !== PAYMENT_STATUS.PAID}
                 />
               )}
             </dl>

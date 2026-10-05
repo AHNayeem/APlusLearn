@@ -2,7 +2,10 @@ import { ShieldCheck, Wallet, TrendingUp, ArrowRight } from "lucide-react";
 import { Button, Card, CardBody, RevealGroup, RevealItem } from "@/components/ui";
 import { PageHero } from "@/components/marketing/PageHero";
 import { StepCards } from "@/components/home/StepCards";
-import { Section, Faq, HOME_FAQS } from "@/components/home/Sections";
+import { Section, Faq } from "@/components/home/Sections";
+import { connectToDatabase } from "@/lib/db/connect";
+import { getAppConfig } from "@/services/settings.service";
+import { homeFaqs, freeCancellationClause, refundPhrase } from "@/constants";
 
 export const metadata = {
   title: "How it works",
@@ -11,7 +14,8 @@ export const metadata = {
   alternates: { canonical: "/how-it-works" },
 };
 
-const PARENT_STEPS = [
+/** The parent steps, with the live cancellation terms (R33.4). */
+const parentSteps = (policy) => [
   {
     art: "search",
     title: "Search your exact course",
@@ -22,13 +26,13 @@ const PARENT_STEPS = [
     art: "message",
     title: "Compare and message",
     body: "Every profile shows verified reviews from families who completed a lesson, the tutor's real credentials, and what they charge. Message as many as you like — it's free and you're not committed.",
-    detail: "Tutors typically reply within a few hours. Response time is shown on each profile.",
+    detail: "Each profile shows how quickly that tutor usually replies, measured from their messages.",
   },
   {
     art: "calendar",
     title: "Book and pay securely",
-    body: "Pick a slot from the tutor's live calendar. Pay by card; the money is held until the lesson is complete. Online lessons get a meeting link automatically.",
-    detail: "Free cancellation up to 24 hours before. Full refund if a tutor doesn't show.",
+    body: "Pick a slot from the tutor's live calendar and pay by card. Online lessons get their joining link on the lesson page.",
+    detail: `${freeCancellationClause(policy).replace(/^./, (c) => c.toUpperCase())}. ${refundPhrase(policy.tutorNoShowRefundPercent).replace(/^./, (c) => c.toUpperCase())} if a tutor doesn't show.`,
   },
   {
     art: "progress",
@@ -47,7 +51,7 @@ const TUTOR_STEPS = [
   {
     art: "verify",
     title: "Get verified",
-    body: "Upload your ID and credentials. Our team checks each one and grants the matching badge. Certified teachers are verified against the Ontario College of Teachers register.",
+    body: "Upload your ID and credentials. Our team checks each one and grants the matching badge; a teaching-college registration number is checked against the college's public register.",
   },
   {
     art: "teach",
@@ -56,7 +60,9 @@ const TUTOR_STEPS = [
   },
 ];
 
-export default function HowItWorksPage() {
+export default async function HowItWorksPage() {
+  await connectToDatabase();
+  const { policy, branding } = await getAppConfig();
   return (
     <>
       <PageHero
@@ -79,7 +85,7 @@ export default function HowItWorksPage() {
         title="Four steps, start to finish"
         description="Everything happens in one place — searching, messaging, booking and paying — so nothing depends on a phone call being returned."
       >
-        <StepCards steps={PARENT_STEPS} columns={4} />
+        <StepCards steps={parentSteps(policy)} columns={4} />
       </Section>
 
       <Section
@@ -139,7 +145,7 @@ export default function HowItWorksPage() {
         <StepCards steps={TUTOR_STEPS} columns={3} />
       </Section>
 
-      <Faq faqs={HOME_FAQS} title="Common questions" showAllLink={false} />
+      <Faq faqs={homeFaqs({ appName: branding?.appName, policy })} title="Common questions" showAllLink={false} />
     </>
   );
 }

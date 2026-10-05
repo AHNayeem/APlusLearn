@@ -8,7 +8,7 @@ import { useSubmit } from "@/hooks/useAsync";
 import {
   Button, Field, Modal, Select, Textarea, FormErrorSummary, useToast,
 } from "@/components/ui";
-import { PAYOUT_STATUS, PAYOUT_STATUS_LABELS } from "@/constants";
+import { PAYOUT_STATUS, PAYOUT_STATUS_LABELS, PAYOUT_STATUS_TRANSITIONS } from "@/constants";
 import { formatMoney } from "@/lib/utils/format";
 
 /** Create a payout for a tutor with settled, held-past-hold earnings (§20). */
@@ -48,7 +48,12 @@ export function UpdatePayoutButton({ payout }) {
   const router = useRouter();
   const toast = useToast();
   const [open, setOpen] = useState(false);
-  const [status, setStatus] = useState(PAYOUT_STATUS.PAID);
+  // Only the moves the server's state machine allows from here (R28.19):
+  // PAID and FAILED are final, so a failed payout can never be marked paid.
+  const nextStatuses = PAYOUT_STATUS_TRANSITIONS[payout.status] ?? [];
+  const [status, setStatus] = useState(
+    nextStatuses.includes(PAYOUT_STATUS.PAID) ? PAYOUT_STATUS.PAID : nextStatuses[0],
+  );
   const [note, setNote] = useState("");
 
   const { submit, pending, error, fieldErrors } = useSubmit(async () => {
@@ -59,7 +64,7 @@ export function UpdatePayoutButton({ payout }) {
     router.refresh();
   });
 
-  if (payout.status === PAYOUT_STATUS.PAID) return null;
+  if (!nextStatuses.length) return null;
 
   return (
     <>
@@ -93,12 +98,7 @@ export function UpdatePayoutButton({ payout }) {
 
           <Field label="New status" htmlFor="payout-status">
             <Select id="payout-status" value={status} onChange={(e) => setStatus(e.target.value)}>
-              {[
-                PAYOUT_STATUS.SCHEDULED,
-                PAYOUT_STATUS.IN_TRANSIT,
-                PAYOUT_STATUS.PAID,
-                PAYOUT_STATUS.FAILED,
-              ].map((value) => (
+              {nextStatuses.map((value) => (
                 <option key={value} value={value}>
                   {PAYOUT_STATUS_LABELS[value]}
                 </option>

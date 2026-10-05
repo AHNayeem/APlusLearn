@@ -95,7 +95,7 @@ function apiClient() {
       method,
       headers: {
         "Content-Type": "application/json",
-        "x-forwarded-for": RUN_IP,
+        "x-forwarded-for": RUN_IP, "x-real-ip": RUN_IP,
         ...(jar.size ? { Cookie: [...jar].map(([k, v]) => `${k}=${v}`).join("; ") } : {}),
       },
       body: body ? JSON.stringify(body) : undefined,
@@ -183,7 +183,7 @@ async function main() {
   const newContext = async (api) => {
     const context = await browser.newContext({
       viewport: { width: 1280, height: 900 },
-      extraHTTPHeaders: { "x-forwarded-for": RUN_IP },
+      extraHTTPHeaders: { "x-forwarded-for": RUN_IP, "x-real-ip": RUN_IP },
     });
     await context.addCookies(api.cookies());
     return context;

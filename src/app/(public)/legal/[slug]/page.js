@@ -11,11 +11,24 @@ export function generateStaticParams() {
   return LEGAL_SLUGS.map((slug) => ({ slug }));
 }
 
-/** The policy set, with the operator's own name and support address (§26). */
+/**
+ * The policy set, built from the operator's own identity and the live policy
+ * numbers (§26, §33) — the same Settings document the booking engine applies,
+ * so the page never describes a rule the platform does not enforce.
+ */
 async function legalPageFor(slug) {
-  const { branding, contact } = await getAppConfig();
-  return buildLegalPages({ appName: branding.appName, supportEmail: contact.supportEmail })[slug];
+  const { branding, contact, policy } = await getAppConfig();
+  if (!Object.hasOwn(LEGAL_PAGES_BY_SLUG, slug)) return null;
+  return buildLegalPages({
+    appName: branding.appName,
+    supportEmail: contact.supportEmail,
+    contact,
+    policy,
+  })[slug];
 }
+
+/** Membership check without building anything — and immune to `__proto__`-style slugs. */
+const LEGAL_PAGES_BY_SLUG = Object.fromEntries(LEGAL_SLUGS.map((slug) => [slug, true]));
 
 export async function generateMetadata({ params }) {
   const { slug } = await params;
@@ -59,9 +72,14 @@ export default async function LegalPage({ params }) {
                 <h2>Questions</h2>
                 <p>
                   If anything here is unclear, email{" "}
-                  <a href={`mailto:${contact.supportEmail}`}>{contact.supportEmail}</a> and
-                  we&rsquo;ll
-                  explain it in plain language.
+                  <a href={`mailto:${contact.supportEmail}`}>{contact.supportEmail}</a>
+                  {contact.supportPhone ? (
+                    <>
+                      {" "}or call <a href={`tel:${contact.supportPhone}`}>{contact.supportPhone}</a>
+                    </>
+                  ) : null}{" "}
+                  and we&rsquo;ll explain it in plain language. The{" "}
+                  <Link href="/help-centre">help centre</Link> answers the most common questions.
                 </p>
               </section>
             </Prose>
@@ -101,13 +119,19 @@ export default async function LegalPage({ params }) {
 }
 
 /**
- * The policy copy uses **bold** for lead-ins. Escaping first means the content
- * itself can never inject markup — only our own <strong> wrapper survives.
+ * The policy copy uses **bold** for lead-ins and [label](/path) for links to
+ * other pages on this site. Escaping first means the content itself can never
+ * inject markup — only our own <strong> and <a> wrappers survive, and a link
+ * target must be a same-site path made of plain path characters, so nothing
+ * substituted from settings can become a `javascript:` or off-site href.
  */
 function markdownInline(text) {
   const escaped = text
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-  return escaped.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+  return escaped
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/\[([^\]]+)\]\((\/(?![/\\])[a-z0-9\-/#]*)\)/gi, '<a href="$2">$1</a>');
 }

@@ -2,7 +2,7 @@ import Link from "next/link";
 import { Star } from "lucide-react";
 import { connectToDatabase } from "@/lib/db/connect";
 import { enforceRole } from "@/lib/auth/guards";
-import { LEARNER_ROLES } from "@/constants";
+import { LEARNER_ROLES, REVIEW_STATUS } from "@/constants";
 import { listReviews } from "@/services/review.service";
 import { listBookings } from "@/services/booking.service";
 import {
@@ -83,16 +83,24 @@ export default async function MyReviewsPage() {
                     </div>
                     <div className="flex items-center gap-2">
                       <Rating value={review.rating} showValue={false} size="sm" />
-                      <Badge tone="success" size="sm">
-                        Verified
-                      </Badge>
+                      {review.status === REVIEW_STATUS.PENDING_MODERATION ? (
+                        <Badge tone="brand" size="sm">
+                          Awaiting approval
+                        </Badge>
+                      ) : (
+                        <Badge tone="success" size="sm">
+                          Verified
+                        </Badge>
+                      )}
                     </div>
                   </div>
 
                   {review.title && (
                     <p className="mt-4 text-sm font-bold text-ink-900">{review.title}</p>
                   )}
-                  <p className="mt-1.5 text-sm leading-relaxed text-ink-600">{review.body}</p>
+                  {review.body && (
+                    <p className="mt-1.5 text-sm leading-relaxed text-ink-600">{review.body}</p>
+                  )}
 
                   {review.tutorReply && (
                     <div className="mt-4 rounded-xl border-l-2 border-brand-300 bg-brand-50/50 p-4">

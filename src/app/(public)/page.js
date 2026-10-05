@@ -1,6 +1,6 @@
 import { connectToDatabase } from "@/lib/db/connect";
 import {
-  listProvinces, listGrades, listSubjects, popularCourses,
+  listProvinces, listGrades, listSubjects, popularCourses, defaultProvinceCode,
 } from "@/services/curriculum.service";
 import { featuredTutors, marketplaceStats } from "@/services/search.service";
 import { getSettings } from "@/services/settings.service";
@@ -14,6 +14,7 @@ import {
   VerificationSection, LessonModes, Testimonials, BecomeTutorCta, Faq, HOME_FAQS,
 } from "@/components/home/Sections";
 import { FeaturedTutors } from "@/components/home/FeaturedTutors";
+import { JsonLd } from "@/components/seo/JsonLd";
 
 export const metadata = {
   title: "Find a verified Canadian tutor — by course code",
@@ -29,12 +30,19 @@ export const revalidate = 3600;
 export default async function HomePage() {
   await connectToDatabase();
 
-  const [provinces, grades, subjects, courses, stats, settings, reviews, ratingAgg, topTutors] =
+  // The homepage starts on the first live province in the administrator's
+  // order — read from the data, so launching or reordering provinces changes
+  // it without a deployment (§6). The hero then reloads grades and subjects
+  // for whichever province the visitor picks.
+  const provinceCode = await defaultProvinceCode();
+
+  const [provinces, grades, heroSubjects, subjects, courses, stats, settings, reviews, ratingAgg, topTutors] =
     await Promise.all([
       listProvinces({ activeOnly: false }),
-      listGrades({ provinceCode: "ON" }),
+      provinceCode ? listGrades({ provinceCode }) : [],
+      provinceCode ? listSubjects({ provinceCode }) : listSubjects(),
       listSubjects({ popularOnly: true }),
-      popularCourses(6, "ON"),
+      provinceCode ? popularCourses(6, provinceCode) : popularCourses(6),
       marketplaceStats(),
       getSettings(),
       Review.find({ status: REVIEW_STATUS.PUBLISHED, body: { $exists: true } })
@@ -56,6 +64,9 @@ export default async function HomePage() {
       // below, so the faces at the top of the page are the faces you meet.
       featuredTutors({ limit: 4 }),
     ]);
+
+  const live = provinces.find((p) => p.code === provinceCode);
+  const province = live ? { code: live.code, name: live.name, slug: live.slug } : null;
 
   // The homepage rail shows quotes shoulder to shoulder, where two families
   // praising a tutor in the same words reads as a rendering bug rather than as
@@ -79,7 +90,7 @@ export default async function HomePage() {
       <Hero
         provinces={provinces}
         grades={grades}
-        subjects={subjects}
+        subjects={heroSubjects}
         popularCourses={courses}
         topTutors={topTutors}
         stats={{
@@ -91,8 +102,8 @@ export default async function HomePage() {
       <HowItWorks />
       <PopularSubjects subjects={subjects} />
       <FeaturedTutors />
-      <PopularCourses courses={courses} />
-      <TutorsByGrade grades={grades} />
+      <PopularCourses courses={courses} province={province} />
+      <TutorsByGrade grades={grades} province={province} />
       <WhyChoose />
       <VerificationSection />
       <LessonModes />
@@ -101,10 +112,8 @@ export default async function HomePage() {
       <Faq faqs={HOME_FAQS.slice(0, 6)} />
 
       {/* Structured data so the FAQ can surface in search results (§29). */}
-      <script
-        type="application/ld+json"
-        dangerouslySetInnerHTML={{
-          __html: JSON.stringify({
+      <JsonLd
+        data={{
             "@context": "https://schema.org",
             "@type": "FAQPage",
             mainEntity: HOME_FAQS.map((faq) => ({
@@ -112,8 +121,7 @@ export default async function HomePage() {
               name: faq.q,
               acceptedAnswer: { "@type": "Answer", text: faq.a },
             })),
-          }),
-        }}
+          }}
       />
     </>
   );

@@ -22,6 +22,7 @@ import {
   ProgressReport,
   TutorPromotion,
   RiskCase,
+  SearchEvent,
 } from "@/models";
 import {
   ROLES,
@@ -54,6 +55,7 @@ import {
   rate,
 } from "@/lib/analytics/range";
 import { livePromotionQuery } from "@/lib/search/promotion";
+import { searchDemand } from "./search-analytics.service";
 
 /**
  * Marketplace analytics (§25, §41 Phase 2).
@@ -234,6 +236,193 @@ async function lessonAggregate(window, extraMatch = {}) {
 }
 
 /**
+ * Tutors whose application was approved (R28.25).
+ *
+ * Read from the application, not the profile's search flag: "approved" is an
+ * administrator's decision about the person, while "searchable" is also
+ * about whether their profile is complete today. A deleted account is not
+ * counted, matching `registeredTutors`.
+ */
+async function approvedTutorCount() {
+  const [row] = await TutorApplication.aggregate([
+    { $match: { status: TUTOR_STATUS.APPROVED } },
+    {
+      $lookup: {
+        from: User.collection.name,
+        localField: "userId",
+        foreignField: "_id",
+        pipeline: [{ $match: { role: ROLES.TUTOR, deletedAt: null } }, { $project: { _id: 1 } }],
+        as: "account",
+      },
+    },
+    { $match: { "account.0": { $exists: true } } },
+    { $group: { _id: "$userId" } },
+    { $count: "tutors" },
+  ]);
+  return row?.tutors ?? 0;
+}
+
+/** Lesson states that mean a learner was actually being taught. */
+const ACTIVE_LESSON_STATUSES = [BOOKING_STATUS.CONFIRMED, BOOKING_STATUS.COMPLETED];
+
+/**
+ * Distinct learners with a confirmed or completed lesson scheduled in the
+ * period (R28.26). Counted by `studentProfileId` — a parent with three
+ * children taking lessons is three active students — and on `startAt`, the
+ * same axis every lesson figure on the page uses.
+ */
+async function activeLearnerCount(range) {
+  const [row] = await Booking.aggregate([
+    {
+      $match: {
+        status: { $in: ACTIVE_LESSON_STATUSES },
+        studentProfileId: { $ne: null },
+        ...dateWindow("startAt", range),
+      },
+    },
+    { $group: { _id: "$studentProfileId" } },
+    { $count: "learners" },
+  ]);
+  return row?.learners ?? 0;
+}
+
+/**
+ * Average paid value of one lesson (R28.30), from `Payment` on `paidAt`.
+ *
+ * The numerator is the settled payments' lesson value (`subtotalCents`, the
+ * same figure as gross sales). The denominator is the lessons those payments
+ * bought: the bookings that point at a lesson payment (one for a single
+ * lesson or a group seat, ten for a ten-week series), or a package's
+ * `sessionsTotal` — a package payment is counted by what it sold, not by how
+ * many of its sessions have been drawn so far.
+ */
+async function averageLessonValue(range) {
+  const [row] = await Payment.aggregate([
+    {
+      $match: {
+        status: { $in: SETTLED_PAYMENT_STATUSES },
+        ...dateWindow("paidAt", range),
+      },
+    },
+    {
+      $lookup: {
+        from: Booking.collection.name,
+        localField: "_id",
+        foreignField: "paymentId",
+        pipeline: [{ $count: "n" }],
+        as: "bookingCount",
+      },
+    },
+    {
+      $lookup: {
+        from: PackagePurchase.collection.name,
+        localField: "packagePurchaseId",
+        foreignField: "_id",
+        pipeline: [{ $project: { sessionsTotal: 1 } }],
+        as: "package",
+      },
+    },
+    {
+      $project: {
+        subtotalCents: 1,
+        lessons: {
+          $cond: [
+            { $ifNull: ["$packagePurchaseId", false] },
+            { $max: [1, { $ifNull: [{ $first: "$package.sessionsTotal" }, 1] }] },
+            { $max: [1, { $ifNull: [{ $first: "$bookingCount.n" }, 0] }] },
+          ],
+        },
+      },
+    },
+    { $group: { _id: null, valueCents: { $sum: "$subtotalCents" }, lessons: { $sum: "$lessons" } } },
+  ]);
+
+  const lessons = row?.lessons ?? 0;
+  return {
+    lessons,
+    valueCents: row?.valueCents ?? 0,
+    averageCents: lessons ? Math.round(row.valueCents / lessons) : 0,
+  };
+}
+
+/**
+ * Where the marketplace is busiest in the period (R28.32): cities ranked by
+ * lessons scheduled there plus searches that resolved to them.
+ *
+ * A lesson's city is where it is held when in person, and otherwise the
+ * family's own city — an online lesson for a Calgary family is Calgary
+ * demand. Both streams are combined with `$unionWith` and ranked inside
+ * MongoDB, so the order is over every row in the period rather than a merge
+ * of two truncated top-N lists.
+ */
+async function activeCityRanking(range, limit) {
+  const rows = await Booking.aggregate([
+    {
+      $match: {
+        status: { $nin: [BOOKING_STATUS.PENDING_PAYMENT, BOOKING_STATUS.EXPIRED] },
+        ...dateWindow("startAt", range),
+      },
+    },
+    {
+      $lookup: {
+        from: User.collection.name,
+        localField: "purchaserId",
+        foreignField: "_id",
+        pipeline: [{ $project: { city: 1, province: 1 } }],
+        as: "purchaser",
+      },
+    },
+    {
+      $project: {
+        _id: 0,
+        city: { $ifNull: ["$location.city", { $first: "$purchaser.city" }] },
+        province: { $first: "$purchaser.province" },
+        lessons: { $literal: 1 },
+        searches: { $literal: 0 },
+      },
+    },
+    {
+      $unionWith: {
+        coll: SearchEvent.collection.name,
+        pipeline: [
+          { $match: { ...dateWindow("createdAt", range), city: { $type: "string" } } },
+          {
+            $project: {
+              _id: 0,
+              city: 1,
+              province: "$provinceCode",
+              lessons: { $literal: 0 },
+              searches: { $literal: 1 },
+            },
+          },
+        ],
+      },
+    },
+    { $match: { city: { $type: "string", $ne: "" } } },
+    {
+      $group: {
+        _id: { $toLower: { $trim: { input: "$city" } } },
+        city: { $first: { $trim: { input: "$city" } } },
+        province: { $max: "$province" },
+        lessons: { $sum: "$lessons" },
+        searches: { $sum: "$searches" },
+      },
+    },
+    { $addFields: { activity: { $add: ["$lessons", "$searches"] } } },
+    { $sort: { activity: -1, lessons: -1, _id: 1 } },
+    { $limit: limit },
+  ]);
+
+  return rows.map((row) => ({
+    city: row.city,
+    provinceCode: row.province ?? null,
+    lessons: row.lessons,
+    searches: row.searches,
+    activity: row.activity,
+  }));
+}
+
+/**
  * The headline marketplace figures (§25).
  *
  * @param {object} [options] A reporting period — `days`, or `from`/`to`, plus
@@ -246,7 +435,7 @@ export async function marketplaceOverview(options = {}) {
     registeredTutors,
     approvedTutors,
     pendingApplications,
-    activeStudentIds,
+    activeLearners,
     totalLearners,
     revenue,
     previousRevenue,
@@ -259,10 +448,9 @@ export async function marketplaceOverview(options = {}) {
     promotedNow,
   ] = await Promise.all([
     User.countDocuments({ role: ROLES.TUTOR, deletedAt: null }),
-    TutorProfile.countDocuments({ status: TUTOR_STATUS.APPROVED, isSearchable: true }),
+    approvedTutorCount(),
     TutorApplication.countDocuments({ status: TUTOR_STATUS.PENDING_REVIEW }),
-    // "Active" means they actually booked inside the window.
-    Booking.distinct("purchaserId", dateWindow("createdAt", range)),
+    activeLearnerCount(range),
     StudentProfile.countDocuments({ archivedAt: null }),
     revenueAggregate(range),
     revenueAggregate(range.previous),
@@ -277,17 +465,31 @@ export async function marketplaceOverview(options = {}) {
     TutorPromotion.countDocuments(livePromotionQuery()),
   ]);
 
+  const [searchableTutors, lessonValue] = await Promise.all([
+    TutorProfile.countDocuments({ isSearchable: true }),
+    averageLessonValue(range),
+  ]);
+
   return {
     period: describe(range),
     supply: {
+      /** Tutor accounts that exist (not deleted), whatever their application. */
       registeredTutors,
+      /** Tutors whose application an administrator approved (R28.25). */
       approvedTutors,
+      /** Of those, the ones a family can find in search right now. */
+      searchableTutors,
       pendingApplications,
       approvalRate: rate(approvedTutors, registeredTutors),
       promotedNow,
     },
     demand: {
-      activeStudents: activeStudentIds.length,
+      /**
+       * Distinct learners with a confirmed or completed lesson in the period
+       * (R28.26) — learners, not the adults paying, and never an abandoned
+       * checkout.
+       */
+      activeStudents: activeLearners,
       totalLearners,
       newRegistrations,
       registrationChange: percentChange(newRegistrations, previousRegistrations),
@@ -310,9 +512,12 @@ export async function marketplaceOverview(options = {}) {
       referralCreditCents: revenue.creditAppliedCents,
       tutorEarningsCents: revenue.tutorEarningsCents,
       payments: revenue.payments,
-      averageBookingValueCents: revenue.payments
-        ? Math.round(revenue.grossCents / revenue.payments)
-        : 0,
+      /**
+       * Paid lesson value per lesson paid for (R28.30): a ten-lesson series
+       * settled in one payment is ten lessons, a package is its sessions.
+       */
+      averageBookingValueCents: lessonValue.averageCents,
+      paidLessons: lessonValue.lessons,
       completedLessons: lessons.completed,
       completionRate: lessons.completionRate,
       cancellationRate: lessons.cancellationRate,
@@ -331,7 +536,13 @@ export async function marketplaceOverview(options = {}) {
   };
 }
 
-/** Which subjects, courses and cities the marketplace actually runs on. */
+/**
+ * Which subjects, courses and cities the marketplace actually runs on.
+ *
+ * `popularSubjects` / `popularCourses` are by *lessons booked*; `search` is
+ * what families searched for. They answer different questions — what sells
+ * and what is wanted — and the page labels them apart.
+ */
 export async function marketplaceBreakdowns(options = {}) {
   const range = resolveRange(options);
   const limit = Math.min(options.limit ?? 8, 50);
@@ -340,7 +551,7 @@ export async function marketplaceBreakdowns(options = {}) {
     ...dateWindow("startAt", range),
   };
 
-  const [subjects, courses, cities, modes, series] = await Promise.all([
+  const [subjects, courses, cities, modes, series, search] = await Promise.all([
     Booking.aggregate([
       { $match: lessonMatch },
       {
@@ -366,13 +577,7 @@ export async function marketplaceBreakdowns(options = {}) {
       { $sort: { bookings: -1, "_id.name": 1 } },
       { $limit: limit },
     ]),
-    TutorProfile.aggregate([
-      { $match: { isSearchable: true } },
-      { $group: { _id: "$city", tutors: { $sum: 1 } } },
-      { $match: { _id: { $ne: null } } },
-      { $sort: { tutors: -1, _id: 1 } },
-      { $limit: limit },
-    ]),
+    activeCityRanking(range, limit),
     Booking.aggregate([
       { $match: lessonMatch },
       { $group: { _id: "$mode", count: { $sum: 1 } } },
@@ -394,6 +599,10 @@ export async function marketplaceBreakdowns(options = {}) {
       },
       { $sort: { _id: 1 } },
     ]),
+    // What families *looked for* (R28.31), over the same period — the
+    // demand that bookings alone cannot show, including the searches that
+    // found nobody.
+    searchDemand({ from: range.from, to: range.to, timeZone: range.timeZone, limit }),
   ]);
 
   const modeMap = Object.fromEntries(modes.map((m) => [m._id, m.count]));
@@ -411,7 +620,10 @@ export async function marketplaceBreakdowns(options = {}) {
       bookings: c.bookings,
       revenueCents: c.revenueCents,
     })),
-    activeCities: cities.map((c) => ({ city: c._id, tutors: c.tutors })),
+    /** Cities by lessons scheduled plus searches made there (R28.32). */
+    activeCities: cities,
+    /** Search demand from `SearchEvent` (R28.31). */
+    search,
     lessonModes: {
       online: modeMap[LESSON_MODES.ONLINE] ?? 0,
       inPerson: modeMap[LESSON_MODES.IN_PERSON] ?? 0,

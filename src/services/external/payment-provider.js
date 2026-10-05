@@ -49,6 +49,14 @@ export class PaymentProvider {
   async createCheckout() {
     throw new Error("not implemented");
   }
+  /**
+   * Stop an unpaid checkout from being paid (R27.2). Returns `{ expired }`;
+   * a provider that cannot expire a session answers `false` and the
+   * settlement path refunds a late payment instead.
+   */
+  async expireCheckout() {
+    return { expired: false };
+  }
   async capturePayment() {
     throw new Error("not implemented");
   }
@@ -100,6 +108,11 @@ export class MockPaymentProvider extends PaymentProvider {
   /** The development flow keeps checkout in-app, on our own card form. */
   get hostedCheckout() {
     return false;
+  }
+
+  /** Nothing to stop: the in-app form refuses a payment that is no longer pending. */
+  async expireCheckout({ checkoutId } = {}) {
+    return { expired: Boolean(checkoutId) };
   }
 
   async createCheckout({ bookingReference, amountCents, currency = "CAD", metadata = {} }) {
@@ -275,6 +288,19 @@ export class StripePaymentProvider extends PaymentProvider {
 
   get hostedCheckout() {
     return true;
+  }
+
+  /** Expire an open Checkout Session so it can no longer be paid (R27.2). */
+  async expireCheckout({ checkoutId } = {}) {
+    if (!checkoutId) return { expired: false };
+    try {
+      const session = await this.stripe.checkout.sessions.expire(checkoutId);
+      return { expired: session?.status === "expired" };
+    } catch (error) {
+      // Already completed or already expired: the settlement path decides.
+      console.warn(`[stripe] checkout ${checkoutId} not expired: ${error.message}`);
+      return { expired: false };
+    }
   }
 
   /**

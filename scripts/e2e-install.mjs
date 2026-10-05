@@ -132,7 +132,7 @@ function apiClient() {
       method,
       headers: {
         "Content-Type": "application/json",
-        "x-forwarded-for": RUN_IP,
+        "x-forwarded-for": RUN_IP, "x-real-ip": RUN_IP,
         ...(jar.size ? { Cookie: [...jar].map(([k, v]) => `${k}=${v}`).join("; ") } : {}),
       },
       body: body ? JSON.stringify(body) : undefined,
@@ -286,7 +286,7 @@ async function main() {
         isMobile: mobile,
         hasTouch: mobile,
         deviceScaleFactor: mobile ? 2 : 1,
-        extraHTTPHeaders: { "x-forwarded-for": RUN_IP },
+        extraHTTPHeaders: { "x-forwarded-for": RUN_IP, "x-real-ip": RUN_IP },
       }));
     if (cookies.length) await context.addCookies(cookies);
     const page = await context.newPage();

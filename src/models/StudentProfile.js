@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { LEARNER_MODE_PREFERENCES } from "../constants/index.js";
 
 const LearningGoalSchema = new mongoose.Schema(
   {
@@ -34,10 +35,24 @@ const StudentProfileSchema = new mongoose.Schema(
     gradeName: { type: String, trim: true },
     school: { type: String, trim: true },
 
+    /**
+     * What this learner needs tutoring in (§5): subjects, and the exact
+     * provincial courses where they are known. Both are checked against the
+     * learner's own province when written, so a child's record can only name
+     * courses that exist where they study.
+     */
     subjectsOfInterest: [{ type: mongoose.Schema.Types.ObjectId, ref: "Subject" }],
     currentCourses: [{ type: mongoose.Schema.Types.ObjectId, ref: "Course" }],
 
+    /** Online, in person, or either — the default a search for them uses. */
+    lessonModePreference: { type: String, enum: Object.values(LEARNER_MODE_PREFERENCES) },
+    /** Marks as percentages, both optional (§5). */
+    currentMark: { type: Number, min: 0, max: 100 },
+    targetMark: { type: Number, min: 0, max: 100 },
+
     learningGoals: { type: [LearningGoalSchema], default: [] },
+    areasForImprovement: { type: String, trim: true, maxlength: 1000 },
+    learningPreferences: { type: String, trim: true, maxlength: 1000 },
     notes: { type: String, trim: true, maxlength: 1500 },
     accessibilityNeeds: { type: String, trim: true, maxlength: 1000 },
 

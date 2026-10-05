@@ -3,7 +3,7 @@ import { CreditCard, Search } from "lucide-react";
 import { connectToDatabase } from "@/lib/db/connect";
 import { enforceRole } from "@/lib/auth/guards";
 import { ROLES, PAYMENT_STATUS, PAYMENT_STATUS_LABELS } from "@/constants";
-import { listPayments } from "@/services/payment.service";
+import { listPayments, paymentTotals } from "@/services/payment.service";
 import {
   Badge, Button, EmptyState, LinkTabs, Pagination, StatCard,
   Table, THead, TH, TBody, TR, TD,
@@ -36,19 +36,10 @@ export default async function AdminPaymentsPage({ searchParams }) {
   await connectToDatabase();
 
   const { status = "", page = "1" } = await searchParams;
-  const { items, total, pageSize } = await listPayments(user, {
-    page: Number(page),
-    status: status || undefined,
-  });
-
-  const totals = items.reduce(
-    (acc, p) => ({
-      gross: acc.gross + (p.status === PAYMENT_STATUS.PAID ? p.totalCents : 0),
-      commission: acc.commission + (p.status === PAYMENT_STATUS.PAID ? p.commissionCents : 0),
-      refunded: acc.refunded + (p.refundedCents ?? 0),
-    }),
-    { gross: 0, commission: 0, refunded: 0 },
-  );
+  const [{ items, total, pageSize }, totals] = await Promise.all([
+    listPayments(user, { page: Number(page), status: status || undefined }),
+    paymentTotals({ status: status || undefined }),
+  ]);
 
   return (
     <DashboardPage>
@@ -59,15 +50,15 @@ export default async function AdminPaymentsPage({ searchParams }) {
 
       <div className="grid gap-4 sm:grid-cols-3">
         <StatCard
-          label="Collected (this page)"
-          value={formatMoney(totals.gross, { compact: true })}
+          label="Collected"
+          value={formatMoney(totals.collectedCents, { compact: true })}
           icon={<CreditCard className="size-5" />}
         />
         <StatCard
-          label="Commission"
-          value={formatMoney(totals.commission, { compact: true })}
+          label="Commission (net of refunds)"
+          value={formatMoney(totals.commissionCents, { compact: true })}
         />
-        <StatCard label="Refunded" value={formatMoney(totals.refunded, { compact: true })} />
+        <StatCard label="Refunded" value={formatMoney(totals.refundedCents, { compact: true })} />
       </div>
 
       <div className="mt-6">

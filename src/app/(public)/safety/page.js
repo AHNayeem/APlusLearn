@@ -5,6 +5,7 @@ import { Button, Card, CardBody, Reveal, RevealGroup, RevealItem } from "@/compo
 import { PageHero } from "@/components/marketing/PageHero";
 import { Section, Faq } from "@/components/home/Sections";
 import { getAppConfig } from "@/services/settings.service";
+import { VERIFICATION_DISCLAIMER } from "@/constants";
 
 export const metadata = {
   title: "Safety",
@@ -53,8 +54,8 @@ export default async function SafetyPage() {
           {[
             {
               icon: UserCheck,
-              title: "Nobody appears unverified",
-              body: "Every tutor's identity is checked before their profile is visible. Optional badges — OCT membership, education, background checks — are each verified separately and shown individually so you can see exactly what was confirmed.",
+              title: "Every tutor's ID is reviewed",
+              body: "An application cannot be approved until our team has reviewed the tutor's government-issued photo ID. Other badges — teaching-college membership, education, background checks — are each verified separately and shown individually so you can see exactly what was confirmed.",
             },
             {
               icon: EyeOff,
@@ -97,6 +98,10 @@ export default async function SafetyPage() {
             </RevealItem>
           ))}
         </RevealGroup>
+        {/* What a badge is, and what it is not (R11.7). */}
+        <p className="mx-auto mt-8 max-w-3xl rounded-xl bg-white p-4 text-sm leading-relaxed text-ink-600 ring-1 ring-inset ring-ink-200">
+          {VERIFICATION_DISCLAIMER}
+        </p>
       </Section>
 
       <Section

@@ -3,8 +3,9 @@ import { CalendarDays, Search } from "lucide-react";
 import { connectToDatabase } from "@/lib/db/connect";
 import { enforceRole } from "@/lib/auth/guards";
 import {
-  ROLES, BOOKING_STATUS, BOOKING_STATUS_LABELS, LESSON_MODE_LABELS, PAGE_SIZES,
+  ROLES, BOOKING_STATUS, BOOKING_STATUS_LABELS, LESSON_MODE_LABELS, PAGE_SIZES, CANCELLED_STATUSES,
 } from "@/constants";
+import { SETTLED_PAYMENT_STATUSES } from "@/lib/booking/policy";
 import { Booking } from "@/models";
 import { toPlain } from "@/lib/utils/serialize";
 import { escapeRegex } from "@/lib/security/sanitize";
@@ -19,14 +20,41 @@ import { formatMoney, formatDateTime, formatDuration } from "@/lib/utils/format"
 export const metadata = { title: "Bookings" };
 export const dynamic = "force-dynamic";
 
+/**
+ * The admin views over every booking (R28.14, R28.21). "Upcoming" and "Past"
+ * are decided by the clock — a confirmed lesson that has ended is past even
+ * before anyone marks it — and each view is a filter the totals use too.
+ */
 const TABS = [
   { value: "", label: "All" },
-  { value: BOOKING_STATUS.CONFIRMED, label: "Confirmed" },
-  { value: BOOKING_STATUS.COMPLETED, label: "Completed" },
-  { value: BOOKING_STATUS.PENDING_PAYMENT, label: "Unpaid" },
+  { value: "upcoming", label: "Upcoming" },
+  { value: "past", label: "Past" },
+  { value: "cancelled", label: "Cancelled" },
+  { value: "no-shows", label: "No-shows" },
   { value: BOOKING_STATUS.DISPUTED, label: "Disputed" },
+  { value: BOOKING_STATUS.PENDING_PAYMENT, label: "Unpaid" },
   { value: BOOKING_STATUS.EXPIRED, label: "Expired" },
 ];
+
+function viewFilter(view, now) {
+  switch (view) {
+    case "upcoming":
+      return { status: BOOKING_STATUS.CONFIRMED, endAt: { $gt: now } };
+    case "past":
+      return {
+        endAt: { $lte: now },
+        status: { $in: [BOOKING_STATUS.CONFIRMED, BOOKING_STATUS.COMPLETED] },
+      };
+    case "cancelled":
+      return { status: { $in: CANCELLED_STATUSES } };
+    case "no-shows":
+      return { status: { $in: [BOOKING_STATUS.NO_SHOW_STUDENT, BOOKING_STATUS.NO_SHOW_TUTOR] } };
+    case "":
+      return {};
+    default:
+      return Object.values(BOOKING_STATUS).includes(view) ? { status: view } : {};
+  }
+}
 
 export default async function AdminBookingsPage({ searchParams }) {
   await enforceRole(ROLES.ADMIN, "/admin/bookings");
@@ -36,8 +64,7 @@ export default async function AdminBookingsPage({ searchParams }) {
   const pageSize = PAGE_SIZES.adminTable;
   const currentPage = Number(page);
 
-  const filter = {};
-  if (status) filter.status = status;
+  const filter = viewFilter(status, new Date());
   if (q) {
     const pattern = new RegExp(escapeRegex(q), "i");
     filter.$or = [{ reference: pattern }, { courseCode: pattern }, { courseName: pattern }];
@@ -57,20 +84,47 @@ export default async function AdminBookingsPage({ searchParams }) {
       .populate("purchaserId", "firstName lastName email")
       .lean(),
     Booking.countDocuments(filter),
+    // Money comes from the payments behind these bookings, once each (a
+    // series shares one), and only payments that were actually collected —
+    // never from booking list prices, which count abandoned checkouts and
+    // ignore refunds (R28.14, R28.16). Commission is net of refunds, pro rata.
     Booking.aggregate([
-      { $match: filter },
+      { $match: { ...filter, paymentId: { $exists: true } } },
+      { $group: { _id: "$paymentId" } },
+      { $lookup: { from: "payments", localField: "_id", foreignField: "_id", as: "payment" } },
+      { $unwind: "$payment" },
+      { $match: { "payment.status": { $in: SETTLED_PAYMENT_STATUSES } } },
       {
         $group: {
           _id: null,
-          gross: { $sum: "$price.totalCents" },
-          commission: { $sum: "$price.commissionCents" },
+          gross: { $sum: "$payment.totalCents" },
+          refunded: { $sum: { $ifNull: ["$payment.refundedCents", 0] } },
+          commission: {
+            $sum: {
+              $cond: [
+                { $gt: ["$payment.totalCents", 0] },
+                {
+                  $multiply: [
+                    "$payment.commissionCents",
+                    {
+                      $subtract: [
+                        1,
+                        { $divide: [{ $ifNull: ["$payment.refundedCents", 0] }, "$payment.totalCents"] },
+                      ],
+                    },
+                  ],
+                },
+                0,
+              ],
+            },
+          },
         },
       },
     ]),
   ]);
 
   const bookings = toPlain(items);
-  const totals = aggregate[0] ?? { gross: 0, commission: 0 };
+  const totals = aggregate[0] ?? { gross: 0, refunded: 0, commission: 0 };
 
   return (
     <DashboardPage>
@@ -79,12 +133,13 @@ export default async function AdminBookingsPage({ searchParams }) {
         description="Every lesson on the platform, with the money behind it."
       />
 
-      <div className="grid gap-4 sm:grid-cols-3">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard label="Bookings" value={total} icon={<CalendarDays className="size-5" />} />
-        <StatCard label="Gross value" value={formatMoney(totals.gross, { compact: true })} />
+        <StatCard label="Collected" value={formatMoney(totals.gross, { compact: true })} />
+        <StatCard label="Refunded" value={formatMoney(totals.refunded, { compact: true })} />
         <StatCard
-          label="Platform commission"
-          value={formatMoney(totals.commission, { compact: true })}
+          label="Platform commission (net)"
+          value={formatMoney(Math.round(totals.commission), { compact: true })}
         />
       </div>
 

@@ -20,7 +20,7 @@ import { formatDate } from "@/lib/utils/format";
  * Approving is the only path that makes a profile searchable, and the badges
  * granted here are recorded against the admin who granted them (§35, §42).
  */
-export function ApplicationReview({ application, verification }) {
+export function ApplicationReview({ application, verification, education = [] }) {
   const [decision, setDecision] = useState(null);
 
   const isPending = application.status === TUTOR_STATUS.PENDING_REVIEW;
@@ -82,16 +82,23 @@ export function ApplicationReview({ application, verification }) {
         onClose={() => setDecision(null)}
         application={application}
         verification={verification}
+        education={education}
       />
     </>
   );
 }
 
-function DecisionModal({ decision, onClose, application, verification }) {
+function DecisionModal({ decision, onClose, application, verification, education = [] }) {
   const router = useRouter();
   const toast = useToast();
   const [message, setMessage] = useState("");
   const [grantBadges, setGrantBadges] = useState([]);
+  // Expiry per granted badge; a background check left blank gets the
+  // platform's validity period (R11.5).
+  const [expiries, setExpiries] = useState({});
+  const [verifiedEducation, setVerifiedEducation] = useState(
+    education.filter((entry) => entry.verified).map((entry) => entry.id),
+  );
 
   const isApprove = decision === TUTOR_STATUS.APPROVED;
   const isReject = decision === TUTOR_STATUS.REJECTED;
@@ -101,6 +108,10 @@ function DecisionModal({ decision, onClose, application, verification }) {
       decision,
       message: message || undefined,
       grantBadges,
+      badgeExpiresAt: Object.fromEntries(
+        Object.entries(expiries).filter(([type, date]) => date && grantBadges.includes(type)),
+      ),
+      ...(isApprove && education.length ? { verifiedEducationIds: verifiedEducation } : {}),
     });
     toast.success(
       isApprove ? "Tutor approved" : isReject ? "Application rejected" : "Information requested",
@@ -185,6 +196,21 @@ function DecisionModal({ decision, onClose, application, verification }) {
                         )
                       }
                     />
+                    {grantBadges.includes(type) && (
+                      <label className="ml-7 mt-2 flex items-center gap-2 text-xs text-ink-600">
+                        Expires
+                        <input
+                          type="date"
+                          value={expiries[type] ?? ""}
+                          onChange={(e) => setExpiries((current) => ({ ...current, [type]: e.target.value }))}
+                          className="h-8 rounded-lg border-0 px-2 text-xs ring-1 ring-inset ring-ink-200"
+                          aria-label={`${VERIFICATION_LABELS[type]} expiry date`}
+                        />
+                        {type === "BACKGROUND_CHECK" && !expiries[type] && (
+                          <span className="text-ink-400">Blank uses the standard validity period</span>
+                        )}
+                      </label>
+                    )}
                     {hasDocuments && (
                       <ul className="ml-7 mt-2 space-y-1">
                         {record.documents.map((doc) => (
@@ -206,6 +232,29 @@ function DecisionModal({ decision, onClose, application, verification }) {
                   </div>
                 );
               })}
+            </div>
+          </fieldset>
+        )}
+
+        {isApprove && education.length > 0 && (
+          <fieldset>
+            <legend className="mb-2 block text-sm font-semibold text-ink-800">Verified education</legend>
+            <p className="mb-3 text-xs text-ink-500">
+              Tick the entries you checked against a document; they show as verified on the profile.
+            </p>
+            <div className="space-y-2">
+              {education.map((entry) => (
+                <Checkbox
+                  key={entry.id}
+                  label={`${entry.credential} — ${entry.institution}`}
+                  checked={verifiedEducation.includes(entry.id)}
+                  onChange={() =>
+                    setVerifiedEducation((list) =>
+                      list.includes(entry.id) ? list.filter((id) => id !== entry.id) : [...list, entry.id],
+                    )
+                  }
+                />
+              ))}
             </div>
           </fieldset>
         )}

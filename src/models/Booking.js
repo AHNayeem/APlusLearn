@@ -101,6 +101,12 @@ const LessonLocationSchema = new mongoose.Schema(
     type: { type: String, enum: Object.values(IN_PERSON_LOCATIONS) },
     label: { type: String, trim: true }, // "Toronto Reference Library"
     addressLine: { type: String, trim: true, select: false },
+    /**
+     * Where an OTHER location actually is — "the Starbucks at Yonge & Eglinton"
+     * (§26, R26.5). It names a place as precisely as an address does, so it is
+     * withheld exactly like `addressLine` and released by the same rule.
+     */
+    description: { type: String, trim: true, maxlength: 300, select: false },
     city: { type: String, trim: true },
     postalCode: { type: String, trim: true, uppercase: true },
     notes: { type: String, trim: true, maxlength: 500 },
@@ -216,6 +222,20 @@ const BookingSchema = new mongoose.Schema(
       sparse: true,
     },
     payoutId: { type: mongoose.Schema.Types.ObjectId, ref: "Payout", index: true },
+    /**
+     * Everything given back to the purchaser for this lesson — cash and the
+     * re-credited share of any account credit — by whichever path refunded
+     * it (cancellation, no-show, dispute, admin). The tutor's payable share
+     * is `netTutorEarnings(price, refundedCents)` (lib/booking/pricing.js),
+     * so a partly refunded lesson is never paid out in full (audit S3).
+     */
+    refundedCents: { type: Number, min: 0, default: 0 },
+    /**
+     * The status a dispute interrupted. A dispute that ends without changing
+     * the outcome restores it, rather than rewriting the lesson as something
+     * it never was (audit S4).
+     */
+    preDisputeStatus: { type: String, enum: Object.values(BOOKING_STATUS) },
 
     /** Recurring series link. The first booking is its own series parent. */
     recurrence: { type: String, enum: Object.values(RECURRENCE), default: RECURRENCE.NONE },
@@ -248,6 +268,25 @@ const BookingSchema = new mongoose.Schema(
     groupSessionId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "GroupSession",
+      index: true,
+      sparse: true,
+    },
+
+    /**
+     * The tutor request this booking answers, and the tutor's match on it
+     * (§22, R18.10). Both are set server-side by
+     * `request.service.validateRequestForBooking()` — never taken from the
+     * client — and are what lets a confirmed booking close the request.
+     */
+    requestId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "TutorRequest",
+      index: true,
+      sparse: true,
+    },
+    tutorMatchId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "TutorMatch",
       index: true,
       sparse: true,
     },

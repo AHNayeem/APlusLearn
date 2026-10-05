@@ -1,14 +1,20 @@
 /**
- * Ontario curriculum seed (§40).
+ * Curriculum seed (§6, §40).
  *
- * Real course codes and names from the Ontario secondary curriculum, plus the
- * elementary grades, so search by name and by code both return sensible
- * results out of the box.
+ * Two live provinces, so a development database demonstrates that nothing
+ * downstream assumes one: Ontario (real secondary course codes plus the
+ * elementary grades) and British Columbia (real ministry course names, and
+ * codes where the ministry's own code is a plain alphanumeric one). Every
+ * other province is present but inactive — "coming soon" in the pickers —
+ * exactly as an operator would leave a province they have not loaded yet.
+ *
+ * Nothing in `src/` reads this file. Production curriculum is whatever an
+ * administrator maintains in Admin → Curriculum.
  */
 
 export const PROVINCES = [
   { code: "ON", name: "Ontario", isActive: true, usesCourseCodes: true, courseCodeHint: "e.g. MHF4U", displayOrder: 1 },
-  { code: "BC", name: "British Columbia", isActive: false, usesCourseCodes: false, displayOrder: 2 },
+  { code: "BC", name: "British Columbia", isActive: true, usesCourseCodes: true, courseCodeHint: "e.g. MPREC12", displayOrder: 2 },
   { code: "AB", name: "Alberta", isActive: false, usesCourseCodes: true, courseCodeHint: "e.g. Math 30-1", displayOrder: 3 },
   { code: "QC", name: "Quebec", isActive: false, usesCourseCodes: false, displayOrder: 4 },
   { code: "MB", name: "Manitoba", isActive: false, usesCourseCodes: false, displayOrder: 5 },
@@ -16,6 +22,9 @@ export const PROVINCES = [
   { code: "NS", name: "Nova Scotia", isActive: false, usesCourseCodes: false, displayOrder: 7 },
   { code: "NB", name: "New Brunswick", isActive: false, usesCourseCodes: false, displayOrder: 8 },
 ];
+
+/** Which provinces get the grade list below (the live ones with curriculum). */
+export const CURRICULUM_PROVINCES = ["ON", "BC"];
 
 export const GRADES = [
   { name: "Kindergarten", level: 0, stage: "ELEMENTARY" },
@@ -35,6 +44,7 @@ export const GRADES = [
 
 export const SUBJECTS = [
   { name: "Mathematics", shortName: "Math", icon: "Sigma", colorKey: "brand", isPopular: true, displayOrder: 1,
+    aliases: ["math", "maths"],
     description: "Number sense, algebra, functions, calculus and data management." },
   { name: "English", shortName: "English", icon: "BookOpen", colorKey: "accent", isPopular: true, displayOrder: 2,
     description: "Reading, writing, media studies and literary analysis." },
@@ -49,8 +59,10 @@ export const SUBJECTS = [
   { name: "French", shortName: "French", icon: "Languages", colorKey: "brand", isPopular: true, displayOrder: 7,
     description: "Core, extended and immersion French." },
   { name: "Computer Science", shortName: "CS", icon: "Code", colorKey: "ink", isPopular: true, displayOrder: 8,
+    aliases: ["cs", "coding", "programming"],
     description: "Programming, data structures and software design." },
   { name: "Business Studies", shortName: "Business", icon: "Briefcase", colorKey: "accent", displayOrder: 9,
+    aliases: ["business"],
     description: "Accounting, marketing, entrepreneurship and economics." },
   { name: "History", shortName: "History", icon: "Landmark", colorKey: "warning", displayOrder: 10,
     description: "Canadian and world history." },
@@ -61,7 +73,8 @@ export const SUBJECTS = [
 ];
 
 /**
- * Ontario courses. `stream` follows the ministry's pathway letters:
+ * Courses. `province` defaults to ON. For Ontario, `stream` follows the
+ * ministry's pathway letters:
  * U = University, C = College, M = University/College, D/P = Academic/Applied,
  * O = Open.
  */
@@ -70,6 +83,7 @@ export const COURSES = [
   { code: "MHF4U", name: "Advanced Functions", grade: 12, subject: "Mathematics", stream: "University", credits: 1, isPopular: true,
     description: "Polynomial, rational, logarithmic and trigonometric functions, and rates of change. A prerequisite for most university STEM programs." },
   { code: "MCV4U", name: "Calculus and Vectors", grade: 12, subject: "Mathematics", stream: "University", credits: 1, isPopular: true,
+    aliases: ["calculus"],
     description: "Derivatives, applications of calculus, and geometric and algebraic vectors in three dimensions." },
   { code: "MDM4U", name: "Mathematics of Data Management", grade: 12, subject: "Mathematics", stream: "University", credits: 1, isPopular: true,
     description: "Counting, probability, statistics and a culminating data management investigation." },
@@ -159,4 +173,48 @@ export const COURSES = [
     description: "Ecosystems, structures, pure substances and heat." },
   { name: "Elementary Mathematics", grade: 4, subject: "Mathematics", stream: "Core",
     description: "Multiplication, division, fractions and measurement." },
+  { name: "Early Numeracy", grade: 0, subject: "Mathematics", stream: "Kindergarten",
+    description: "Counting, comparing, patterns and early number sense through play." },
+  { name: "Early Literacy", grade: 0, subject: "English", stream: "Kindergarten",
+    description: "Letter sounds, early reading and oral language." },
+  { name: "Elementary Mathematics", grade: 1, subject: "Mathematics", stream: "Core",
+    description: "Counting to 50, addition and subtraction, and simple patterns." },
+  { name: "Elementary Language", grade: 1, subject: "English", stream: "Core",
+    description: "Phonics, sight words and first sentences." },
+  { name: "Elementary Mathematics", grade: 2, subject: "Mathematics", stream: "Core",
+    description: "Place value, addition and subtraction to 100, and measurement." },
+  { name: "Elementary Language", grade: 2, subject: "English", stream: "Core",
+    description: "Reading fluency, spelling patterns and short paragraphs." },
+  { name: "Elementary Mathematics", grade: 3, subject: "Mathematics", stream: "Core",
+    description: "Multiplication facts, fractions as parts of a whole, and data." },
+  { name: "Elementary Language", grade: 3, subject: "English", stream: "Core",
+    description: "Comprehension strategies and organised writing." },
+  { name: "Elementary Mathematics", grade: 5, subject: "Mathematics", stream: "Core",
+    description: "Decimals, multi-digit operations, area and perimeter." },
+  { name: "Elementary Language", grade: 5, subject: "English", stream: "Core",
+    description: "Reading for meaning, paragraph structure and media literacy." },
+  { name: "Elementary Mathematics", grade: 7, subject: "Mathematics", stream: "Core",
+    description: "Rational numbers, proportional reasoning and linear patterns." },
+
+  // --- British Columbia. Course names are the ministry's; a code is set
+  //     only where the ministry's own code is plain letters and digits. ---
+  { province: "BC", code: "MPREC12", name: "Pre-calculus 12", grade: 12, subject: "Mathematics", stream: "Graduation Program", credits: 4, isPopular: true,
+    description: "Transformations, exponential and logarithmic functions, trigonometry and polynomial functions." },
+  { province: "BC", code: "MCALC12", name: "Calculus 12", grade: 12, subject: "Mathematics", stream: "Graduation Program", credits: 4, isPopular: true,
+    aliases: ["calculus"],
+    description: "Limits, derivatives, integrals and their applications." },
+  { province: "BC", code: "MPREC11", name: "Pre-calculus 11", grade: 11, subject: "Mathematics", stream: "Graduation Program", credits: 4,
+    description: "Real numbers, powers, quadratics, trigonometry and financial literacy." },
+  { province: "BC", code: "MENST12", name: "English Studies 12", grade: 12, subject: "English", stream: "Graduation Program", credits: 4, isPopular: true,
+    description: "Literary study, composition and the provincial literacy assessment." },
+  { province: "BC", name: "Physics 12", grade: 12, subject: "Physics", stream: "Graduation Program", credits: 4,
+    description: "Kinematics, dynamics, momentum, gravitation and electromagnetism." },
+  { province: "BC", name: "Chemistry 11", grade: 11, subject: "Chemistry", stream: "Graduation Program", credits: 4,
+    description: "Atomic theory, the mole, chemical reactions and solutions." },
+  { province: "BC", name: "Foundations of Mathematics and Pre-calculus 10", grade: 10, subject: "Mathematics", stream: "Graduation Program", credits: 4,
+    description: "Powers, polynomials, linear relations and systems, and financial literacy." },
+  { province: "BC", name: "Mathematics 7", grade: 7, subject: "Mathematics", stream: "Core",
+    description: "Integers, decimals, linear relations and circle geometry." },
+  { province: "BC", name: "English Language Arts 7", grade: 7, subject: "English", stream: "Core",
+    description: "Reading strategies, writing process and oral language." },
 ];

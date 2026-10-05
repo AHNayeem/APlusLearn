@@ -14,6 +14,7 @@ import { Alert, Badge, Card, CardBody, CardHeader } from "@/components/ui";
 import { DashboardPage, PageHeader } from "@/components/layout/DashboardShell";
 import { RequestInterestForm } from "@/components/tutor/RequestInterestForm";
 import { RequestWithdrawButton } from "@/components/tutor/RequestWithdrawButton";
+import { ReportRequestButton } from "../ReportRequestButton";
 import { formatMoney, formatDate, formatDuration } from "@/lib/utils/format";
 
 export const metadata = { title: "Tutor request", robots: { index: false, follow: false } };
@@ -30,9 +31,11 @@ export default async function TutorRequestDetailPage({ params }) {
   const view = await getRequestForTutor(id, user).catch(() => null);
   if (!view) notFound();
 
-  const { request, match, canRespond } = view;
+  // `request` is the tutor view (S17): no family account, no full postal
+  // code, no coordinates, and the learner as first name and initial.
+  const { request, match, canRespond, eligibility } = view;
   const profile = await getTutorProfileByUserId(user.id);
-  const student = request.studentProfileId;
+  const student = request.student;
   const hasResponded = Boolean(match?.message);
   const stepped = match && [MATCH_STATUS.TUTOR_DECLINED, MATCH_STATUS.WITHDRAWN].includes(match.status);
 
@@ -51,9 +54,12 @@ export default async function TutorRequestDetailPage({ params }) {
         title={request.title || `${request.courseCode ? `${request.courseCode} — ` : ""}${request.courseName}`}
         description={`Posted ${formatDate(request.createdAt)} · ${request.interestedCount} ${request.interestedCount === 1 ? "tutor" : "tutors"} interested`}
         action={
-          match && !stepped && request.status === REQUEST_STATUS.OPEN ? (
-            <RequestWithdrawButton requestId={id} hasResponded={hasResponded} />
-          ) : null
+          <div className="flex flex-wrap items-center gap-2">
+            {match && !stepped && request.status === REQUEST_STATUS.OPEN && (
+              <RequestWithdrawButton requestId={id} hasResponded={hasResponded} />
+            )}
+            <ReportRequestButton requestId={id} />
+          </div>
         }
       />
 
@@ -72,6 +78,12 @@ export default async function TutorRequestDetailPage({ params }) {
       {stepped && (
         <Alert tone="neutral" title={MATCH_STATUS_LABELS[match.status]} className="mb-6">
           You stepped back from this request, so it will not appear in your list again.
+        </Alert>
+      )}
+
+      {request.status === REQUEST_STATUS.OPEN && !hasResponded && eligibility && !eligibility.eligible && (
+        <Alert tone="neutral" title="You can't respond to this request" className="mb-6">
+          {eligibility.reason}
         </Alert>
       )}
 
@@ -182,11 +194,21 @@ export default async function TutorRequestDetailPage({ params }) {
                 label="Lesson type"
                 value={request.modes?.map((m) => LESSON_MODE_LABELS[m]).join(" or ")}
               />
-              {request.city && (
+              {(request.city || request.postalPrefix) && (
                 <Row
                   icon={<MapPin className="size-3.5" />}
                   label="Location"
-                  value={`${request.city} · within ${request.maxDistanceKm} km`}
+                  value={[
+                    [request.city, request.postalPrefix].filter(Boolean).join(" "),
+                    `within ${request.maxDistanceKm} km`,
+                  ].join(" · ")}
+                />
+              )}
+              {request.distanceKm !== null && request.distanceKm !== undefined && (
+                <Row
+                  icon={<MapPin className="size-3.5" />}
+                  label="From you"
+                  value={`About ${request.distanceKm} km`}
                 />
               )}
               {request.startDate && (
@@ -200,7 +222,7 @@ export default async function TutorRequestDetailPage({ params }) {
                 <Row
                   icon={<CalendarDays className="size-3.5" />}
                   label="Student"
-                  value={`${student.firstName} · ${student.gradeName ?? "Grade not set"}`}
+                  value={`${student.name} · ${student.gradeName ?? "Grade not set"}`}
                 />
               )}
             </dl>

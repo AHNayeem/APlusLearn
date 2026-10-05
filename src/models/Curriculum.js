@@ -20,6 +20,14 @@ const ProvinceSchema = new mongoose.Schema(
     usesCourseCodes: { type: Boolean, default: false },
     courseCodeHint: { type: String, trim: true },
     displayOrder: { type: Number, default: 0 },
+    /**
+     * Other URL slugs that mean this record (§32): a curated alternative
+     * ("math" for Mathematics, "calculus" for Calculus and Vectors) or a
+     * slug it had before a rename. Public routes resolve an alias to the
+     * record and redirect to its canonical slug, so neither a spec URL nor
+     * a link indexed before a rename turns into a 404.
+     */
+    aliases: { type: [String], default: [], index: true },
   },
   { timestamps: true },
 );
@@ -32,6 +40,14 @@ const GradeSchema = new mongoose.Schema(
     level: { type: Number, required: true }, // sort key; 0 = Kindergarten
     stage: { type: String, enum: ["ELEMENTARY", "MIDDLE", "SECONDARY"], required: true },
     isActive: { type: Boolean, default: true },
+    /**
+     * Other URL slugs that mean this record (§32): a curated alternative
+     * ("math" for Mathematics, "calculus" for Calculus and Vectors) or a
+     * slug it had before a rename. Public routes resolve an alias to the
+     * record and redirect to its canonical slug, so neither a spec URL nor
+     * a link indexed before a rename turns into a 404.
+     */
+    aliases: { type: [String], default: [], index: true },
   },
   { timestamps: true },
 );
@@ -50,6 +66,14 @@ const SubjectSchema = new mongoose.Schema(
     isPopular: { type: Boolean, default: false, index: true },
     displayOrder: { type: Number, default: 0 },
     isActive: { type: Boolean, default: true },
+    /**
+     * Other URL slugs that mean this record (§32): a curated alternative
+     * ("math" for Mathematics, "calculus" for Calculus and Vectors) or a
+     * slug it had before a rename. Public routes resolve an alias to the
+     * record and redirect to its canonical slug, so neither a spec URL nor
+     * a link indexed before a rename turns into a 404.
+     */
+    aliases: { type: [String], default: [], index: true },
   },
   { timestamps: true },
 );
@@ -81,6 +105,14 @@ const CourseSchema = new mongoose.Schema(
 
     /** Maintained by the tutor service so course pages can show supply. */
     tutorCount: { type: Number, default: 0 },
+    /**
+     * Other URL slugs that mean this record (§32): a curated alternative
+     * ("math" for Mathematics, "calculus" for Calculus and Vectors) or a
+     * slug it had before a rename. Public routes resolve an alias to the
+     * record and redirect to its canonical slug, so neither a spec URL nor
+     * a link indexed before a rename turns into a 404.
+     */
+    aliases: { type: [String], default: [], index: true },
   },
   { timestamps: true },
 );

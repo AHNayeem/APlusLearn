@@ -251,6 +251,36 @@ export async function reportCancellationAbuse({ userId, assessment, now = new Da
 }
 
 /**
+ * Contact details or off-platform payment in a message (§17, R17.7).
+ *
+ * The message service has already masked what it found; this records that it
+ * happened. Bucketed per sender, per conversation, per day, so a family
+ * pasting a phone number into five messages this afternoon is one signal —
+ * while the same account doing it across several threads, or on several days,
+ * is the pattern a reviewer wants to see. The evidence names the kinds and
+ * the records, never the text: the detail was removed so that it would not be
+ * kept, and a risk case is not an exception to that.
+ */
+export async function reportOffPlatformContact({
+  userId,
+  conversationId,
+  messageId,
+  kinds,
+  now = new Date(),
+}) {
+  return safelyRecordRiskSignal({
+    subjectUserId: userId,
+    type: RISK_SIGNALS.OFF_PLATFORM_CONTACT,
+    dedupeKey: `off-platform:${userId}:${conversationId}:${dayKey(now)}`,
+    summary: `Shared ${kinds.map((k) => k.toLowerCase().replace(/_/g, " ")).join(", ")} in a message.`,
+    evidence: { kinds, conversationId: String(conversationId), messageId: String(messageId) },
+    entityType: "Conversation",
+    entityId: conversationId,
+    now,
+  });
+}
+
+/**
  * A pattern of not turning up.
  *
  * Counted from the bookings themselves, so the signal reflects the record

@@ -1,10 +1,15 @@
 import { Suspense } from "react";
 import Link from "next/link";
-import { SearchX, Sparkles } from "lucide-react";
+import { after } from "next/server";
+import { headers } from "next/headers";
+import { SearchX, Sparkles, MapPinOff, Info } from "lucide-react";
 import { connectToDatabase } from "@/lib/db/connect";
 import { tutorSearchSchema } from "@/lib/validation/search";
 import { searchTutors, searchFacets } from "@/services/search.service";
-import { listProvinces, listGrades, listSubjects } from "@/services/curriculum.service";
+import { recordSearch } from "@/services/search-analytics.service";
+import {
+  listProvinces, listGrades, listSubjects, defaultProvinceCode,
+} from "@/services/curriculum.service";
 import { getCurrentUser } from "@/lib/auth/current-user";
 import { Button, EmptyState, Pagination, Skeleton } from "@/components/ui";
 import { TutorCard } from "@/components/tutor/TutorCard";
@@ -59,10 +64,13 @@ export default async function FindATutorPage({ searchParams }) {
 
 async function SearchHeader({ params }) {
   await connectToDatabase();
+  // The picker starts on the searched province, else the first live one in
+  // the administrator's order — read from the data, never a literal (§6).
+  const province = params.province ?? (await defaultProvinceCode());
   const [provinces, grades, subjects] = await Promise.all([
     listProvinces({ activeOnly: false }),
-    listGrades({ provinceCode: params.province ?? "ON" }),
-    listSubjects(),
+    province ? listGrades({ provinceCode: province }) : [],
+    province ? listSubjects({ provinceCode: province }) : listSubjects(),
   ]);
 
   return (
@@ -77,6 +85,7 @@ async function SearchHeader({ params }) {
         <RefineSearch
           className="mt-5"
           provinces={provinces}
+          province={province ?? ""}
           grades={grades}
           subjects={subjects}
         />
@@ -94,6 +103,11 @@ async function SearchResults({ params, rawParams }) {
     searchFacets(params),
   ]);
 
+  // A search somebody actually ran — not a router prefetch — is recorded for
+  // the "most searched" report once the page has been sent (R28.31).
+  const isPrefetch = Boolean((await headers()).get("next-router-prefetch"));
+  if (!isPrefetch) after(() => recordSearch(params, result));
+
   const buildHref = (page) => {
     const next = new URLSearchParams(
       Object.entries(rawParams).filter(([, v]) => typeof v === "string"),
@@ -108,9 +122,10 @@ async function SearchResults({ params, rawParams }) {
 
       <div className="min-w-0">
         <SearchToolbar total={result.total} resolved={result.resolved} />
+        <LocationNotice location={result.resolved.location} province={result.resolved.province} />
 
         {result.items.length === 0 ? (
-          <NoResults params={params} />
+          <NoResults params={params} location={result.resolved.location} />
         ) : (
           <>
             <div className="mt-6 flex flex-col gap-5">
@@ -144,10 +159,19 @@ async function SearchResults({ params, rawParams }) {
  * Empty state that actually helps: it suggests which filter to relax rather
  * than only reporting that nothing matched (§32).
  */
-function NoResults({ params }) {
+function NoResults({ params, location }) {
   const suggestions = [];
-  if (params.distanceKm || params.city || params.postalCode) {
-    suggestions.push({ label: "Include online tutors", href: buildRelaxed(params, { mode: "ONLINE", city: "", postalCode: "", distanceKm: "" }) });
+  const hasLocation = params.city || params.postalCode;
+  if (hasLocation && params.mode !== "ONLINE") {
+    // "Online or in person" keeps the location for in-person tutors and adds
+    // every online one — it never throws the place away.
+    if (params.mode) suggestions.push({ label: "Include online tutors", href: buildRelaxed(params, { mode: "" }) });
+    if (params.distanceKm !== "any") {
+      suggestions.push({ label: "Any distance", href: buildRelaxed(params, { distanceKm: "any" }) });
+    }
+  }
+  if (location?.status === "UNRESOLVED" || location?.status === "INVALID") {
+    suggestions.push({ label: "Search online tutors", href: buildRelaxed(params, { mode: "ONLINE", city: "", postalCode: "", distanceKm: "" }) });
   }
   if (params.maxPrice) {
     suggestions.push({ label: "Remove the price limit", href: buildRelaxed(params, { minPrice: "", maxPrice: "" }) });
@@ -158,8 +182,11 @@ function NoResults({ params }) {
   if (params.minRating) {
     suggestions.push({ label: "Include all ratings", href: buildRelaxed(params, { minRating: "" }) });
   }
-  if (params.availability?.length) {
-    suggestions.push({ label: "Any availability", href: buildRelaxed(params, { availability: "" }) });
+  if (params.availability?.length || params.timeOfDay?.length || params.date || params.time) {
+    suggestions.push({
+      label: "Any availability",
+      href: buildRelaxed(params, { availability: "", timeOfDay: "", date: "", time: "" }),
+    });
   }
 
   return (
@@ -193,6 +220,46 @@ function NoResults({ params }) {
         </div>
       }
     />
+  );
+}
+
+/**
+ * What happened to the location the visitor gave (R29.1). The search never
+ * substitutes a place; when it could not use one as given, it says so.
+ */
+function LocationNotice({ location, province }) {
+  if (!location || location.status === "NONE") return null;
+
+  let icon = Info;
+  let message = null;
+  if (location.status === "INVALID") {
+    icon = MapPinOff;
+    message = `“${location.input}” isn't a Canadian postal code, so it couldn't be used for in-person lessons. Check it, or search by city.`;
+  } else if (location.status === "UNRESOLVED") {
+    icon = MapPinOff;
+    message =
+      location.kind === "POSTAL_CODE"
+        ? `We couldn't place postal area ${location.input} on the map, so in-person results are tutors who list that postal area. Online tutors are shown as usual.`
+        : `We couldn't place “${location.input}” on the map, so in-person results are tutors who list ${location.input} as their city. Online tutors are shown as usual.`;
+  } else if (location.source === "TUTOR_DATA") {
+    message = `Distances are approximate, measured from the centre of ${location.city} as given by the tutors who serve it.`;
+  }
+
+  const mismatch =
+    location.provinceMismatch && province && location.provinceMismatch !== province.code
+      ? `That location is outside ${province.name}, and you are searching ${province.name} courses — in-person tutors near it rarely teach them.`
+      : null;
+
+  if (!message && !mismatch) return null;
+  const Icon = icon;
+  return (
+    <div
+      role="status"
+      className="mt-4 flex items-start gap-2.5 rounded-xl bg-warning-50 px-4 py-3 text-sm text-warning-700 ring-1 ring-inset ring-warning-100"
+    >
+      <Icon className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+      <p>{[message, mismatch].filter(Boolean).join(" ")}</p>
+    </div>
   );
 }
 

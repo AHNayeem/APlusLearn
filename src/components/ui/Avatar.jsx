@@ -47,8 +47,28 @@ function isOwnUpload(src) {
   return typeof src === "string" && src.startsWith("/api/");
 }
 
+/**
+ * What a screen reader announces for this avatar.
+ *
+ * The display name the caller passes, when it passes one — the caller is the
+ * one that knows whose name this is and what the viewer may see of it. When
+ * it passes only parts, the surname is reduced to its initial: an avatar
+ * cannot know whether it is drawing a child for their tutor, and printing a
+ * minor's full surname into `sr-only` text is the same disclosure as printing
+ * it on screen (§30, audit S5 / R30.7). The visible name beside an avatar is
+ * where a full name belongs, if anywhere.
+ */
+function accessibleLabel(name, firstName, lastName) {
+  if (name) return name;
+  const initial = String(lastName ?? "").trim().charAt(0);
+  return `${firstName ?? ""}${initial ? ` ${initial}.` : ""}`.trim();
+}
+
 export function Avatar({ src, name, firstName, lastName, size = "md", className, ring = false }) {
-  const label = name ?? `${firstName ?? ""} ${lastName ?? ""}`.trim();
+  const label = accessibleLabel(name, firstName, lastName);
+  // The colour seed is unchanged from before, so nobody's avatar changes
+  // colour; a five-way hash discloses nothing about a surname.
+  const seed = name ?? `${firstName ?? ""} ${lastName ?? ""}`.trim();
   const text = firstName || lastName ? toInitials(firstName, lastName) : toInitials(label.split(" ")[0], label.split(" ")[1]);
 
   // A photo `next/image` would refuse is treated as no photo at all. The
@@ -62,7 +82,7 @@ export function Avatar({ src, name, firstName, lastName, size = "md", className,
       className={cn(
         "relative inline-flex shrink-0 items-center justify-center overflow-hidden rounded-full font-bold",
         SIZES[size],
-        paletteFor(label),
+        paletteFor(seed),
         ring && "ring-2 ring-white",
         className,
       )}

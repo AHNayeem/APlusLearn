@@ -1,8 +1,11 @@
+import Link from "next/link";
 import { CalendarDays, Search } from "lucide-react";
+import { cn } from "@/lib/utils/cn";
 import { connectToDatabase } from "@/lib/db/connect";
 import { enforceRole } from "@/lib/auth/guards";
 import { LEARNER_ROLES } from "@/constants";
 import { listBookings } from "@/services/booking.service";
+import { listStudents } from "@/services/student.service";
 import { bookingListQuerySchema } from "@/lib/validation/bookings";
 import { Button, Card, CardBody, EmptyState, LinkTabs, Pagination } from "@/components/ui";
 import { DashboardPage, PageHeader } from "@/components/layout/DashboardShell";
@@ -46,8 +49,31 @@ export default async function BookingsPage({ searchParams }) {
   const parsed = bookingListQuerySchema.safeParse(raw);
   const params = parsed.success ? parsed.data : bookingListQuerySchema.parse({});
 
-  const { items, total, page, pageSize } = await listBookings(user, params);
+  /**
+   * One child's lessons (R3.2). The id has passed the shared schema; it is
+   * honoured only if it names one of this account's own learners — archived
+   * ones included, since their past lessons are still theirs. Anything else
+   * is dropped rather than refused. The service scopes every list to the
+   * purchaser regardless, so a foreign id could only ever return nothing.
+   */
+  const children = await listStudents(user, { includeArchived: true });
+  const childId = children.some((c) => c.id === params.studentProfileId)
+    ? params.studentProfileId
+    : undefined;
+
+  const { items, total, page, pageSize } = await listBookings(user, {
+    ...params,
+    studentProfileId: childId,
+  });
   const empty = EMPTY_COPY[params.scope] ?? EMPTY_COPY.UPCOMING;
+  const hrefFor = (overrides) => {
+    const query = new URLSearchParams({ scope: params.scope });
+    const child = overrides.child === undefined ? childId : overrides.child;
+    if (child) query.set("studentProfileId", child);
+    if (overrides.scope) query.set("scope", overrides.scope);
+    if (overrides.page) query.set("page", String(overrides.page));
+    return `/bookings?${query}`;
+  };
 
   return (
     <DashboardPage>
@@ -65,9 +91,32 @@ export default async function BookingsPage({ searchParams }) {
         activeValue={params.scope}
         tabs={TABS.map((tab) => ({
           ...tab,
-          href: `/bookings?scope=${tab.value}`,
+          href: hrefFor({ scope: tab.value }),
         }))}
       />
+
+      {children.length > 1 && (
+        <nav aria-label="Filter by child" className="mt-4 flex flex-wrap gap-2">
+          {[{ id: null, firstName: "All children" }, ...children].map((child) => {
+            const active = (child.id ?? undefined) === childId;
+            return (
+              <Link
+                key={child.id ?? "all"}
+                href={hrefFor({ child: child.id ?? null })}
+                aria-current={active ? "page" : undefined}
+                className={cn(
+                  "rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors",
+                  active
+                    ? "border-brand-600 bg-brand-600 text-white"
+                    : "border-ink-200 bg-white text-ink-700 hover:border-brand-400",
+                )}
+              >
+                {child.firstName}
+              </Link>
+            );
+          })}
+        </nav>
+      )}
 
       <div className="mt-6">
         {items.length === 0 ? (
@@ -98,7 +147,7 @@ export default async function BookingsPage({ searchParams }) {
           total={total}
           pageSize={pageSize}
           label="lessons"
-          buildHref={(p) => `/bookings?scope=${params.scope}&page=${p}`}
+          buildHref={(p) => hrefFor({ page: p })}
         />
       </div>
     </DashboardPage>

@@ -100,7 +100,7 @@ export default async function AdminDashboardPage() {
         <StatCard
           label="Platform revenue"
           value={formatMoney(overview.commerce.platformRevenueCents, { compact: true })}
-          hint={`${formatMoney(overview.commerce.averageBookingValueCents, { compact: true })} avg booking`}
+          hint={`${formatMoney(overview.commerce.averageBookingValueCents, { compact: true })} average paid lesson`}
           icon={<TrendingUp className="size-5" />}
         />
         <StatCard
@@ -124,14 +124,14 @@ export default async function AdminDashboardPage() {
         <StatCard
           label="Approved tutors"
           value={formatNumber(overview.supply.approvedTutors)}
-          hint={`of ${overview.supply.registeredTutors} registered · ${overview.supply.approvalRate}%`}
+          hint={`of ${overview.supply.registeredTutors} registered · ${overview.supply.searchableTutors} live in search`}
           icon={<GraduationCap className="size-5" />}
           href="/admin/tutors"
         />
         <StatCard
           label="Active students"
           value={formatNumber(overview.demand.activeStudents)}
-          hint={`${overview.demand.totalLearners} learner profiles`}
+          hint={`learners with a confirmed or completed lesson · ${overview.demand.totalLearners} profiles`}
         />
         <StatCard
           label="Lessons completed"

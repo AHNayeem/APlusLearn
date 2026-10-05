@@ -10,10 +10,14 @@ import { DEFAULT_SETTINGS } from "@/constants";
  * Step 8 — pricing (§17, §20).
  *
  * The commission preview is computed with the same arithmetic the booking
- * service uses, so what a tutor sees here is exactly what they'll earn.
+ * service uses, so what a tutor sees here is exactly what they'll earn. The
+ * commission and the rate range are the operator's current settings; the
+ * server enforces the range (R13.9), this only says what it is.
  */
-export function PricingStep({ value, onChange, fieldErrors }) {
-  const commissionPercent = DEFAULT_SETTINGS.commissionPercent;
+export function PricingStep({ value, onChange, fieldErrors, policy }) {
+  const commissionPercent = policy?.commissionPercent ?? DEFAULT_SETTINGS.commissionPercent;
+  const minRate = policy?.minHourlyRate ?? DEFAULT_SETTINGS.minHourlyRate;
+  const maxRate = policy?.maxHourlyRate ?? DEFAULT_SETTINGS.maxHourlyRate;
   const rateCents = value.hourlyRateCents ?? 0;
 
   const commissionCents = Math.floor((rateCents * commissionPercent) / 100);
@@ -26,7 +30,7 @@ export function PricingStep({ value, onChange, fieldErrors }) {
       <Field
         label="Your hourly rate"
         htmlFor="price-rate"
-        hint="You can change this any time, and set a different rate for individual courses."
+        hint={`Between ${formatMoney(minRate * 100)} and ${formatMoney(maxRate * 100)} an hour. You can change it any time, and set a different rate for individual courses.`}
         error={fieldErrors.hourlyRateCents}
         required
       >
@@ -38,8 +42,8 @@ export function PricingStep({ value, onChange, fieldErrors }) {
             id="price-rate"
             type="number"
             inputMode="numeric"
-            min={15}
-            max={250}
+            min={minRate}
+            max={maxRate}
             value={rateCents ? rateCents / 100 : ""}
             onChange={(e) =>
               set("hourlyRateCents", e.target.value ? Math.round(Number(e.target.value) * 100) : 0)
@@ -53,7 +57,7 @@ export function PricingStep({ value, onChange, fieldErrors }) {
         </div>
       </Field>
 
-      {rateCents >= 1500 && (
+      {rateCents >= minRate * 100 && (
         <div className="rounded-xl border border-ink-200 bg-ink-50/60 p-4">
           <h3 className="flex items-center gap-2 text-sm font-bold text-ink-900">
             <TrendingUp className="size-4 text-brand-600" />
@@ -133,7 +137,7 @@ export function PricingStep({ value, onChange, fieldErrors }) {
       </Field>
 
       <Alert tone="neutral" title="What do other tutors charge?">
-        Most Ontario tutors on APlus Learn charge between $45 and $85 an hour. Certified teachers
+        Most tutors on APlus Learn charge between $45 and $85 an hour. Certified teachers
         and senior-course specialists sit at the higher end; university students and elementary
         tutors at the lower end.
       </Alert>

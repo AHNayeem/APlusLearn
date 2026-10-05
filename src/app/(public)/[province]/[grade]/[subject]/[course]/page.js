@@ -1,27 +1,39 @@
-import { notFound } from "next/navigation";
+import { cache } from "react";
+import { notFound, permanentRedirect } from "next/navigation";
 import Link from "next/link";
-import { ArrowRight, BookOpen, MapPin, Users } from "lucide-react";
+import { ArrowRight, BookOpen } from "lucide-react";
 import { connectToDatabase } from "@/lib/db/connect";
-import { getCourseByPath, getProvince, listProvinces } from "@/services/curriculum.service";
-import { searchTutors, marketplaceStats } from "@/services/search.service";
+import { listProvinces } from "@/services/curriculum.service";
+import { resolveCoursePath, citiesWithTutors, coursePath } from "@/services/landing.service";
+import { searchTutors } from "@/services/search.service";
+import { hourlyRateRange } from "@/services/public-content.service";
 import { Course } from "@/models";
 import { toPlain } from "@/lib/utils/serialize";
-import { deslugify } from "@/lib/utils/slug";
-import { formatMoney, formatNumber } from "@/lib/utils/format";
+import { formatMoney } from "@/lib/utils/format";
 import { Badge, Button, Card, CardBody, EmptyState, Reveal, RevealGroup, RevealItem } from "@/components/ui";
 import { TutorCard } from "@/components/tutor/TutorCard";
 import { PageHero } from "@/components/marketing/PageHero";
 import { Section, Faq } from "@/components/home/Sections";
-import { SERVICE_CITIES } from "@/lib/geo";
 import { getAppConfig } from "@/services/settings.service";
+import { siteBaseUrl } from "@/lib/config/base-url";
+import { JsonLd } from "@/components/seo/JsonLd";
+import { Breadcrumbs, CityLinks } from "@/components/seo/Landing";
 
 /**
- * Curriculum landing page (§29).
+ * Curriculum landing page (§29, R32.7).
  *
- * URL shape: /ontario/grade-12/math/mhf4u
+ * URL shape: /ontario/grade-12/mathematics/mhf4u
  *
  * These are the pages that should rank for "MHF4U tutor" — one page per
  * course, server-rendered with real tutors and course-specific copy.
+ *
+ * Every segment is resolved from the database (`resolveCoursePath`): a
+ * province by slug, alias or code, a grade and subject by slug or alias, the
+ * course by slug, alias or course code. So the spec's own
+ * `/ontario/grade-12/math/mhf4u` reaches the course whose subject slug is
+ * `mathematics`, and answers with a permanent redirect to the canonical
+ * spelling rather than a duplicate page. A path whose parts do not belong
+ * together, or that names anything inactive, is a real 404.
  */
 
 export const revalidate = 3600;
@@ -47,26 +59,23 @@ export async function generateStaticParams() {
     }));
 }
 
+const load = cache(async (province, grade, subject, course) => {
+  await connectToDatabase();
+  return resolveCoursePath({ province, grade, subject, course });
+});
+
 export async function generateMetadata({ params }) {
   const { province, grade, subject, course } = await params;
-  await connectToDatabase();
+  const hit = await load(province, grade, subject, course);
+  if (!hit) return { title: "Course not found", robots: { index: false, follow: false } };
 
-  const provinceDoc = await getProvince(province);
-  const courseDoc = await getCourseByPath({
-    province: provinceDoc?.code,
-    grade,
-    subject,
-    course,
-  });
-
-  if (!courseDoc) return { title: "Course not found" };
-
+  const { province: provinceDoc, course: courseDoc } = hit;
   const label = courseDoc.code ? `${courseDoc.code} (${courseDoc.name})` : courseDoc.name;
 
   return {
     title: `${label} tutors in ${provinceDoc.name}`,
-    description: `Find verified ${label} tutors in ${provinceDoc.name}. Compare rates, reviews and availability, then book online or in-person lessons. ${courseDoc.description ?? ""}`.slice(0, 300),
-    alternates: { canonical: `/${province}/${grade}/${subject}/${course}` },
+    description: `Find ${label} tutors in ${provinceDoc.name}. Compare rates, reviews and availability, then book online or in-person lessons. ${courseDoc.description ?? ""}`.slice(0, 300),
+    alternates: { canonical: hit.canonicalPath },
     openGraph: {
       title: `${label} tutors in ${provinceDoc.name}`,
       description: courseDoc.description,
@@ -76,23 +85,17 @@ export async function generateMetadata({ params }) {
 
 export default async function CourseLandingPage({ params }) {
   const { province, grade, subject, course } = await params;
-  await connectToDatabase();
+  const hit = await load(province, grade, subject, course);
+  if (!hit) notFound();
+  if (!hit.canonical) permanentRedirect(hit.canonicalPath);
 
-  const provinceDoc = await getProvince(province);
-  if (!provinceDoc) notFound();
+  const { province: provinceDoc, grade: gradeDoc, subject: subjectDoc, course: courseDoc } = hit;
 
-  const courseDoc = await getCourseByPath({
-    province: provinceDoc.code,
-    grade,
-    subject,
-    course,
-  });
-  if (!courseDoc) notFound();
-
-  const [results, related, stats] = await Promise.all([
+  const [results, related, cities, rateRange, { branding, policy }, baseUrl] = await Promise.all([
     searchTutors({
       courseCode: courseDoc.code ?? undefined,
       course: courseDoc.code ? undefined : courseDoc.slug,
+      grade: courseDoc.code ? undefined : courseDoc.gradeSlug,
       province: provinceDoc.code,
       page: 1,
       pageSize: 6,
@@ -107,10 +110,11 @@ export default async function CourseLandingPage({ params }) {
       .sort({ isPopular: -1, tutorCount: -1 })
       .limit(6)
       .lean(),
-    marketplaceStats(),
+    citiesWithTutors({ provinceCode: provinceDoc.code, courseId: courseDoc.id, limit: 8 }),
+    hourlyRateRange({ provinceCode: provinceDoc.code, courseId: courseDoc.id }).catch(() => null),
+    getAppConfig(),
+    siteBaseUrl(),
   ]);
-
-  const { branding } = await getAppConfig();
 
   const label = courseDoc.code ? `${courseDoc.code}` : courseDoc.name;
   const searchHref = courseDoc.code
@@ -124,32 +128,45 @@ export default async function CourseLandingPage({ params }) {
   const courseFaqs = [
     {
       q: `How much does a ${label} tutor cost?`,
-      a: rates.length
-        ? `${label} tutors on ${branding.appName} charge between ${formatMoney(minRate, { compact: true })} and ${formatMoney(maxRate, { compact: true })} an hour. Certified teachers and specialists sit at the higher end. The rate on a profile is exactly what you pay — there are no booking fees.`
-        : `Rates vary by tutor and qualification. Most Ontario tutors charge between $45 and $85 an hour, and the rate on a profile is exactly what you pay.`,
+      a: rateRange
+        ? `Half of the ${label} tutors on ${branding.appName} charge between ${formatMoney(rateRange.lowCents, { compact: true })} and ${formatMoney(rateRange.highCents, { compact: true })} an hour. The rate on a profile is exactly what you pay — there are no booking fees.`
+        : rates.length
+          ? `The ${label} tutors listed here charge between ${formatMoney(minRate, { compact: true })} and ${formatMoney(maxRate, { compact: true })} an hour. The rate on a profile is exactly what you pay — there are no booking fees.`
+          : "Each tutor sets their own rate, and it is shown on their profile. The rate on a profile is exactly what you pay — there are no booking fees.",
     },
     {
       q: `Are ${label} tutors verified?`,
-      a: "Every tutor's identity is checked before their profile appears in search. Many also hold badges for education, Ontario College of Teachers membership, current university enrolment or a background check — each one verified separately by our team.",
+      a: `Every tutor is reviewed by our team before their profile appears in search. Badges — identity, education, teaching certification, university enrolment, background check — are each granted separately, only after the matching document was reviewed, and a profile shows exactly which ones a tutor holds. A badge confirms a document; it is not a guarantee of teaching quality or safety.`,
     },
     {
       q: `Can I get ${label} help online?`,
-      a: "Yes. Most tutors offer online lessons over Zoom, Google Meet or Microsoft Teams, and a meeting link is generated automatically when you book. You can also filter for tutors who'll come to you in person.",
+      a: "Yes. Many tutors teach online, and a meeting link is generated when you book. You can also filter for tutors who teach in person.",
     },
     {
       q: `How quickly can I book a ${label} lesson?`,
-      a: "Tutors publish their real availability, so you book a slot that's genuinely free. Many have openings within a few days, and some take bookings with as little as a few hours' notice.",
+      a: `Tutors publish their availability, so you book a slot that is free. Lessons can be booked from ${policy.minimumBookingNoticeHours} ${policy.minimumBookingNoticeHours === 1 ? "hour" : "hours"} ahead up to ${policy.bookingHorizonDays} days in advance.`,
     },
   ];
 
   return (
     <>
+      <Breadcrumbs
+        baseUrl={baseUrl}
+        items={[
+          { label: "Home", href: "/" },
+          { label: provinceDoc.name, href: `/${provinceDoc.slug}` },
+          { label: gradeDoc.name, href: `/${provinceDoc.slug}/${gradeDoc.slug}` },
+          { label: subjectDoc.name, href: `/${provinceDoc.slug}/${gradeDoc.slug}/${subjectDoc.slug}` },
+          { label, href: hit.canonicalPath },
+        ]}
+      />
+
       <PageHero
-        eyebrow={`${provinceDoc.name} · ${deslugify(grade)}`}
+        eyebrow={`${provinceDoc.name} · ${gradeDoc.name}`}
         title={`${label} tutors`}
         description={
           courseDoc.description ??
-          `Find a verified tutor for ${courseDoc.name} in ${provinceDoc.name}.`
+          `Find a tutor for ${courseDoc.name} in ${provinceDoc.name}.`
         }
       >
         <div className="flex flex-wrap items-center gap-3">
@@ -172,7 +189,7 @@ export default async function CourseLandingPage({ params }) {
                 Top {label} tutors
               </h2>
               <p className="mt-2 text-sm text-ink-500">
-                Ranked by verified reviews and completed lessons — not by who paid for placement.
+                Ordered the way search orders them: reviews and completed lessons first. Promoted profiles are labelled.
               </p>
             </Reveal>
 
@@ -262,27 +279,15 @@ export default async function CourseLandingPage({ params }) {
                 </CardBody>
               </Card>
 
-              {courseDoc.code && (
+              {cities.length > 0 && (
                 <Card>
                   <CardBody>
-                    <h3 className="flex items-center gap-2 text-sm font-bold text-ink-900">
-                      <MapPin className="size-4 text-ink-400" />
-                      {courseDoc.code} by city
-                    </h3>
-                    <ul className="mt-3 space-y-1">
-                      {SERVICE_CITIES.filter((c) => c.province === provinceDoc.code)
-                        .slice(0, 8)
-                        .map((city) => (
-                          <li key={city.city}>
-                            <Link
-                              href={`/tutors/${courseDoc.code.toLowerCase()}/${city.city.toLowerCase().replace(/\s+/g, "-")}`}
-                              className="text-sm text-ink-600 hover:text-brand-600"
-                            >
-                              {courseDoc.code} tutors in {city.city}
-                            </Link>
-                          </li>
-                        ))}
-                    </ul>
+                    <CityLinks
+                      title={`${label} by city`}
+                      cities={cities}
+                      columns=""
+                      hrefFor={(city) => `/tutors/${courseDoc.code ? courseDoc.code.toLowerCase() : courseDoc.slug}/${city.slug}`}
+                    />
                   </CardBody>
                 </Card>
               )}
@@ -297,11 +302,11 @@ export default async function CourseLandingPage({ params }) {
             {toPlain(related).map((item) => (
               <RevealItem key={item.id}>
                 <Link
-                  href={`/${province}/${item.gradeSlug}/${item.subjectSlug}/${item.code ? item.code.toLowerCase() : item.slug}`}
+                  href={coursePath(provinceDoc.slug, item)}
                   className="group flex items-start gap-3 rounded-2xl border border-ink-200 bg-white p-4 transition-all hover:-translate-y-0.5 hover:border-brand-300 hover:shadow-md motion-reduce:hover:translate-y-0"
                 >
                   <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-brand-50 text-[10px] font-black text-brand-700">
-                    {item.code ?? "ON"}
+                    {item.code ?? item.provinceCode}
                   </span>
                   <span className="min-w-0">
                     <span className="block truncate text-sm font-bold text-ink-900 group-hover:text-brand-700">
@@ -320,10 +325,8 @@ export default async function CourseLandingPage({ params }) {
 
       <Faq faqs={courseFaqs} title={`${label} tutoring questions`} showAllLink={false} />
 
-      <script
-        type="application/ld+json"
-        dangerouslySetInnerHTML={{
-          __html: JSON.stringify({
+      <JsonLd
+        data={{
             "@context": "https://schema.org",
             "@type": "Course",
             name: courseDoc.code ? `${courseDoc.code} — ${courseDoc.name}` : courseDoc.name,
@@ -331,8 +334,7 @@ export default async function CourseLandingPage({ params }) {
             provider: { "@type": "Organization", name: branding.appName },
             educationalLevel: `Grade ${courseDoc.gradeLevel}`,
             ...(courseDoc.code && { courseCode: courseDoc.code }),
-          }),
-        }}
+          }}
       />
     </>
   );

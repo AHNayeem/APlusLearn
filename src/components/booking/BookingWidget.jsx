@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
-import { CalendarDays, MessageSquare, Info, Lock } from "lucide-react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { CalendarDays, MessageSquare, Info, Lock, ClipboardList } from "lucide-react";
 import { api, qs, ApiError } from "@/lib/api/client";
 import { useSubmit } from "@/hooks/useAsync";
 import {
@@ -15,6 +15,7 @@ import {
   IN_PERSON_LOCATIONS, IN_PERSON_LOCATION_LABELS, LESSON_DURATIONS, RECURRENCE,
   RECURRENCE_LABELS, DEFAULT_LESSON_DURATION,
 } from "@/constants";
+import { bookingWidgetHref, readBookingWidgetParams } from "@/lib/booking/widget-params";
 import { AvailabilityPicker } from "./AvailabilityPicker";
 
 /**
@@ -27,12 +28,26 @@ import { AvailabilityPicker } from "./AvailabilityPicker";
 export function BookingWidget({ tutor, user, students = [] }) {
   const router = useRouter();
   const toast = useToast();
+  const searchParams = useSearchParams();
 
-  const [studentProfileId, setStudentProfileId] = useState(students[0]?.id ?? "");
-  const [courseId, setCourseId] = useState(tutor.courses[0]?.courseId ?? "");
-  const [mode, setMode] = useState(tutor.lessonModes[0]);
-  const [durationMinutes, setDurationMinutes] = useState(DEFAULT_LESSON_DURATION);
-  const [startAt, setStartAt] = useState("");
+  /**
+   * Where the widget starts. A link may carry a selection — "Book again", a
+   * request's "Book", or a time a signed-out visitor picked before signing in
+   * (§37 steps 11 and 18, R18.10) — and only what this tutor actually offers
+   * survives into state. Read once: after that the form is the person's.
+   */
+  const [initial] = useState(() =>
+    initialSelection(readBookingWidgetParams(searchParams), tutor, students),
+  );
+  const requestId = initial.requestId;
+
+  const [studentProfileId, setStudentProfileId] = useState(initial.studentProfileId);
+  const [courseId, setCourseId] = useState(initial.courseId);
+  const [mode, setMode] = useState(initial.mode);
+  const [durationMinutes, setDurationMinutes] = useState(initial.durationMinutes);
+  // A carried-over slot is dropped by the availability fetch below if the
+  // tutor no longer offers it, exactly like one picked by hand.
+  const [startAt, setStartAt] = useState(initial.startAt);
   const [recurrence, setRecurrence] = useState(RECURRENCE.NONE);
   /**
    * Packages this family already paid for that could cover this lesson
@@ -43,11 +58,11 @@ export function BookingWidget({ tutor, user, students = [] }) {
   const [usablePackages, setUsablePackages] = useState([]);
   const [packagePurchaseId, setPackagePurchaseId] = useState("");
   const [occurrences, setOccurrences] = useState(4);
-  const [meetingProvider, setMeetingProvider] = useState(
-    tutor.onlineMeetingProviders?.[0] ?? MEETING_PROVIDERS.ZOOM,
-  );
-  const [locationType, setLocationType] = useState(tutor.inPersonLocationTypes?.[0] ?? "");
+  const [meetingProvider, setMeetingProvider] = useState(initial.meetingProvider);
+  const [locationType, setLocationType] = useState(initial.locationType);
   const [locationAddress, setLocationAddress] = useState("");
+  /** Where an OTHER location is — required, and private until confirmed (R26.5). */
+  const [locationDescription, setLocationDescription] = useState("");
   const [notes, setNotes] = useState("");
 
   // `forDuration` records which lesson length the slots were fetched for, so
@@ -145,14 +160,17 @@ export function BookingWidget({ tutor, user, students = [] }) {
       recurrence,
       occurrences: recurrence === RECURRENCE.NONE ? 1 : occurrences,
       studentNotes: notes || undefined,
+      ...(requestId ? { requestId } : {}),
       ...(payWithPackage ? { packagePurchaseId } : {}),
       ...(mode === LESSON_MODES.ONLINE ? { meetingProvider } : {}),
       ...(mode === LESSON_MODES.IN_PERSON
         ? {
             location: {
               type: locationType,
-              label: IN_PERSON_LOCATION_LABELS[locationType],
-              addressLine: locationAddress || undefined,
+              addressLine:
+                locationType === IN_PERSON_LOCATIONS.STUDENT_HOME ? locationAddress || undefined : undefined,
+              description:
+                locationType === IN_PERSON_LOCATIONS.OTHER ? locationDescription || undefined : undefined,
             },
           }
         : {}),
@@ -177,31 +195,65 @@ export function BookingWidget({ tutor, user, students = [] }) {
   });
 
 
+  const policyLine = quote?.cancellationPolicy?.[0];
+
   // --- Signed out: search and browsing are public, booking is not (§9) ---
+  //
+  // A visitor gets the same picker a learner does, not a teaser (R10.14), and
+  // what they pick rides through sign-in in `next`, so they come back to the
+  // widget with it still selected (§37 step 11). The server re-checks it all.
   if (!user) {
+    const next = bookingWidgetHref(tutor.slug, {
+      requestId,
+      courseId,
+      mode,
+      durationMinutes,
+      startAt,
+    });
     return (
-      <BookingShell tutor={tutor}>
-        <Alert tone="info" title="Sign in to book" className="mb-4">
-          You can browse and message for free. Booking needs an account so we can hold your lesson
-          and send confirmations.
-        </Alert>
-        <Button
-          href={`/login?next=${encodeURIComponent(`/tutors/${tutor.slug}`)}`}
-          fullWidth
-          size="lg"
-        >
-          Sign in to book
-        </Button>
-        <Button
-          href={`/register?next=${encodeURIComponent(`/tutors/${tutor.slug}`)}`}
-          variant="secondary"
-          fullWidth
-          size="lg"
-          className="mt-2"
-        >
-          Create an account
-        </Button>
-        <AvailabilityPreview slots={slots} loading={slotsLoading} />
+      <BookingShell tutor={tutor} policyLine={policyLine}>
+        <div className="space-y-5">
+          <CourseField tutor={tutor} value={courseId} onChange={setCourseId} />
+          <ModeField tutor={tutor} value={mode} onChange={setMode} />
+          <DurationField value={durationMinutes} onChange={setDurationMinutes} />
+          <div id="availability" className="scroll-mt-24">
+            <p className="mb-2 block text-sm font-semibold text-ink-800">Pick a time</p>
+            <AvailabilityPicker
+              key={slotsLoading ? "loading" : `ready-${durationMinutes}`}
+              days={slots.days}
+              loading={slotsLoading}
+              selected={startAt}
+              onSelect={setStartAt}
+              timeZone={slots.timeZone}
+            />
+          </div>
+
+          <PriceSummary
+            quote={quote}
+            startAt={startAt}
+            timeZone={slots.timeZone}
+            recurrence={RECURRENCE.NONE}
+          />
+
+          <Alert tone="info" title={startAt ? "Sign in to book this time" : "Sign in to book"}>
+            Browsing and messaging are free. Booking needs an account so we can hold your lesson and
+            send confirmations{startAt ? " — we'll keep the time you picked" : ""}.
+          </Alert>
+          <div>
+            <Button href={`/login?next=${encodeURIComponent(next)}`} fullWidth size="lg">
+              {startAt ? "Sign in to continue" : "Sign in to book"}
+            </Button>
+            <Button
+              href={`/register?next=${encodeURIComponent(next)}`}
+              variant="secondary"
+              fullWidth
+              size="lg"
+              className="mt-2"
+            >
+              Create an account
+            </Button>
+          </div>
+        </div>
       </BookingShell>
     );
   }
@@ -209,7 +261,7 @@ export function BookingWidget({ tutor, user, students = [] }) {
   // --- Tutors cannot book other tutors ---
   if (user.role === "TUTOR" || user.role === "ADMIN") {
     return (
-      <BookingShell tutor={tutor}>
+      <BookingShell tutor={tutor} policyLine={policyLine}>
         <Alert tone="neutral" title="Booking is for parent and student accounts">
           You&rsquo;re signed in as {user.role === "TUTOR" ? "a tutor" : "an administrator"}, so this
           booking form is read-only.
@@ -222,7 +274,7 @@ export function BookingWidget({ tutor, user, students = [] }) {
   // --- Parent with no children yet ---
   if (students.length === 0) {
     return (
-      <BookingShell tutor={tutor}>
+      <BookingShell tutor={tutor} policyLine={policyLine}>
         <Alert tone="info" title="Add your child first" className="mb-4">
           We need to know who the lesson is for — their grade and courses help the tutor prepare.
         </Alert>
@@ -234,10 +286,15 @@ export function BookingWidget({ tutor, user, students = [] }) {
   }
 
   const canSubmit =
-    studentProfileId && courseId && startAt && (mode !== LESSON_MODES.IN_PERSON || locationType);
+    studentProfileId &&
+    courseId &&
+    startAt &&
+    (mode !== LESSON_MODES.IN_PERSON ||
+      (locationType &&
+        (locationType !== IN_PERSON_LOCATIONS.OTHER || locationDescription.trim().length >= 3)));
 
   return (
-    <BookingShell tutor={tutor}>
+    <BookingShell tutor={tutor} policyLine={policyLine}>
       <form
         onSubmit={(e) => {
           e.preventDefault();
@@ -246,6 +303,14 @@ export function BookingWidget({ tutor, user, students = [] }) {
         className="space-y-5"
       >
         <FormErrorSummary error={error} fieldErrors={fieldErrors} />
+
+        {requestId && (
+          <p className="flex items-start gap-2 rounded-xl border border-brand-200 bg-brand-50/60 p-3 text-xs text-ink-700">
+            <ClipboardList className="mt-0.5 size-3.5 shrink-0 text-brand-600" />
+            Booking from your tutor request. Once this lesson is paid for, the request is marked as
+            filled and the other tutors are told.
+          </p>
+        )}
 
         <Field label="Who is the lesson for?" htmlFor="booking-student" required>
           <Select
@@ -263,44 +328,14 @@ export function BookingWidget({ tutor, user, students = [] }) {
           </Select>
         </Field>
 
-        <Field label="Course" htmlFor="booking-course" required error={fieldErrors.courseId}>
-          <Select
-            id="booking-course"
-            value={courseId}
-            onChange={(e) => setCourseId(e.target.value)}
-            error={fieldErrors.courseId}
-          >
-            {tutor.courses.map((course) => (
-              <option key={course.courseId} value={course.courseId}>
-                {course.code ? `${course.code} — ` : ""}
-                {course.name} ({formatRate(course.hourlyRateCents)})
-              </option>
-            ))}
-          </Select>
-        </Field>
+        <CourseField
+          tutor={tutor}
+          value={courseId}
+          onChange={setCourseId}
+          error={fieldErrors.courseId}
+        />
 
-        {tutor.lessonModes.length > 1 && (
-          <fieldset>
-            <legend className="mb-2 block text-sm font-semibold text-ink-800">Lesson type</legend>
-            <div className="grid gap-2 sm:grid-cols-2">
-              {tutor.lessonModes.map((value) => (
-                <OptionCard
-                  key={value}
-                  type="radio"
-                  name="mode"
-                  value={value}
-                  checked={mode === value}
-                  onChange={() => setMode(value)}
-                  selected={mode === value}
-                  label={LESSON_MODE_LABELS[value]}
-                  description={
-                    value === LESSON_MODES.ONLINE ? "Video call" : `Around ${tutor.city}`
-                  }
-                />
-              ))}
-            </div>
-          </fieldset>
-        )}
+        <ModeField tutor={tutor} value={mode} onChange={setMode} />
 
         {mode === LESSON_MODES.ONLINE && tutor.onlineMeetingProviders?.length > 1 && (
           <Field label="Meeting platform" htmlFor="booking-provider">
@@ -350,34 +385,36 @@ export function BookingWidget({ tutor, user, students = [] }) {
                 />
               </Field>
             )}
+
+            {locationType === IN_PERSON_LOCATIONS.OTHER && (
+              <Field
+                label="Where exactly?"
+                htmlFor="booking-location-other"
+                required
+                hint="Only shared with your tutor once the lesson is confirmed."
+                error={fieldErrors["location.description"]}
+              >
+                <Textarea
+                  id="booking-location-other"
+                  rows={2}
+                  maxLength={300}
+                  value={locationDescription}
+                  onChange={(e) => setLocationDescription(e.target.value)}
+                  placeholder="e.g. Study room 2, North York Central Library"
+                />
+              </Field>
+            )}
           </>
         )}
 
-        <Field label="Lesson length" htmlFor="booking-duration">
-          <div className="flex flex-wrap gap-2">
-            {LESSON_DURATIONS.map((minutes) => (
-              <button
-                key={minutes}
-                type="button"
-                onClick={() => setDurationMinutes(minutes)}
-                aria-pressed={durationMinutes === minutes}
-                className={
-                  durationMinutes === minutes
-                    ? "rounded-lg border border-brand-600 bg-brand-600 px-3.5 py-2 text-xs font-semibold text-white"
-                    : "rounded-lg border border-ink-200 bg-white px-3.5 py-2 text-xs font-semibold text-ink-700 hover:border-brand-400"
-                }
-              >
-                {formatDuration(minutes)}
-              </button>
-            ))}
-          </div>
-        </Field>
+        <DurationField value={durationMinutes} onChange={setDurationMinutes} />
 
-        <div>
+        <div id="availability" className="scroll-mt-24">
           <p className="mb-2 block text-sm font-semibold text-ink-800">
             Pick a time <span className="text-danger-600">*</span>
           </p>
           <AvailabilityPicker
+            key={slotsLoading ? "loading" : `ready-${durationMinutes}`}
             days={slots.days}
             loading={slotsLoading}
             selected={startAt}
@@ -505,17 +542,128 @@ export function BookingWidget({ tutor, user, students = [] }) {
   );
 }
 
-function BookingShell({ tutor, children }) {
+/**
+ * Keep only what this tutor offers out of a selection carried in the URL.
+ * Anything else falls back to the widget's ordinary default.
+ */
+function initialSelection(wanted, tutor, students) {
+  const pick = (value, allowed, fallback) =>
+    value && (allowed ?? []).map(String).includes(String(value)) ? String(value) : fallback;
+  const slot = wanted.startAt ? new Date(wanted.startAt) : null;
+
+  return {
+    requestId: /^[a-f\d]{24}$/i.test(wanted.requestId ?? "") ? wanted.requestId : null,
+    studentProfileId: pick(
+      wanted.studentProfileId,
+      students.map((s) => s.id),
+      students[0]?.id ?? "",
+    ),
+    courseId: pick(
+      wanted.courseId,
+      tutor.courses.map((c) => c.courseId),
+      tutor.courses[0]?.courseId ?? "",
+    ),
+    mode: pick(wanted.mode, tutor.lessonModes, tutor.lessonModes[0]),
+    durationMinutes: LESSON_DURATIONS.includes(wanted.durationMinutes)
+      ? wanted.durationMinutes
+      : DEFAULT_LESSON_DURATION,
+    locationType: pick(
+      wanted.locationType,
+      tutor.inPersonLocationTypes,
+      tutor.inPersonLocationTypes?.[0] ?? "",
+    ),
+    meetingProvider: pick(
+      wanted.meetingProvider,
+      tutor.onlineMeetingProviders,
+      tutor.onlineMeetingProviders?.[0] ?? MEETING_PROVIDERS.ZOOM,
+    ),
+    // Normalised to the exact form the availability API returns, so the
+    // carried slot is recognised (and kept) when the slots arrive.
+    startAt: slot && !Number.isNaN(slot.getTime()) ? slot.toISOString() : "",
+  };
+}
+
+function CourseField({ tutor, value, onChange, error }) {
   return (
-    <Card id="availability" className="lg:sticky lg:top-24">
+    <Field label="Course" htmlFor="booking-course" required error={error}>
+      <Select
+        id="booking-course"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        error={error}
+      >
+        {tutor.courses.map((course) => (
+          <option key={course.courseId} value={course.courseId}>
+            {course.code ? `${course.code} — ` : ""}
+            {course.name} ({formatRate(course.hourlyRateCents)})
+          </option>
+        ))}
+      </Select>
+    </Field>
+  );
+}
+
+function ModeField({ tutor, value, onChange }) {
+  if (tutor.lessonModes.length <= 1) return null;
+  return (
+    <fieldset>
+      <legend className="mb-2 block text-sm font-semibold text-ink-800">Lesson type</legend>
+      <div className="grid gap-2 sm:grid-cols-2">
+        {tutor.lessonModes.map((mode) => (
+          <OptionCard
+            key={mode}
+            type="radio"
+            name="mode"
+            value={mode}
+            checked={value === mode}
+            onChange={() => onChange(mode)}
+            selected={value === mode}
+            label={LESSON_MODE_LABELS[mode]}
+            description={mode === LESSON_MODES.ONLINE ? "Video call" : `Around ${tutor.city}`}
+          />
+        ))}
+      </div>
+    </fieldset>
+  );
+}
+
+function DurationField({ value, onChange }) {
+  return (
+    <Field label="Lesson length" htmlFor="booking-duration">
+      <div className="flex flex-wrap gap-2">
+        {LESSON_DURATIONS.map((minutes) => (
+          <button
+            key={minutes}
+            type="button"
+            onClick={() => onChange(minutes)}
+            aria-pressed={value === minutes}
+            className={
+              value === minutes
+                ? "rounded-lg border border-brand-600 bg-brand-600 px-3.5 py-2 text-xs font-semibold text-white"
+                : "rounded-lg border border-ink-200 bg-white px-3.5 py-2 text-xs font-semibold text-ink-700 hover:border-brand-400"
+            }
+          >
+            {formatDuration(minutes)}
+          </button>
+        ))}
+      </div>
+    </Field>
+  );
+}
+
+function BookingShell({ tutor, policyLine, children }) {
+  return (
+    // `#book` is the widget, `#availability` its picker: search result cards
+    // link to each (R9.12, R9.13), as do "Book again" and a request's "Book".
+    <Card id="book" className="scroll-mt-24 lg:sticky lg:top-24">
       <div className="border-b border-ink-100 bg-brand-50/40 p-5">
         <div className="flex items-baseline justify-between gap-3">
           <p className="text-2xl font-extrabold text-ink-900">{formatRate(tutor.hourlyRateCents)}</p>
           {tutor.offersFreeIntro && <Badge tone="accent">Free intro</Badge>}
         </div>
-        <p className="mt-1 text-xs text-ink-500">
-          Cancel free up to 24 hours before · Full refund if your tutor cancels
-        </p>
+        {/* The platform's current terms, from the server's quote — never a
+            literal that drifts from what an administrator set (R24.9). */}
+        {policyLine && <p className="mt-1 text-xs text-ink-500">{policyLine}</p>}
       </div>
       <CardBody>{children}</CardBody>
       <div className="border-t border-ink-100 p-5 pt-4">
@@ -535,7 +683,7 @@ function BookingShell({ tutor, children }) {
 /** Read-only availability shown to signed-out visitors (§12). */
 function AvailabilityPreview({ slots, loading }) {
   return (
-    <div className="mt-6 border-t border-ink-100 pt-5">
+    <div id="availability" className="mt-6 scroll-mt-24 border-t border-ink-100 pt-5">
       <h3 className="mb-3 flex items-center gap-2 text-sm font-bold text-ink-900">
         <CalendarDays className="size-4 text-ink-400" />
         Upcoming availability

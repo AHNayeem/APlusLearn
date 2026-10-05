@@ -390,21 +390,33 @@ export async function syncConnection(connectionId, { now = new Date(), windowDay
  */
 export async function externalBusyPeriods(tutorProfileId, { from = new Date(), to } = {}) {
   if (!tutorProfileId) return [];
+  const map = await externalBusyPeriodsForTutors([tutorProfileId], { from, to });
+  return map.get(String(tutorProfileId)) ?? [];
+}
+
+/**
+ * The same, for many tutors in one read — what search needs to ask "who is
+ * actually free on Saturday" of every candidate without a query per tutor
+ * (§8). Returns a Map of tutorProfileId → periods.
+ */
+export async function externalBusyPeriodsForTutors(tutorProfileIds, { from = new Date(), to } = {}) {
+  const map = new Map();
+  const ids = (tutorProfileIds ?? []).filter(Boolean);
+  if (!ids.length) return map;
 
   const connections = await CalendarConnection.find({
-    tutorProfileId,
+    tutorProfileId: { $in: ids },
     syncBusy: true,
     status: CALENDAR_CONNECTION_STATUS.CONNECTED,
   })
-    .select("busyPeriods freshUntil busyWindowEnd")
+    .select("tutorProfileId busyPeriods freshUntil busyWindowEnd")
     .lean();
 
-  if (!connections.length) return [];
+  if (!connections.length) return map;
 
   const now = new Date();
   const horizon = to ?? addDays(now, BUSY_WINDOW_DAYS);
 
-  const periods = [];
   for (const connection of connections) {
     // Refresh in the background rather than blocking the caller: a slightly
     // stale calendar is a better outcome than a slow page, and the next
@@ -412,13 +424,16 @@ export async function externalBusyPeriods(tutorProfileId, { from = new Date(), t
     if (!connection.freshUntil || connection.freshUntil < now) {
       syncConnection(connection._id).catch(() => {});
     }
+    const key = String(connection.tutorProfileId);
+    const periods = map.get(key) ?? [];
     for (const period of connection.busyPeriods ?? []) {
       if (new Date(period.end) <= from || new Date(period.start) >= horizon) continue;
       periods.push({ startAt: period.start, endAt: period.end });
     }
+    map.set(key, periods);
   }
 
-  return periods;
+  return map;
 }
 
 /** The scheduled sweep: refresh every connection whose cache has aged out. */

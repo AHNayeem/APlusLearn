@@ -5,6 +5,7 @@ import { Badge, Button, Card, CardBody, Reveal, RevealGroup, RevealItem } from "
 import { PageHero } from "@/components/marketing/PageHero";
 import { Section, Faq } from "@/components/home/Sections";
 import { formatMoney } from "@/lib/utils/format";
+import { freeCancellationClause, refundPhrase, hoursLabel } from "@/constants";
 
 export const metadata = {
   title: "Pricing",
@@ -15,7 +16,8 @@ export const metadata = {
 
 export const revalidate = 3600;
 
-const PRICING_FAQS = [
+/** Pricing questions with the live terms (R33.7). */
+const pricingFaqs = (settings) => [
   {
     q: "Who sets the hourly rate?",
     a: "Each tutor does. They see exactly what they'll receive after our fee before they choose it, so the rate on a profile reflects what that tutor thinks their time is worth — not a price we imposed.",
@@ -26,11 +28,13 @@ const PRICING_FAQS = [
   },
   {
     q: "When am I charged?",
-    a: "At the point of booking. The money is held and released to the tutor a few days after the lesson is completed, which is what lets us refund you promptly if something goes wrong.",
+    a: `At the point of booking. The tutor is paid ${settings.payoutHoldDays} days after the lesson is completed, which is what lets us refund you promptly if something goes wrong.`,
   },
   {
     q: "What happens if I cancel?",
-    a: "Cancel more than 24 hours before the lesson and you're refunded in full, automatically. Inside 24 hours, the late-cancellation rate applies. If the tutor cancels or doesn't attend, you're always refunded in full.",
+    a: settings.freeCancellationWindowHours > 0
+      ? `Cancel more than ${hoursLabel(settings.freeCancellationWindowHours)} before the lesson and you're refunded in full, automatically. Inside that window you get ${refundPhrase(settings.lateCancellationRefundPercent)}. If the tutor cancels you're refunded in full, and if the tutor doesn't attend you get ${refundPhrase(settings.tutorNoShowRefundPercent)} once our team has reviewed it.`
+      : `You can cancel for a full refund until the lesson starts. If the tutor cancels you're refunded in full, and if the tutor doesn't attend you get ${refundPhrase(settings.tutorNoShowRefundPercent)} once our team has reviewed it.`,
   },
   {
     q: "Are there any fees on top of the hourly rate?",
@@ -38,7 +42,7 @@ const PRICING_FAQS = [
   },
   {
     q: "How and when do tutors get paid?",
-    a: "Earnings become payable a few days after each completed lesson, then are transferred to the tutor's connected bank account. Tutors see every lesson, the fee taken and their running total in their earnings dashboard.",
+    a: `Earnings become payable ${settings.payoutHoldDays} days after each completed lesson, then are transferred to the tutor's connected bank account. Tutors see every lesson, the fee taken and their running total in their earnings dashboard.`,
   },
 ];
 
@@ -78,9 +82,9 @@ export default async function PricingPage() {
                     "Message as many tutors as you like",
                     "Post a tutor request",
                     "Save tutors to compare later",
-                    "Secure payment held until the lesson is done",
-                    "Free cancellation up to 24 hours before",
-                    "Full refund if a tutor doesn't attend",
+                    "Secure payment through the platform",
+                    freeCancellationClause(settings).replace(/^./, (c) => c.toUpperCase()),
+                    `${refundPhrase(settings.tutorNoShowRefundPercent).replace(/^./, (c) => c.toUpperCase())} if a tutor doesn't attend`,
                   ].map((item) => (
                     <li key={item} className="flex gap-2.5 text-sm text-ink-700">
                       <Check className="mt-0.5 size-4 shrink-0 text-success-600" />
@@ -275,7 +279,7 @@ export default async function PricingPage() {
         </Reveal>
       </Section>
 
-      <Faq faqs={PRICING_FAQS} title="Pricing questions" showAllLink={false} />
+      <Faq faqs={pricingFaqs(settings)} title="Pricing questions" showAllLink={false} />
     </>
   );
 }

@@ -1,11 +1,8 @@
-import Link from "next/link";
-import { Users, MessageSquare } from "lucide-react";
+import { Users } from "lucide-react";
 import { connectToDatabase } from "@/lib/db/connect";
 import { enforceRole } from "@/lib/auth/guards";
-import { ROLES, BOOKING_STATUS } from "@/constants";
-import { Booking, StudentProfile } from "@/models";
-import { Types } from "mongoose";
-import { toPlain } from "@/lib/utils/serialize";
+import { ROLES, LEARNER_MODE_PREFERENCE_LABELS } from "@/constants";
+import { listTutorRoster } from "@/services/student.service";
 import { Avatar, Badge, Button, Card, CardBody, EmptyState } from "@/components/ui";
 import { DashboardPage, PageHeader } from "@/components/layout/DashboardShell";
 import { formatMoney, formatRelative } from "@/lib/utils/format";
@@ -14,65 +11,17 @@ export const metadata = { title: "Students" };
 export const dynamic = "force-dynamic";
 
 /**
- * The tutor's student roster (§24).
+ * The tutor's student roster (§23).
  *
- * Names respect each learner's minor-privacy setting — a tutor sees
- * "Emily C." unless the parent explicitly shared the full name (§35).
+ * Built by `listTutorRoster`: learners with a confirmed or completed lesson
+ * only, a minor's surname reduced to an initial on the server, and earnings
+ * from completed lessons net of refunds.
  */
 export default async function TutorStudentsPage() {
   const user = await enforceRole(ROLES.TUTOR, "/tutor/students");
   await connectToDatabase();
 
-  const rows = await Booking.aggregate([
-    { $match: { tutorUserId: Types.ObjectId.createFromHexString(user.id) } },
-    {
-      $group: {
-        _id: "$studentProfileId",
-        completed: { $sum: { $cond: [{ $eq: ["$status", BOOKING_STATUS.COMPLETED] }, 1, 0] } },
-        upcoming: {
-          $sum: {
-            $cond: [
-              {
-                $and: [
-                  { $eq: ["$status", BOOKING_STATUS.CONFIRMED] },
-                  { $gt: ["$startAt", new Date()] },
-                ],
-              },
-              1,
-              0,
-            ],
-          },
-        },
-        lastLessonAt: { $max: "$startAt" },
-        courses: { $addToSet: { code: "$courseCode", name: "$courseName" } },
-        earningsCents: { $sum: "$price.tutorEarningsCents" },
-      },
-    },
-    { $sort: { lastLessonAt: -1 } },
-  ]);
-
-  const students = toPlain(
-    await StudentProfile.find({ _id: { $in: rows.map((r) => r._id) } })
-      .populate("ownerId", "firstName lastName")
-      .lean(),
-  );
-  const map = new Map(students.map((s) => [s.id, s]));
-
-  const roster = rows
-    .map((row) => {
-      const student = map.get(String(row._id));
-      if (!student) return null;
-      return {
-        ...row,
-        id: String(row._id),
-        student,
-        displayName:
-          student.isMinor && !student.shareFullNameWithTutor
-            ? `${student.firstName} ${student.lastName?.charAt(0) ?? ""}.`.trim()
-            : `${student.firstName} ${student.lastName ?? ""}`.trim(),
-      };
-    })
-    .filter(Boolean);
+  const roster = await listTutorRoster(user);
 
   return (
     <DashboardPage>
@@ -94,25 +43,17 @@ export default async function TutorStudentsPage() {
             <Card key={entry.id}>
               <CardBody>
                 <div className="flex items-start gap-3">
-                  <Avatar
-                    src={entry.student.avatarUrl}
-                    firstName={entry.student.firstName}
-                    lastName={entry.student.lastName}
-                    size="lg"
-                  />
+                  <Avatar src={entry.avatarUrl} name={entry.displayName} size="lg" />
                   <div className="min-w-0 flex-1">
                     <p className="truncate text-base font-bold text-ink-900">
                       {entry.displayName}
                     </p>
                     <p className="mt-0.5 text-xs text-ink-500">
-                      {entry.student.gradeName ?? "Grade not set"}
-                      {entry.student.school ? ` · ${entry.student.school}` : ""}
+                      {entry.gradeName ?? "Grade not set"}
+                      {entry.school ? ` · ${entry.school}` : ""}
                     </p>
-                    {!entry.student.isSelf && entry.student.ownerId && (
-                      <p className="mt-0.5 text-xs text-ink-400">
-                        Parent: {entry.student.ownerId.firstName}{" "}
-                        {entry.student.ownerId.lastName?.charAt(0)}.
-                      </p>
+                    {entry.guardianName && (
+                      <p className="mt-0.5 text-xs text-ink-400">Parent: {entry.guardianName}</p>
                     )}
                   </div>
                 </div>
@@ -128,22 +69,7 @@ export default async function TutorStudentsPage() {
                     ))}
                 </div>
 
-                {entry.student.notes && (
-                  <p className="mt-3 line-clamp-2 text-sm leading-relaxed text-ink-500">
-                    {entry.student.notes}
-                  </p>
-                )}
-
-                {entry.student.accessibilityNeeds && (
-                  <div className="mt-3 rounded-lg border border-info-100 bg-info-50 p-2.5">
-                    <p className="text-[11px] font-bold uppercase tracking-wide text-info-600">
-                      Learning needs
-                    </p>
-                    <p className="mt-0.5 text-xs leading-relaxed text-ink-600">
-                      {entry.student.accessibilityNeeds}
-                    </p>
-                  </div>
-                )}
+                <LearnerDetails learning={entry.learning} />
 
                 <dl className="mt-4 grid grid-cols-3 gap-2 border-t border-ink-100 pt-3 text-center">
                   <div>
@@ -163,7 +89,11 @@ export default async function TutorStudentsPage() {
                 </dl>
 
                 <p className="mt-3 text-xs text-ink-400">
-                  Last lesson {formatRelative(entry.lastLessonAt)}
+                  {entry.nextLessonAt
+                    ? `Next lesson ${formatRelative(entry.nextLessonAt)}`
+                    : entry.lastLessonAt
+                      ? `Last lesson ${formatRelative(entry.lastLessonAt)}`
+                      : "No lessons yet"}
                 </p>
 
                 {/* Only a learner this tutor has actually completed a lesson
@@ -185,5 +115,58 @@ export default async function TutorStudentsPage() {
         </div>
       )}
     </DashboardPage>
+  );
+}
+
+/**
+ * What the family chose to share with the tutors they book (§5). Shown only
+ * here, for learners with a confirmed lesson; never on anything public.
+ */
+function LearnerDetails({ learning }) {
+  const marks =
+    learning.currentMark != null || learning.targetMark != null
+      ? [
+          learning.currentMark != null ? `Now ${learning.currentMark}%` : null,
+          learning.targetMark != null ? `aiming for ${learning.targetMark}%` : null,
+        ]
+          .filter(Boolean)
+          .join(", ")
+      : null;
+
+  const rows = [
+    learning.courses?.length ? ["Needs help with", learning.courses.join(", ")] : null,
+    learning.lessonModePreference
+      ? ["Prefers", LEARNER_MODE_PREFERENCE_LABELS[learning.lessonModePreference]]
+      : null,
+    marks ? ["Marks", marks] : null,
+    learning.goals?.length
+      ? ["Goals", learning.goals.map((g) => (g.achieved ? `${g.label} ✓` : g.label)).join(" · ")]
+      : null,
+    learning.areasForImprovement ? ["Areas to improve", learning.areasForImprovement] : null,
+    learning.learningPreferences ? ["Learns best", learning.learningPreferences] : null,
+    learning.notes ? ["Notes", learning.notes] : null,
+  ].filter(Boolean);
+
+  if (!rows.length && !learning.accessibilityNeeds) return null;
+
+  return (
+    <div className="mt-3 space-y-2">
+      {rows.length > 0 && (
+        <dl className="space-y-1.5 text-xs">
+          {rows.map(([label, value]) => (
+            <div key={label}>
+              <dt className="font-semibold text-ink-700">{label}</dt>
+              <dd className="line-clamp-2 leading-relaxed text-ink-500">{value}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
+      {learning.accessibilityNeeds && (
+        <div className="rounded-lg border border-info-100 bg-info-50 p-2.5">
+          <p className="text-[11px] font-bold uppercase tracking-wide text-info-600">Learning needs</p>
+          <p className="mt-0.5 text-xs leading-relaxed text-ink-600">{learning.accessibilityNeeds}</p>
+        </div>
+      )}
+    </div>
   );
 }

@@ -73,9 +73,9 @@ export default async function TutorEarningsPage({ searchParams }) {
           icon={<TrendingUp className="size-5" />}
         />
         <StatCard
-          label="Ready for payout"
+          label="Owed to you"
           value={formatMoney(pendingPayoutCents, { compact: true })}
-          hint={`After a ${settings.payoutHoldDays}-day hold`}
+          hint={`All time, net of refunds — paid after a ${settings.payoutHoldDays}-day hold`}
           icon={<Clock className="size-5" />}
           href="/tutor/payouts"
         />
@@ -213,7 +213,7 @@ export default async function TutorEarningsPage({ searchParams }) {
                     </TD>
                     <TD align="right">
                       <span className="font-bold text-success-700">
-                        {formatMoney(lesson.price.tutorEarningsCents)}
+                        {formatMoney(lesson.netEarningsCents ?? lesson.price.tutorEarningsCents)}
                       </span>
                     </TD>
                     <TD align="right">

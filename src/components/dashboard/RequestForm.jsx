@@ -12,7 +12,7 @@ import {
 import {
   LESSON_MODES, LESSON_MODE_LABELS, AVAILABILITY_WINDOWS, LESSON_DURATIONS,
   REQUEST_URGENCY, REQUEST_URGENCY_LABELS, REQUEST_VISIBILITY, REQUEST_VISIBILITY_LABELS,
-  QUALIFICATION_TYPES, QUALIFICATION_LABELS,
+  OFFERED_QUALIFICATION_TYPES, QUALIFICATION_LABELS,
 } from "@/constants";
 import { formatDuration } from "@/lib/utils/format";
 import { useToday } from "@/hooks/useToday";
@@ -443,7 +443,7 @@ export function RequestForm({ students, request = null }) {
               Qualifications you&rsquo;d prefer
             </legend>
             <div className="grid gap-2 sm:grid-cols-2">
-              {Object.values(QUALIFICATION_TYPES).map((value) => (
+              {OFFERED_QUALIFICATION_TYPES.map((value) => (
                 <OptionCard
                   key={value}
                   type="checkbox"

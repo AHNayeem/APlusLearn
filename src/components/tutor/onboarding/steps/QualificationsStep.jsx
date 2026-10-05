@@ -4,7 +4,8 @@ import { Plus, Trash2 } from "lucide-react";
 import {
   Button, Checkbox, Field, Input, OptionCard, Select, Textarea,
 } from "@/components/ui";
-import { QUALIFICATION_TYPES, QUALIFICATION_LABELS } from "@/constants";
+import { QUALIFICATION_TYPES, QUALIFICATION_LABELS, OFFERED_QUALIFICATION_TYPES } from "@/constants";
+import { OTHER_CREDENTIALS_LIMITS } from "@/lib/validation/tutors";
 
 const CURRENT_YEAR = new Date().getFullYear();
 const YEARS = Array.from({ length: 50 }, (_, i) => CURRENT_YEAR - i);
@@ -13,6 +14,7 @@ const YEARS = Array.from({ length: 50 }, (_, i) => CURRENT_YEAR - i);
 export function QualificationsStep({ value, onChange, fieldErrors }) {
   const qualifications = value.qualifications ?? [];
   const experience = value.experience ?? [];
+  const otherCredentials = value.otherCredentials ?? [];
 
   const set = (key, next) => onChange({ ...value, [key]: next });
 
@@ -42,7 +44,7 @@ export function QualificationsStep({ value, onChange, fieldErrors }) {
           Select every one that applies. These become filters parents search by.
         </p>
         <div className="grid gap-2 sm:grid-cols-2">
-          {Object.values(QUALIFICATION_TYPES).map((type) => (
+          {OFFERED_QUALIFICATION_TYPES.map((type) => (
             <OptionCard
               key={type}
               type="checkbox"
@@ -55,6 +57,51 @@ export function QualificationsStep({ value, onChange, fieldErrors }) {
         </div>
         {fieldErrors.qualifications && (
           <p className="mt-2 text-xs font-medium text-danger-600">{fieldErrors.qualifications}</p>
+        )}
+      </fieldset>
+
+      {/* Anything the list does not cover — a provincial teaching licence
+          outside Ontario, an industry certification, a coaching award (R13.5). */}
+      <fieldset>
+        <legend className="mb-1 block text-sm font-semibold text-ink-800">Other credentials</legend>
+        <p className="mb-3 text-xs text-ink-500">
+          Optional. Add each one separately — for example &ldquo;BC Teacher Certificate&rdquo; or &ldquo;CPA&rdquo;.
+        </p>
+        <div className="space-y-2">
+          {otherCredentials.map((credential, index) => (
+            <div key={index} className="flex gap-2">
+              <Input
+                aria-label={`Other credential ${index + 1}`}
+                value={credential}
+                maxLength={OTHER_CREDENTIALS_LIMITS.maxLength}
+                onChange={(e) =>
+                  set("otherCredentials", otherCredentials.map((c, i) => (i === index ? e.target.value : c)))
+                }
+                error={fieldErrors[`otherCredentials.${index}`]}
+              />
+              <Button
+                variant="ghost"
+                size="sm"
+                aria-label="Remove credential"
+                onClick={() => set("otherCredentials", otherCredentials.filter((_, i) => i !== index))}
+                iconLeft={<Trash2 className="size-4" />}
+              />
+            </div>
+          ))}
+        </div>
+        {otherCredentials.length < OTHER_CREDENTIALS_LIMITS.max && (
+          <Button
+            variant="secondary"
+            size="sm"
+            className="mt-2"
+            onClick={() => set("otherCredentials", [...otherCredentials, ""])}
+            iconLeft={<Plus className="size-4" />}
+          >
+            Add a credential
+          </Button>
+        )}
+        {fieldErrors.otherCredentials && (
+          <p className="mt-2 text-xs font-medium text-danger-600">{fieldErrors.otherCredentials}</p>
         )}
       </fieldset>
 

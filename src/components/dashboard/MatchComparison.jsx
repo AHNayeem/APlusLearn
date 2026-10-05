@@ -12,6 +12,7 @@ import {
 import { formatRate, formatDistance } from "@/lib/utils/format";
 import { MATCH_STATUS, MATCH_STATUS_LABELS, REQUEST_VISIBILITY } from "@/constants";
 import { VerificationBadges } from "@/components/tutor/VerificationBadges";
+import { bookingWidgetHref } from "@/lib/booking/widget-params";
 
 /**
  * Compare tutors who responded to a request (§22).
@@ -25,6 +26,21 @@ export function MatchComparison({ matches, requestId, request }) {
   const [pendingId, setPendingId] = useState(null);
 
   const isOpen = request ? request.status === "OPEN" : true;
+
+  /**
+   * What "Book" pre-fills on the tutor's widget: the request's course, its
+   * learner, its preferred length and, when the family asked for only one,
+   * the lesson type (R18.10). The widget keeps what the tutor offers and the
+   * server re-checks the request itself.
+   */
+  const bookingSelection = request
+    ? {
+        courseId: request.courseId?.id ?? request.courseId,
+        studentProfileId: request.studentProfileId?.id ?? request.studentProfileId,
+        durationMinutes: request.preferredDurationMinutes,
+        mode: request.modes?.length === 1 ? request.modes[0] : undefined,
+      }
+    : {};
   const inviteOnly = request?.visibility === REQUEST_VISIBILITY.INVITE_ONLY;
 
   const respond = async (matchId, action) => {
@@ -98,6 +114,8 @@ export function MatchComparison({ matches, requestId, request }) {
                 match={match}
                 onRespond={respond}
                 pending={pendingId === match.id}
+                bookingRequestId={isOpen || match.status === MATCH_STATUS.BOOKED ? requestId : null}
+                bookingSelection={bookingSelection}
               />
             ))}
           </div>
@@ -119,6 +137,8 @@ export function MatchComparison({ matches, requestId, request }) {
                 match={match}
                 onRespond={respond}
                 pending={pendingId === match.id}
+                bookingRequestId={isOpen || match.status === MATCH_STATUS.BOOKED ? requestId : null}
+                bookingSelection={bookingSelection}
               />
             ))}
           </div>
@@ -143,6 +163,8 @@ export function MatchComparison({ matches, requestId, request }) {
                 onRespond={respond}
                 onInvite={isOpen ? invite : undefined}
                 pending={pendingId === match.id}
+                bookingRequestId={isOpen ? requestId : null}
+                bookingSelection={bookingSelection}
               />
             ))}
           </div>
@@ -165,7 +187,7 @@ export function MatchComparison({ matches, requestId, request }) {
   );
 }
 
-function MatchCard({ match, onRespond, onInvite, pending, muted }) {
+function MatchCard({ match, onRespond, onInvite, pending, muted, bookingRequestId, bookingSelection }) {
   const { tutor } = match;
   const isShortlisted = match.status === MATCH_STATUS.SHORTLISTED;
   const hasResponded = Boolean(match.message);
@@ -257,13 +279,20 @@ function MatchCard({ match, onRespond, onInvite, pending, muted }) {
           >
             Message
           </Button>
-          <Button
-            href={`/tutors/${tutor.slug}#availability`}
-            size="sm"
-            iconLeft={<CalendarDays className="size-3.5" />}
-          >
-            Book
-          </Button>
+          {/* Carries the request so the booking it produces closes it and
+              marks this match booked (R18.10). The server re-checks both. */}
+          {!muted && (
+            <Button
+              href={bookingWidgetHref(
+                tutor.slug,
+                bookingRequestId ? { ...bookingSelection, requestId: bookingRequestId } : {},
+              )}
+              size="sm"
+              iconLeft={<CalendarDays className="size-3.5" />}
+            >
+              Book
+            </Button>
+          )}
 
           {!muted && onInvite && !hasResponded && (
             <Button

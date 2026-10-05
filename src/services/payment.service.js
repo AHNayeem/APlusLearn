@@ -1,9 +1,11 @@
 import "server-only";
 import { Types } from "mongoose";
-import { Payment, Booking, PayoutAccount, User } from "@/models";
+import { Payment, Booking, PayoutAccount, User, CreditEntry } from "@/models";
 import {
   PAYMENT_STATUS,
   BOOKING_STATUS,
+  BLOCKING_BOOKING_STATUSES,
+  CREDIT_REASONS,
   NOTIFICATION_TYPES,
   NOTIFICATION_CHANNELS,
   AUDIT_ACTIONS,
@@ -14,10 +16,17 @@ import { NotFoundError, BusinessRuleError, AuthorizationError } from "@/lib/api/
 import { requireVerifiedEmail } from "@/lib/auth/assert";
 import { toPlain } from "@/lib/utils/serialize";
 import { formatMoney } from "@/lib/utils/format";
-import { holdMinutes, SETTLED_PAYMENT_STATUSES } from "@/lib/booking/policy";
+import { netTutorEarnings, netTutorEarningsExpression } from "@/lib/booking/pricing";
+import {
+  holdMinutes,
+  SETTLED_PAYMENT_STATUSES,
+  POLICY,
+  earningBookingMatch,
+} from "@/lib/booking/policy";
 import { getPaymentProvider } from "./external/payment-provider";
 import { getSettings } from "./settings.service";
-import { spendCredit, releaseCredit } from "./credit.service";
+import { spendCredit, releaseCredit, grantCredit } from "./credit.service";
+import { recordBookingRefund, tutorPayoutPosition } from "./payout.service";
 import { reverseReferralsForBooking } from "./referral.service";
 import { brandedEmailTemplates } from "./external/email-provider";
 import { notify } from "./notification.service";
@@ -267,6 +276,22 @@ export async function checkoutUrlFor(paymentId, actor) {
 }
 
 /**
+ * Refuse, before anything is read, when card details are not ours to take.
+ *
+ * Under a hosted provider the card is entered on the provider's own page, so
+ * the in-app capture endpoint does not exist at all (S16). It answers 404 —
+ * not "you sent the wrong thing" — and it is called *before* the request
+ * body is parsed, so a card number posted to it is never read.
+ */
+export async function requireInAppCheckout() {
+  const provider = await getPaymentProvider();
+  if (provider.hostedCheckout) {
+    throw new NotFoundError("There is nothing to submit here. Continue to checkout to complete this payment.");
+  }
+  return provider;
+}
+
+/**
  * Complete checkout with the development provider.
  *
  * The card details go straight to the provider and are never persisted — only
@@ -296,6 +321,23 @@ export async function capturePayment(paymentId, { card }, actor) {
     return { ...toPlain(payment), alreadyPaid: true };
   }
 
+  // A lesson payment whose bookings were all cancelled before it was paid has
+  // nothing left to pay for (R27.2). Refused before the card is charged —
+  // the late-payment refund below is for the provider that cannot be stopped,
+  // not a licence to take money and give it back.
+  if (payment.bookingId) {
+    const payable = await Booking.exists({
+      paymentId: payment._id,
+      status: { $in: [BOOKING_STATUS.PENDING_PAYMENT, BOOKING_STATUS.EXPIRED] },
+    });
+    if (!payable) {
+      throw new BusinessRuleError(
+        "This booking was cancelled, so there is nothing to pay.",
+        "PAYMENT_VOID",
+      );
+    }
+  }
+
   payment.status = PAYMENT_STATUS.PROCESSING;
   await payment.save();
 
@@ -322,12 +364,39 @@ export async function capturePayment(paymentId, { card }, actor) {
   payment.receiptNumber = result.receiptNumber;
   await payment.save();
 
-  return toPlain(payment);
+  // Part of a series may have been cancelled while the rest was still unpaid.
+  await refundCancelledBeforePayment(payment);
+
+  return toPlain(await Payment.findById(payment._id).lean());
 }
 
-export async function refundPayment(paymentId, { amountCents, reason, issuedBy }) {
+/**
+ * Send cash back to the card a payment was taken from (§20, R16.7).
+ *
+ * The ledger is the guard: never more than was collected and not yet
+ * returned. Every refund is also attributed to the lesson(s) it was for —
+ * `bookingAllocations` when the caller knows (a cancellation, a dispute), or
+ * spread across the payment's lessons by what each still has unrefunded when
+ * it does not (an administrator refunding a payment). That attribution is
+ * `Booking.refundedCents`, which every payout nets against (S3, R16.4); a
+ * refund on a lesson already paid out becomes a deduction on the tutor's next
+ * payout instead of vanishing. A package payment is not attributed to its
+ * lessons unless the caller names one — the refund is for the package.
+ *
+ * @param {string} paymentId
+ * @param {object} args
+ * @param {number} args.amountCents
+ * @param {string} args.reason
+ * @param {string} [args.issuedBy]
+ * @param {{ bookingId: string, cents: number }[]} [args.bookingAllocations]
+ */
+export async function refundPayment(paymentId, { amountCents, reason, issuedBy, bookingAllocations }) {
   const payment = await Payment.findById(paymentId);
   if (!payment) throw new NotFoundError("That payment no longer exists.");
+
+  if (!Number.isInteger(amountCents) || amountCents <= 0) {
+    throw new BusinessRuleError("Enter a refund amount.", "INVALID_REFUND_AMOUNT");
+  }
 
   // Never refund more than was actually collected.
   const refundable = payment.totalCents - (payment.refundedCents ?? 0);
@@ -363,6 +432,8 @@ export async function refundPayment(paymentId, { amountCents, reason, issuedBy }
       ? PAYMENT_STATUS.REFUNDED
       : PAYMENT_STATUS.PARTIALLY_REFUNDED;
   await payment.save();
+
+  await attributeRefund(payment, amountCents, { bookingAllocations, reason, issuedBy });
 
   // A reward earned by a lesson that has now been refunded is unwound, so a
   // refund cannot be used to keep the credit and the money (§41 Phase 2).
@@ -400,6 +471,296 @@ export async function refundPayment(paymentId, { amountCents, reason, issuedBy }
   });
 
   return toPlain(payment);
+}
+
+/**
+ * Put a refund against the lesson(s) it was for. Runs after the money has
+ * moved, so it never throws: a refund that reached the card is not undone
+ * because its bookkeeping hiccupped — it is logged loudly instead.
+ */
+async function attributeRefund(payment, amountCents, { bookingAllocations, reason, issuedBy }) {
+  try {
+    let allocations = bookingAllocations;
+    if (!allocations) {
+      if (!payment.bookingId) return;
+      const lessons = await Booking.find({ paymentId: payment._id })
+        .select("price refundedCents")
+        .sort({ startAt: 1 })
+        .lean();
+      if (!lessons.length) return;
+      const open = lessons.map((b) => Math.max(0, (b.price?.totalCents ?? 0) - (b.refundedCents ?? 0)));
+      const weights = open.some((w) => w > 0) ? open : lessons.map((b) => b.price?.totalCents ?? 1);
+      const split = splitProportionally(amountCents, weights);
+      allocations = lessons.map((b, i) => ({ bookingId: b._id, cents: split[i] }));
+    }
+
+    for (const { bookingId, cents } of allocations) {
+      if (cents > 0) {
+        await recordBookingRefund(bookingId, cents, {
+          reason,
+          actor: issuedBy ? { id: issuedBy } : undefined,
+        });
+      }
+    }
+  } catch (error) {
+    console.error(
+      `[payment] refund of ${amountCents} on ${payment._id} was issued but could not be attributed to its lessons:`,
+      error,
+    );
+  }
+}
+
+/**
+ * Split `total` across `weights` in whole cents, largest remainders first, so
+ * the parts always add back up to exactly `total`.
+ */
+export function splitProportionally(total, weights) {
+  const sum = weights.reduce((acc, w) => acc + Math.max(0, w), 0);
+  if (!sum || total <= 0) return weights.map(() => 0);
+  const raw = weights.map((w) => (total * Math.max(0, w)) / sum);
+  const parts = raw.map(Math.floor);
+  let left = total - parts.reduce((a, b) => a + b, 0);
+  const order = raw
+    .map((value, index) => ({ index, frac: value - Math.floor(value) }))
+    .sort((a, b) => b.frac - a.frac);
+  for (let i = 0; left > 0; i = (i + 1) % order.length, left -= 1) parts[order[i].index] += 1;
+  return parts;
+}
+
+/** Credit already given back as the credit share of earlier refunds. */
+async function creditRecreditedOn(paymentId) {
+  const [row] = await CreditEntry.aggregate([
+    { $match: { paymentId, reason: CREDIT_REASONS.REFUND_RECREDITED } },
+    { $group: { _id: null, cents: { $sum: "$amountCents" } } },
+  ]);
+  return row?.cents ?? 0;
+}
+
+/**
+ * How a refund measured in *lesson value* comes back, worked out before
+ * anything moves (R16.7).
+ *
+ * A lesson's value can have been paid partly in cash and partly in account
+ * credit. The policy decides a percentage of the value; this splits it the
+ * same way the purchase was split — the cash share back to the card, never
+ * more than the card was charged and not yet refunded, and the credit share
+ * back to the account it came from, never more than was applied and not yet
+ * returned. If one side has run out, the other covers what it can. A payment
+ * that never settled returns nothing here: there is no money to send back,
+ * and its credit is returned whole by `returnAppliedCredit` instead.
+ *
+ * Pure apart from one read of the credit ledger, and called before any
+ * booking is touched — so a refund that cannot happen is known while there
+ * is still nothing to undo.
+ */
+export async function planLessonRefund(payment, valueCents) {
+  const settled = SETTLED_PAYMENT_STATUSES.includes(payment.status);
+  const cashRemaining = settled ? Math.max(0, payment.totalCents - (payment.refundedCents ?? 0)) : 0;
+  const creditApplied = payment.creditAppliedCents ?? 0;
+  const creditRecreditedCents = creditApplied > 0 ? await creditRecreditedOn(payment._id) : 0;
+  const creditRemaining =
+    settled && !payment.creditReleasedAt ? Math.max(0, creditApplied - creditRecreditedCents) : 0;
+
+  const value = Math.max(0, Math.round(valueCents ?? 0));
+  const lessonValue = (payment.totalCents ?? 0) + creditApplied;
+  const cashShare = lessonValue > 0 ? Math.round((value * payment.totalCents) / lessonValue) : 0;
+
+  let cashCents = Math.min(cashShare, cashRemaining);
+  const creditCents = Math.min(value - cashCents, creditRemaining);
+  if (cashCents + creditCents < value) cashCents = Math.min(value - creditCents, cashRemaining);
+
+  return {
+    valueCents: value,
+    cashCents,
+    creditCents,
+    refundedCents: cashCents + creditCents,
+    cashRemaining,
+    creditRemaining,
+    creditRecreditedCents,
+  };
+}
+
+/**
+ * What can still be given back on one lesson, in lesson value: the lesson's
+ * own unrefunded value, bounded by what its payment can actually return.
+ *
+ * @param {object} booking
+ * @param {object} [options]
+ * @param {number} [options.alreadyRefundedCents]  Overrides `booking.refundedCents`
+ *   for records refunded before that field was kept.
+ */
+export async function refundableOnBooking(booking, { alreadyRefundedCents } = {}) {
+  if (!booking.paymentId) return 0;
+  const payment = await Payment.findById(booking.paymentId._id ?? booking.paymentId).lean();
+  if (!payment) return 0;
+  const refunded = alreadyRefundedCents ?? booking.refundedCents ?? 0;
+  const open = Math.max(0, (booking.price?.totalCents ?? 0) - refunded);
+  return (await planLessonRefund(payment, open)).refundedCents;
+}
+
+/**
+ * Refund an amount of lesson value: the cash share to the card, the credit
+ * share back to the account, both attributed to the named lessons (R16.7).
+ *
+ * @param {string} paymentId
+ * @param {object} args
+ * @param {{ bookingId: string, valueCents: number }[]} args.allocations
+ * @param {string} args.reason
+ * @param {string} [args.issuedBy]
+ * @returns {Promise<{ cashCents: number, creditCents: number, refundedCents: number, perBooking: object[] }>}
+ */
+export async function refundLessonValue(paymentId, { allocations, reason, issuedBy }) {
+  const payment = await Payment.findById(paymentId).lean();
+  if (!payment) throw new NotFoundError("That payment no longer exists.");
+
+  const weights = allocations.map((a) => Math.max(0, a.valueCents ?? 0));
+  const valueCents = weights.reduce((a, b) => a + b, 0);
+  const plan = await planLessonRefund(payment, valueCents);
+
+  const cashSplit = splitProportionally(plan.cashCents, weights);
+  const creditSplit = splitProportionally(plan.creditCents, weights);
+
+  if (plan.cashCents > 0) {
+    await refundPayment(paymentId, {
+      amountCents: plan.cashCents,
+      reason,
+      issuedBy,
+      bookingAllocations: allocations.map((a, i) => ({ bookingId: a.bookingId, cents: cashSplit[i] })),
+    });
+  }
+
+  if (plan.creditCents > 0) {
+    await grantCredit({
+      userId: payment.purchaserId,
+      amountCents: plan.creditCents,
+      reason: CREDIT_REASONS.REFUND_RECREDITED,
+      paymentId: payment._id,
+      bookingId: allocations[0]?.bookingId,
+      note: reason,
+      createdBy: issuedBy,
+      // Keyed on what had already been re-credited, so a retried call adds
+      // nothing and a later, separate refund still can.
+      idempotencyKey: `refund-credit:${payment._id}:${plan.creditRecreditedCents}:${plan.creditCents}`,
+    });
+    for (const [i, allocation] of allocations.entries()) {
+      if (creditSplit[i] > 0) {
+        await recordBookingRefund(allocation.bookingId, creditSplit[i], {
+          reason,
+          actor: issuedBy ? { id: issuedBy } : undefined,
+        }).catch((error) => console.error("[payment] credit refund attribution failed:", error));
+      }
+    }
+  }
+
+  return {
+    ...plan,
+    perBooking: allocations.map((a, i) => ({
+      bookingId: String(a.bookingId),
+      cashCents: cashSplit[i],
+      creditCents: creditSplit[i],
+      refundedCents: cashSplit[i] + creditSplit[i],
+    })),
+  };
+}
+
+/**
+ * Stop an unpaid payment being payable once nothing it covers is still
+ * booked (R27.2).
+ *
+ * The checkout is expired at the provider where the provider can do that, so
+ * the purchaser's payment page stops working rather than taking money for a
+ * cancelled lesson; the payment is marked failed with the reason; and any
+ * credit that was applied to it goes back. A provider that cannot expire a
+ * session is not a failure here — `markPaymentPaid` refunds a payment that
+ * arrives for cancelled lessons anyway.
+ *
+ * @returns {Promise<{ voided: boolean, reason?: string, checkoutExpired?: boolean }>}
+ */
+export async function voidUnpaidPayment(paymentId, { reason } = {}) {
+  const stillHeld = await Booking.exists({
+    paymentId,
+    status: { $in: BLOCKING_BOOKING_STATUSES },
+  });
+  if (stillHeld) return { voided: false, reason: "STILL_HELD" };
+
+  const payment = await Payment.findOneAndUpdate(
+    {
+      _id: paymentId,
+      status: { $in: [PAYMENT_STATUS.REQUIRES_PAYMENT, PAYMENT_STATUS.PROCESSING, PAYMENT_STATUS.FAILED] },
+    },
+    {
+      $set: {
+        status: PAYMENT_STATUS.FAILED,
+        failureReason: reason ?? "The booking was cancelled before it was paid for.",
+      },
+      $unset: { providerCheckoutUrl: "", checkoutExpiresAt: "" },
+    },
+    { returnDocument: "before" },
+  ).lean();
+  if (!payment) return { voided: false, reason: "SETTLED" };
+
+  let checkoutExpired = false;
+  if (payment.providerCheckoutId) {
+    try {
+      const provider = await getPaymentProvider();
+      if (provider.name === payment.provider) {
+        const result = await provider.expireCheckout({ checkoutId: payment.providerCheckoutId });
+        checkoutExpired = Boolean(result?.expired);
+      }
+    } catch (error) {
+      console.warn(`[payment] checkout ${payment.providerCheckoutId} could not be expired:`, error.message);
+    }
+  }
+
+  await returnAppliedCredit(
+    { ...payment, status: PAYMENT_STATUS.FAILED },
+    "Returned from a booking that was cancelled before payment.",
+  ).catch((error) => console.warn("[payment] credit return failed:", error.message));
+
+  return { voided: true, checkoutExpired };
+}
+
+/**
+ * Money that arrived for lessons cancelled before they were paid for goes
+ * straight back (R27.2).
+ *
+ * A hosted checkout cannot always be stopped in time — a session expiry can
+ * race the purchaser's last click, and an async payment method settles days
+ * later — so the settlement path checks, rather than charging for nothing.
+ * Never throws: it runs inside the settlement of a payment the provider has
+ * already taken, and a refund it cannot make is recorded for an
+ * administrator rather than failing the settlement.
+ */
+async function refundCancelledBeforePayment(payment) {
+  if (!payment?.bookingId) return null;
+  const cancelled = await Booking.find({
+    paymentId: payment._id,
+    "cancellation.policyApplied": POLICY.UNPAID_CANCELLATION,
+  })
+    .select("price refundedCents")
+    .lean();
+  const owed = cancelled.filter((b) => (b.refundedCents ?? 0) < (b.price?.totalCents ?? 0));
+  if (!owed.length) return null;
+
+  try {
+    return await refundLessonValue(payment._id, {
+      allocations: owed.map((b) => ({
+        bookingId: b._id,
+        valueCents: (b.price?.totalCents ?? 0) - (b.refundedCents ?? 0),
+      })),
+      reason: "Paid after the lesson was cancelled — refunded in full.",
+    });
+  } catch (error) {
+    console.error(`[payment] ${payment._id} was paid after cancellation and could not be refunded:`, error);
+    await recordAudit({
+      actor: { role: "SYSTEM" },
+      action: AUDIT_ACTIONS.REFUND_ISSUED,
+      entityType: "Payment",
+      entityId: payment._id,
+      metadata: { needsRefund: true, reason: "paid after cancellation", error: error.message },
+    }).catch(() => {});
+    return null;
+  }
 }
 
 /**
@@ -499,6 +860,13 @@ export async function markPaymentPaid(
     return { changed: false, payment: toPlain(await Payment.findById(paymentId).lean()) };
   }
 
+  // Money for lessons that were cancelled while unpaid goes straight back
+  // (R27.2). Only the claimant runs this, so it happens once.
+  const lateRefund = await refundCancelledBeforePayment(claimed);
+  if (lateRefund) {
+    return { changed: true, payment: toPlain(await Payment.findById(paymentId).lean()), lateRefund };
+  }
+
   return { changed: true, payment: toPlain(claimed) };
 }
 
@@ -538,7 +906,10 @@ export async function returnAppliedCredit(payment, note) {
   if (!payment?.creditAppliedCents || payment.creditReleasedAt) return { released: false };
 
   // A settled payment consumed its credit; only an unpaid one gets it back.
-  if (payment.status === PAYMENT_STATUS.PAID || payment.status === PAYMENT_STATUS.PARTIALLY_REFUNDED) {
+  // A refunded one is settled too — its credit share went back with the
+  // refund (`refundLessonValue`), and returning it whole here would pay it
+  // twice.
+  if (SETTLED_PAYMENT_STATUSES.includes(payment.status)) {
     return { released: false, reason: "SETTLED" };
   }
 
@@ -588,6 +959,10 @@ export async function recordProviderRefund(paymentId, { providerRefundId, amount
       : PAYMENT_STATUS.PARTIALLY_REFUNDED;
   await payment.save();
 
+  // Made outside the app, so nobody named the lesson: spread it across the
+  // payment's lessons like an administrator's refund (S3, R16.4).
+  await attributeRefund(payment, amountCents, { reason: reason ?? "Refunded at the payment provider" });
+
   await notify({
     userId: payment.purchaserId,
     type: NOTIFICATION_TYPES.REFUND_ISSUED,
@@ -617,6 +992,49 @@ export async function getPayment(id, actor) {
 }
 
 /** Payment history / transaction list (§24). */
+/**
+ * Totals over every payment matching the admin filter (R28.16) — summed in
+ * MongoDB across the whole set, never from the page on screen. Collected
+ * money is settled payments only; commission is net of refunds, pro rata.
+ */
+export async function paymentTotals({ status, purchaserId } = {}) {
+  const match = status ? { status } : {};
+  if (purchaserId) match.purchaserId = new Types.ObjectId(String(purchaserId));
+  const [row] = await Payment.aggregate([
+    { $match: match },
+    {
+      $group: {
+        _id: null,
+        count: { $sum: 1 },
+        collected: {
+          $sum: { $cond: [{ $in: ["$status", SETTLED_PAYMENT_STATUSES] }, "$totalCents", 0] },
+        },
+        refunded: { $sum: { $ifNull: ["$refundedCents", 0] } },
+        commission: {
+          $sum: {
+            $cond: [
+              { $and: [{ $in: ["$status", SETTLED_PAYMENT_STATUSES] }, { $gt: ["$totalCents", 0] }] },
+              {
+                $multiply: [
+                  "$commissionCents",
+                  { $subtract: [1, { $divide: [{ $ifNull: ["$refundedCents", 0] }, "$totalCents"] }] },
+                ],
+              },
+              0,
+            ],
+          },
+        },
+      },
+    },
+  ]);
+  return {
+    count: row?.count ?? 0,
+    collectedCents: row?.collected ?? 0,
+    refundedCents: row?.refunded ?? 0,
+    commissionCents: Math.round(row?.commission ?? 0),
+  };
+}
+
 export async function listPayments(actor, { page = 1, pageSize, status } = {}) {
   const size = pageSize ?? PAGE_SIZES.bookings;
   const query = {};
@@ -667,23 +1085,25 @@ export async function getReceipt(paymentId, actor) {
 /** Tutor earnings dashboard (§24). */
 export async function tutorEarnings(tutorUserId, { days = 90 } = {}) {
   const since = new Date(Date.now() - days * 86400000);
-
   const matchId = typeof tutorUserId === "string" ? new Types.ObjectId(tutorUserId) : tutorUserId;
 
-  const [totals, period, recent, account] = await Promise.all([
+  // The lessons a tutor is paid for — completed, a student no-show, a late
+  // cancellation — by the one rule payouts use, and every figure net of what
+  // was refunded on the lesson (R16.9, R23.7).
+  const earning = { tutorUserId: matchId, ...earningBookingMatch() };
+  const net = netTutorEarningsExpression();
+  const kept = {
+    $max: [0, { $subtract: ["$price.subtotalCents", { $ifNull: ["$refundedCents", 0] }] }],
+  };
+
+  const [totals, period, recent, account, position] = await Promise.all([
     Booking.aggregate([
-      {
-        $match: {
-          tutorUserId: matchId,
-          status: BOOKING_STATUS.COMPLETED,
-        },
-      },
+      { $match: earning },
       {
         $group: {
           _id: null,
-          grossCents: { $sum: "$price.subtotalCents" },
-          commissionCents: { $sum: "$price.commissionCents" },
-          netCents: { $sum: "$price.tutorEarningsCents" },
+          grossCents: { $sum: kept },
+          netCents: { $sum: net },
           lessons: { $sum: 1 },
         },
       },
@@ -692,47 +1112,26 @@ export async function tutorEarnings(tutorUserId, { days = 90 } = {}) {
     // at 50 rows, so a busy tutor's period total used to stop counting once
     // they passed fifty lessons in the window.
     Booking.aggregate([
-      {
-        $match: {
-          tutorUserId: matchId,
-          status: BOOKING_STATUS.COMPLETED,
-          completedAt: { $gte: since },
-        },
-      },
-      {
-        $group: {
-          _id: null,
-          netCents: { $sum: "$price.tutorEarningsCents" },
-          lessons: { $sum: 1 },
-          pendingCents: {
-            $sum: {
-              $cond: [{ $ifNull: ["$payoutId", false] }, 0, "$price.tutorEarningsCents"],
-            },
-          },
-        },
-      },
+      { $match: { ...earning, $expr: { $gte: [{ $ifNull: ["$completedAt", "$cancellation.cancelledAt"] }, since] } } },
+      { $group: { _id: null, netCents: { $sum: net }, lessons: { $sum: 1 } } },
     ]),
-    Booking.find({ tutorUserId, status: BOOKING_STATUS.COMPLETED, completedAt: { $gte: since } })
-      .select("reference courseName courseCode startAt price payoutId completedAt")
+    Booking.find({ ...earning, completedAt: { $gte: since } })
+      .select("reference courseName courseCode startAt price refundedCents payoutId completedAt status")
       .sort({ completedAt: -1 })
       .limit(50)
       .lean(),
     PayoutAccount.findOne({ tutorUserId }).lean(),
+    // Owed is owed whenever it was earned: never limited to the period shown.
+    tutorPayoutPosition(tutorUserId),
   ]);
 
-  const lifetime = totals[0] ?? {
-    grossCents: 0,
-    commissionCents: 0,
-    netCents: 0,
-    lessons: 0,
-  };
-
-  const periodTotals = period[0] ?? { netCents: 0, lessons: 0, pendingCents: 0 };
+  const lifetime = totals[0] ?? { grossCents: 0, netCents: 0, lessons: 0 };
+  const periodTotals = period[0] ?? { netCents: 0, lessons: 0 };
 
   return {
     lifetime: {
       grossCents: lifetime.grossCents,
-      commissionCents: lifetime.commissionCents,
+      commissionCents: Math.max(0, lifetime.grossCents - lifetime.netCents),
       netCents: lifetime.netCents,
       lessons: lifetime.lessons,
     },
@@ -741,9 +1140,12 @@ export async function tutorEarnings(tutorUserId, { days = 90 } = {}) {
       netCents: periodTotals.netCents,
       lessons: periodTotals.lessons,
     },
-    pendingPayoutCents: periodTotals.pendingCents,
+    pendingPayoutCents: position?.pendingCents ?? 0,
     /** The most recent lessons, for the table. Never the basis of a total. */
-    recentLessons: toPlain(recent),
+    recentLessons: toPlain(recent).map((lesson) => ({
+      ...lesson,
+      netEarningsCents: netTutorEarnings(lesson.price, lesson.refundedCents),
+    })),
     payoutAccount: account ? toPlain(account) : null,
   };
 }

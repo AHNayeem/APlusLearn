@@ -3,6 +3,7 @@ import { messageAttachmentSchema } from "@/lib/validation/engagement";
 import { sendMessage } from "@/services/message.service";
 import { attachmentsFromForm, ATTACHMENT_LIMITS } from "@/services/attachment.service";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
+import { readBoundedFormData } from "@/lib/security/upload-size";
 import { PERMISSIONS, FEATURES } from "@/constants";
 
 /**
@@ -23,7 +24,13 @@ import { PERMISSIONS, FEATURES } from "@/constants";
  */
 export const POST = routeHandler(
   async ({ request, user }) => {
-    const form = await request.formData();
+    // The request as a whole is capped before it is buffered (S19); each
+    // file is still held to its own limit by the service.
+    const form = await readBoundedFormData(
+      request,
+      ATTACHMENT_LIMITS.maxBytes * ATTACHMENT_LIMITS.maxPerMessage,
+      `Attachments must be smaller than ${Math.round(ATTACHMENT_LIMITS.maxBytes / 1024 / 1024)} MB each.`,
+    );
     const files = attachmentsFromForm(form);
 
     if (!files.length) {

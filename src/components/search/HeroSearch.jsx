@@ -9,6 +9,7 @@ import {
 import { cn } from "@/lib/utils/cn";
 import { api, qs } from "@/lib/api/client";
 import { LESSON_MODES } from "@/constants";
+import { useProvinceCurriculum } from "@/hooks/useProvinceCurriculum";
 
 /**
  * The homepage hero search (§12).
@@ -21,31 +22,55 @@ import { LESSON_MODES } from "@/constants";
  * refinements deliberately show their label *and* their current value at rest,
  * because on a hero the visitor needs to see what the search is already
  * scoped to before they decide whether to change it.
+ *
+ * The province decides the grade and subject lists (R2.3): they are reloaded
+ * from the curriculum when it changes, and start on the first live province
+ * in the administrator's order (`provinces` arrives sorted). What the visitor
+ * types is sent as `q` and matched against the curriculum by the search
+ * service, so "Math" finds the subject and "MHF4U" the course — the shape of
+ * a word never decides what it is (R2.5).
  */
 export function HeroSearch({ provinces = [], grades = [], subjects = [], className }) {
   const router = useRouter();
-  const [province, setProvince] = useState(provinces.find((p) => p.isActive)?.code ?? "ON");
+  const curriculum = useProvinceCurriculum({
+    province: provinces.find((p) => p.isActive)?.code ?? "",
+    grades,
+    subjects,
+  });
+  const province = curriculum.province;
   const [grade, setGrade] = useState("");
   const [subject, setSubject] = useState("");
   const [mode, setMode] = useState("ANY");
   const [location, setLocation] = useState("");
   const [query, setQuery] = useState("");
 
-  const submit = (event) => {
-    event.preventDefault();
-    const params = { province, grade, subject, mode: mode === "ANY" ? "" : mode };
+  // The example code comes from the province's own hint ("e.g. MHF4U"), so
+  // a province without course codes is never shown one from elsewhere.
+  const selected = provinces.find((p) => p.code === province);
+  const exampleCode = selected?.usesCourseCodes
+    ? (selected.courseCodeHint?.match(/[A-Z][A-Z0-9-]{3,}/)?.[0] ?? null)
+    : null;
 
-    // A bare course code is the fastest path — send it as such.
-    const trimmed = query.trim();
-    if (/^[A-Za-z]{3}[A-Za-z0-9]{1,5}$/.test(trimmed)) params.courseCode = trimmed.toUpperCase();
-    else if (trimmed) params.q = trimmed;
+  const changeProvince = async (code) => {
+    const tree = await curriculum.setProvince(code);
+    if (tree && !tree.grades?.some((g) => g.slug === grade)) setGrade("");
+    if (tree && !tree.subjects?.some((s) => s.slug === subject)) setSubject("");
+  };
 
+  /** Everything the console holds, plus whatever a suggestion pins down. */
+  const searchParams = (extra = {}) => {
+    const params = { province, grade, subject, mode: mode === "ANY" ? "" : mode, ...extra };
     if (location.trim()) {
+      // A Canadian postal code starts letter-digit-letter; anything else is a place name.
       const isPostal = /^[A-Za-z]\d[A-Za-z]/.test(location.trim());
       params[isPostal ? "postalCode" : "city"] = location.trim();
     }
+    return params;
+  };
 
-    router.push(`/find-a-tutor${qs(params)}`);
+  const submit = (event) => {
+    event.preventDefault();
+    router.push(`/find-a-tutor${qs(searchParams({ q: query.trim() }))}`);
   };
 
   return (
@@ -72,7 +97,15 @@ export function HeroSearch({ provinces = [], grades = [], subjects = [], classNa
         value={query}
         onChange={setQuery}
         province={province}
-        onPick={(item) => router.push(item.href)}
+        // A suggestion names the course or subject exactly; the rest of the
+        // console (format, location, grade) still applies.
+        onPick={(item) =>
+          router.push(
+            item.params
+              ? `/find-a-tutor${qs(searchParams({ subject: "", grade: "", ...item.params }))}`
+              : item.href,
+          )
+        }
       />
 
       {/* gap-px over a light background paints the hairlines between cells, so
@@ -82,7 +115,7 @@ export function HeroSearch({ provinces = [], grades = [], subjects = [], classNa
           icon={Map}
           label="Province"
           value={province}
-          onChange={(e) => setProvince(e.target.value)}
+          onChange={(e) => changeProvince(e.target.value)}
         >
           {provinces.map((p) => (
             <option key={p.code} value={p.code} disabled={!p.isActive}>
@@ -99,7 +132,7 @@ export function HeroSearch({ provinces = [], grades = [], subjects = [], classNa
           onChange={(e) => setGrade(e.target.value)}
         >
           <option value="">Any grade</option>
-          {grades.map((g) => (
+          {curriculum.grades.map((g) => (
             <option key={g.id} value={g.slug}>
               {g.name}
             </option>
@@ -113,7 +146,7 @@ export function HeroSearch({ provinces = [], grades = [], subjects = [], classNa
           onChange={(e) => setSubject(e.target.value)}
         >
           <option value="">Any subject</option>
-          {subjects.map((s) => (
+          {curriculum.subjects.map((s) => (
             <option key={s.id} value={s.slug}>
               {s.name}
             </option>
@@ -145,15 +178,22 @@ export function HeroSearch({ provinces = [], grades = [], subjects = [], classNa
       </div>
 
       <p className="mt-3 px-1.5 pb-0.5 text-center text-xs text-ink-500 sm:text-left">
-        No account needed to search. Try a course code like{" "}
-        <button
-          type="button"
-          onClick={() => setQuery("MHF4U")}
-          className="font-semibold text-brand-600 underline-offset-2 transition-colors hover:text-brand-800 hover:underline"
-        >
-          MHF4U
-        </button>{" "}
-        or a subject name.
+        No account needed to search.{" "}
+        {exampleCode ? (
+          <>
+            Try a course code like{" "}
+            <button
+              type="button"
+              onClick={() => setQuery(exampleCode)}
+              className="font-semibold text-brand-600 underline-offset-2 transition-colors hover:text-brand-800 hover:underline"
+            >
+              {exampleCode}
+            </button>{" "}
+            or a subject name.
+          </>
+        ) : (
+          "Try a subject or a course name."
+        )}
       </p>
     </form>
   );
@@ -353,7 +393,7 @@ function CourseAutocomplete({ value, onChange, province, onPick }) {
         }}
         onFocus={() => setDismissed(false)}
         onKeyDown={onKeyDown}
-        placeholder="Course name or code, e.g. MHF4U"
+        placeholder="Subject, course name or code"
         autoComplete="off"
         role="combobox"
         aria-expanded={open}

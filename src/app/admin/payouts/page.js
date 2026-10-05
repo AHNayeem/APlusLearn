@@ -3,7 +3,7 @@ import { Banknote, Clock } from "lucide-react";
 import { connectToDatabase } from "@/lib/db/connect";
 import { enforceRole } from "@/lib/auth/guards";
 import { ROLES, PAYOUT_STATUS, PAYOUT_STATUS_LABELS } from "@/constants";
-import { listPayouts, pendingPayoutSummary } from "@/services/payout.service";
+import { listPayouts, pendingPayoutSummary, tutorPayoutPositions } from "@/services/payout.service";
 import { getSettings } from "@/services/settings.service";
 import {
   Alert, Badge, Card, CardBody, CardHeader, EmptyState, Pagination, StatCard,
@@ -27,11 +27,12 @@ export default async function AdminPayoutsPage({ searchParams }) {
   const user = await enforceRole(ROLES.ADMIN, "/admin/payouts");
   await connectToDatabase();
 
-  const { page = "1" } = await searchParams;
-  const [{ items, total, pageSize }, pending, settings] = await Promise.all([
+  const { page = "1", tutorsPage = "1" } = await searchParams;
+  const [{ items, total, pageSize }, pending, settings, positions] = await Promise.all([
     listPayouts(user, { page: Number(page) }),
     pendingPayoutSummary(),
     getSettings(),
+    tutorPayoutPositions({ page: Number(tutorsPage) }),
   ]);
 
   const owed = pending.reduce((sum, p) => sum + p.amountCents, 0);
@@ -128,6 +129,59 @@ export default async function AdminPayoutsPage({ searchParams }) {
         </CardBody>
       </Card>
 
+      {/* Every tutor's position, summed in MongoDB from the lessons
+          themselves and net of refunds (R28.17): what they have earned, what
+          has been paid, what is in flight and what is still owed. */}
+      <Card className="mt-6">
+        <CardHeader title="Tutor earnings" />
+        <CardBody className="p-0">
+          {positions.length === 0 ? (
+            <EmptyState compact className="m-5 border-0 bg-transparent" title="No tutor has earned anything yet" />
+          ) : (
+            <Table className="min-w-[760px]">
+              <THead>
+                <TH>Tutor</TH>
+                <TH align="center">Lessons</TH>
+                <TH align="right">Earned (net)</TH>
+                <TH align="right">Paid out</TH>
+                <TH align="right">In a payout</TH>
+                <TH align="right">Deductions</TH>
+                <TH align="right">Still owed</TH>
+              </THead>
+              <TBody>
+                {positions.map((row) => (
+                  <TR key={row.tutorUserId}>
+                    <TD className="text-sm">
+                      <span className="font-semibold text-ink-900">
+                        {row.tutor ? `${row.tutor.firstName} ${row.tutor.lastName}` : "Deleted user"}
+                      </span>
+                      {row.tutor?.email && <span className="block text-xs text-ink-500">{row.tutor.email}</span>}
+                    </TD>
+                    <TD align="center">{row.lessons}</TD>
+                    <TD align="right">{formatMoney(row.earnedCents)}</TD>
+                    <TD align="right">{formatMoney(row.paidOutCents)}</TD>
+                    <TD align="right">{formatMoney(row.inPayoutCents)}</TD>
+                    <TD align="right">{row.adjustmentCents ? `−${formatMoney(row.adjustmentCents)}` : "—"}</TD>
+                    <TD align="right">
+                      <span className="font-bold text-ink-900">{formatMoney(row.pendingCents)}</span>
+                    </TD>
+                  </TR>
+                ))}
+              </TBody>
+            </Table>
+          )}
+        </CardBody>
+      </Card>
+      <Pagination
+        className="mt-4"
+        page={positions.page}
+        totalPages={Math.max(1, Math.ceil(positions.total / positions.pageSize))}
+        total={positions.total}
+        pageSize={positions.pageSize}
+        label="tutors"
+        buildHref={(p) => `/admin/payouts?tutorsPage=${p}&page=${page}`}
+      />
+
       <Card className="mt-6">
         <CardHeader title="Payout history" />
         <CardBody className="p-0">
@@ -196,7 +250,7 @@ export default async function AdminPayoutsPage({ searchParams }) {
         total={total}
         pageSize={pageSize}
         label="payouts"
-        buildHref={(p) => `/admin/payouts?page=${p}`}
+        buildHref={(p) => `/admin/payouts?page=${p}&tutorsPage=${tutorsPage}`}
       />
     </DashboardPage>
   );

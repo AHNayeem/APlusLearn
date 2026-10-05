@@ -63,6 +63,24 @@ const VerificationBadgeSchema = new mongoose.Schema(
   { _id: false },
 );
 
+/**
+ * An approximate service-area centre (§15, R29.1).
+ *
+ * No defaults at all, on purpose. The field used to default to downtown
+ * Toronto, so every tutor whose address did not geocode was silently placed
+ * there and turned up in Toronto distance searches. A profile with no known
+ * place has no `location` — and a half-object (`{ type: "Point" }` with no
+ * coordinates) would be refused by the 2dsphere index, so neither member
+ * defaults either.
+ */
+const PointSchema = new mongoose.Schema(
+  {
+    type: { type: String, enum: ["Point"], required: true },
+    coordinates: { type: [Number], required: true, default: undefined }, // [lng, lat]
+  },
+  { _id: false },
+);
+
 const StatsSchema = new mongoose.Schema(
   {
     ratingAverage: { type: Number, default: 0, min: 0, max: 5 },
@@ -127,6 +145,12 @@ const TutorProfileSchema = new mongoose.Schema(
       index: true,
     },
     octNumber: { type: String, trim: true },
+    /**
+     * Credentials outside the fixed list (§13, R13.5) — "TESOL certificate",
+     * "Ontario Additional Qualification: Special Education". Short, bounded
+     * claims shown to the reviewer; verification is still a badge.
+     */
+    otherCredentials: { type: [String], default: [] },
     yearsExperience: { type: Number, default: 0, min: 0, index: true },
 
     courses: { type: [TaughtCourseSchema], default: [] },
@@ -162,10 +186,8 @@ const TutorProfileSchema = new mongoose.Schema(
     city: { type: String, trim: true, index: true },
     province: { type: String, trim: true, uppercase: true, index: true },
     postalCodePrefix: { type: String, trim: true, uppercase: true }, // "M1B"
-    location: {
-      type: { type: String, enum: ["Point"], default: "Point" },
-      coordinates: { type: [Number], default: [-79.3832, 43.6532] }, // [lng, lat]
-    },
+    /** Absent when the address did not geocode — never a guessed city. */
+    location: { type: PointSchema, default: undefined },
     travelRadiusKm: { type: Number, default: 15, min: 0, max: 200 },
 
     hourlyRateCents: { type: Number, required: true, min: 0, index: true },

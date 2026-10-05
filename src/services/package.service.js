@@ -1,4 +1,5 @@
 import "server-only";
+import { maskLearnersForTutor } from "@/lib/privacy/learner";
 import {
   TutorPackage,
   PackagePurchase,
@@ -633,7 +634,8 @@ export async function listPurchasesForTutor(actor, { page = 1, pageSize } = {}) 
     PackagePurchase.countDocuments(query),
   ]);
 
-  return { items: toPlain(items), total, page, pageSize: size };
+  // The tutor's view: a minor is an initial, not a surname (S5).
+  return { items: maskLearnersForTutor(toPlain(items)), total, page, pageSize: size };
 }
 
 // --- Endings ---------------------------------------------------------------

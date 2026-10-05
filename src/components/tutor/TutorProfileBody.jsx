@@ -2,7 +2,7 @@ import { GraduationCap, Briefcase, BookOpen, ShieldCheck } from "lucide-react";
 import { Badge, Card, CardBody, CardHeader, Rating, RatingBar, EmptyState } from "@/components/ui";
 import { TutorGallery } from "./TutorGallery";
 import { formatRate, formatDate } from "@/lib/utils/format";
-import { VERIFICATION_LABELS, VERIFICATION_DESCRIPTIONS } from "@/constants";
+import { VERIFICATION_LABELS, VERIFICATION_DESCRIPTIONS, VERIFICATION_DISCLAIMER } from "@/constants";
 
 /**
  * The photos from the search card, at profile size. Same component, so what a
@@ -57,7 +57,7 @@ export function CoursesSection({ tutor }) {
     <Card id="courses">
       <CardHeader
         title="Courses taught"
-        description={`${tutor.courses.length} ${tutor.courses.length === 1 ? "course" : "courses"} across the Ontario curriculum`}
+        description={`${tutor.courses.length} ${tutor.courses.length === 1 ? "course" : "courses"} from the ${[...new Set(tutor.courses.map((c) => c.provinceCode).filter(Boolean))].join(" and ") || "provincial"} curriculum`}
       />
       <CardBody className="space-y-6">
         {Object.entries(byGrade)
@@ -214,6 +214,10 @@ export function TrustSection({ tutor }) {
             </li>
           ))}
         </ul>
+        {/* What a badge is, and what it is not (R11.7). */}
+        <p className="mt-4 border-t border-ink-100 pt-4 text-xs leading-relaxed text-ink-500">
+          {VERIFICATION_DISCLAIMER}
+        </p>
       </CardBody>
     </Card>
   );

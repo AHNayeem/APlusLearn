@@ -83,7 +83,7 @@ async function loadPlaywright() {
 async function api(route, body) {
   const response = await fetch(`${BASE}${route}`, {
     method: body ? "POST" : "GET",
-    headers: { "Content-Type": "application/json", "x-forwarded-for": RUN_IP },
+    headers: { "Content-Type": "application/json", "x-forwarded-for": RUN_IP, "x-real-ip": RUN_IP },
     body: body ? JSON.stringify(body) : undefined,
   });
   return { status: response.status, payload: await response.json().catch(() => null) };
@@ -123,6 +123,8 @@ async function main() {
     role: "PARENT",
     provinceCode: "ON",
     city: "Toronto",
+    postalCode: "M5V 2T6",
+    phone: "416-555-0123",
     acceptTerms: true,
   });
   if (!check("a fresh account to reset is registered", registered.status === 201,
@@ -133,7 +135,7 @@ async function main() {
 
   const { chromium } = await loadPlaywright();
   const browser = await chromium.launch(CHANNEL ? { channel: CHANNEL } : {});
-  const context = await browser.newContext({ extraHTTPHeaders: { "x-forwarded-for": RUN_IP } });
+  const context = await browser.newContext({ extraHTTPHeaders: { "x-forwarded-for": RUN_IP, "x-real-ip": RUN_IP } });
   const page = await context.newPage();
   let step = 0;
   const shot = async (name) => {

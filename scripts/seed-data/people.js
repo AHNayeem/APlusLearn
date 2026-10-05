@@ -12,7 +12,7 @@ export const TUTORS = [
     city: "Toronto", postalCode: "M5V 2K3", rate: 7500, years: 11,
     headline: "OCT-certified math teacher — Advanced Functions & Calculus specialist",
     bio: "I have taught senior mathematics in the Toronto District School Board for eleven years and have marked provincial assessments for six. Most of my students come to me part-way through MHF4U or MCV4U, worried about a mark that has slipped below what their university offer requires.\n\nMy approach is diagnostic: in the first session we work through a past unit test together so I can see exactly where the reasoning breaks down. It is almost never the new material — it is usually factoring, function notation, or a shaky grasp of transformations from Grade 11. We fix the foundation, then the new work stops feeling impossible.\n\nI provide a written summary after every lesson so parents can see what we covered and what to practise before next time.",
-    qualifications: ["CERTIFIED_TEACHER", "OCT_MEMBER", "GRADUATE", "SUBJECT_SPECIALIST"],
+    qualifications: ["CERTIFIED_TEACHER", "OCT_MEMBER", "BACHELORS_DEGREE", "INDUSTRY_PROFESSIONAL"],
     oct: "482915",
     education: [
       { institution: "University of Toronto", credential: "Bachelor of Education", fieldOfStudy: "Intermediate/Senior Mathematics", startYear: 2011, endYear: 2013 },
@@ -38,7 +38,7 @@ export const TUTORS = [
     city: "Scarborough", postalCode: "M1B 2K9", rate: 5500, years: 6,
     headline: "Physics & Chemistry tutor — PhD candidate who makes the hard parts obvious",
     bio: "I am finishing a PhD in condensed matter physics at the University of Toronto, and I have been tutoring senior science throughout. SPH4U and SCH4U are the two courses where students most often tell me the textbook 'explains it but doesn't make sense', and that gap is exactly what I work on.\n\nI teach physics through problem-solving rather than formula memorisation. We draw the free-body diagram every single time, even when it seems unnecessary, because that habit is what separates a 70 from a 90 on the final. For chemistry, I lean heavily on reaction mechanisms — once you can see where the electrons go, organic chemistry stops being a list to memorise.\n\nI am happy to work around lab reports and test schedules, and I keep a bank of past unit tests from several Ontario boards.",
-    qualifications: ["POSTGRADUATE", "UNIVERSITY_STUDENT", "SUBJECT_SPECIALIST"],
+    qualifications: ["UNIVERSITY_STUDENT", "BACHELORS_DEGREE", "INDUSTRY_PROFESSIONAL"],
     education: [
       { institution: "University of Toronto", credential: "PhD", fieldOfStudy: "Physics", startYear: 2020, inProgress: true },
       { institution: "McMaster University", credential: "BSc (Honours)", fieldOfStudy: "Physics and Mathematics", startYear: 2015, endYear: 2019 },
@@ -61,7 +61,7 @@ export const TUTORS = [
     city: "Ottawa", postalCode: "K1P 5G4", rate: 6800, years: 9,
     headline: "English & essay writing — from 'I don't know where to start' to a confident thesis",
     bio: "I taught senior English in the Ottawa-Carleton District School Board for nine years before moving to tutoring full-time. My students are usually capable readers who freeze when asked to produce an argument — they can tell you what a text means, but not how to build 1,200 words around it.\n\nWe work on structure first. I use a thesis-first method: before writing a single body paragraph, we get the argument onto one line and stress-test it. Students are often surprised how much faster the essay comes once the claim is genuinely arguable.\n\nI also prepare students for university-level writing, including the transition from the five-paragraph format that ENG4U still rewards to the looser structures first-year courses expect. I return marked work within 48 hours with comments you can actually act on.",
-    qualifications: ["CERTIFIED_TEACHER", "OCT_MEMBER", "POSTGRADUATE"],
+    qualifications: ["CERTIFIED_TEACHER", "OCT_MEMBER", "MASTERS_DEGREE"],
     oct: "391204",
     education: [
       { institution: "Queen's University", credential: "Bachelor of Education", fieldOfStudy: "Intermediate/Senior English", startYear: 2013, endYear: 2015 },
@@ -88,7 +88,7 @@ export const TUTORS = [
     city: "Markham", postalCode: "L3R 1A2", rate: 6200, years: 7,
     headline: "Biology & Chemistry — med-school applicant who remembers what SBI4U feels like",
     bio: "I am in my second year of medicine at the University of Toronto, and I tutor the courses that got me there. SBI4U is deceptively hard: the content is not conceptually difficult, but the volume is enormous and the tests reward precision in a way that catches strong students off guard.\n\nI teach with active recall and spaced repetition rather than re-reading notes. We build a question bank as we go, and I check retention from earlier units at the start of each lesson — which students hate for the first two weeks and are grateful for by the final exam.\n\nI also coach students through the biology and chemistry content on university applications and supplementary essays, since I went through that process recently enough to remember exactly how opaque it feels.",
-    qualifications: ["UNIVERSITY_STUDENT", "GRADUATE", "SUBJECT_SPECIALIST"],
+    qualifications: ["UNIVERSITY_STUDENT", "BACHELORS_DEGREE", "INDUSTRY_PROFESSIONAL"],
     education: [
       { institution: "University of Toronto", credential: "Doctor of Medicine (MD)", fieldOfStudy: "Medicine", startYear: 2024, inProgress: true },
       { institution: "University of Toronto", credential: "BSc (Honours)", fieldOfStudy: "Human Biology", startYear: 2019, endYear: 2023 },
@@ -111,7 +111,7 @@ export const TUTORS = [
     city: "Brampton", postalCode: "L6Y 1N4", rate: 4800, years: 4,
     headline: "Grade 6–10 math and science — patient, structured, and good with anxious students",
     bio: "I specialise in the middle years, where confidence matters more than content. Most of the students I work with have decided they are 'bad at math', usually after one bad term, and everything after that is uphill.\n\nI start by rebuilding arithmetic and fraction fluency, because almost every Grade 9 struggle traces back to it. We use short, frequent practice rather than long sessions, and I set work that a student can actually finish, which matters enormously for someone who has got used to failing.\n\nI have worked with several students with ADHD and test anxiety, and I am comfortable adapting pacing and session structure. Parents get a short note after each lesson with one specific thing to practise — never a long list.",
-    qualifications: ["GRADUATE", "UNIVERSITY_STUDENT"],
+    qualifications: ["BACHELORS_DEGREE", "UNIVERSITY_STUDENT"],
     education: [
       { institution: "Toronto Metropolitan University", credential: "BSc", fieldOfStudy: "Mathematics", startYear: 2018, endYear: 2022 },
       { institution: "York University", credential: "Bachelor of Education", fieldOfStudy: "Primary/Junior", startYear: 2023, inProgress: true },
@@ -135,7 +135,7 @@ export const TUTORS = [
     city: "Ottawa", postalCode: "K2P 1L4", rate: 5800, years: 13,
     headline: "French immersion and Core French — conversation-first, grammar when it's needed",
     bio: "I am a native Québécois speaker and have taught French in Ontario schools for thirteen years, most of that in immersion programs. The students who come to me are usually fine on paper and freeze when asked to speak — which is precisely backwards from how the language is actually assessed at the senior level.\n\nSessions are conducted mostly in French from the second lesson onward, pitched at whatever level the student can sustain. We do grammar, but in service of something the student is trying to say, not as an isolated drill.\n\nI prepare students for the DELF examinations and for the oral components of FSF3U and FSF4U, and I work with several families maintaining French at home alongside an English-language school.",
-    qualifications: ["CERTIFIED_TEACHER", "OCT_MEMBER", "SUBJECT_SPECIALIST"],
+    qualifications: ["CERTIFIED_TEACHER", "OCT_MEMBER", "INDUSTRY_PROFESSIONAL"],
     oct: "276843",
     education: [
       { institution: "Université Laval", credential: "Baccalauréat en enseignement", fieldOfStudy: "Français langue seconde", startYear: 2007, endYear: 2011 },
@@ -158,7 +158,7 @@ export const TUTORS = [
     city: "Mississauga", postalCode: "L5B 3C2", rate: 7000, years: 5,
     headline: "Computer Science & senior math — working software engineer, teaches ICS4U properly",
     bio: "I work as a software engineer and tutor ICS3U and ICS4U evenings and weekends. Ontario computer science is taught unevenly between schools, and I see a lot of students who can follow a tutorial but cannot yet debug their own code — which is the actual skill.\n\nWe write real programs. Students finish the ISP with something they are willing to put on a university application, and along the way they learn to read a stack trace, use a debugger, and structure a program so it is possible to reason about.\n\nI also tutor MHF4U and MCV4U, which pairs naturally: most of my CS students are applying to engineering or computer science and need both marks. For students preparing for the Canadian Computing Competition, I have a separate problem set progression.",
-    qualifications: ["GRADUATE", "SUBJECT_SPECIALIST"],
+    qualifications: ["BACHELORS_DEGREE", "INDUSTRY_PROFESSIONAL"],
     education: [
       { institution: "University of Waterloo", credential: "BASc", fieldOfStudy: "Software Engineering", startYear: 2016, endYear: 2021 },
     ],
@@ -180,7 +180,7 @@ export const TUTORS = [
     city: "Hamilton", postalCode: "L8P 1A1", rate: 5200, years: 8,
     headline: "Business, accounting and data management — real-world context for every concept",
     bio: "I am a CPA who moved into teaching after eight years in practice. BAF3M and MDM4U are the courses I know best, and they suit each other: both are about turning messy information into something you can make a decision from.\n\nAccounting students usually struggle with debits and credits for about two weeks and then it clicks permanently. I get them there faster by starting with the actual business event rather than the journal entry — what happened, who owes whom, and only then how it is recorded.\n\nFor MDM4U, the culminating investigation is where most marks are won or lost. I help students choose a question that is genuinely answerable with the data they can get, which is most of the battle.",
-    qualifications: ["GRADUATE", "SUBJECT_SPECIALIST", "POSTGRADUATE"],
+    qualifications: ["BACHELORS_DEGREE", "INDUSTRY_PROFESSIONAL"],
     education: [
       { institution: "Chartered Professional Accountants of Ontario", credential: "CPA, CA", fieldOfStudy: "Accounting", startYear: 2014, endYear: 2017 },
       { institution: "McMaster University", credential: "BCom", fieldOfStudy: "Accounting and Finance", startYear: 2010, endYear: 2014 },
@@ -203,7 +203,7 @@ export const TUTORS = [
     city: "North York", postalCode: "M2N 5W9", rate: 8500, years: 15,
     headline: "Department head, 15 years — senior math for students aiming at the top programs",
     bio: "I am the head of mathematics at a Toronto secondary school and have taught MCV4U and MHF4U for fifteen years. I take a small number of tutoring students, generally those aiming at engineering science, waterloo mathematics, or similar programs where a 95 is the entry price.\n\nAt that level the work is not about catching up — it is about precision, exam technique, and closing the gap between 'I understand this' and 'I can produce a full-mark solution under time pressure'. We work through problems harder than anything on the course, because that is what makes the actual test feel manageable.\n\nI also coach for the Euclid and CEMC contests. I am direct about whether I think I can help: if a student needs foundational work rather than enrichment, I will say so and suggest a better fit.",
-    qualifications: ["CERTIFIED_TEACHER", "OCT_MEMBER", "POSTGRADUATE", "SUBJECT_SPECIALIST"],
+    qualifications: ["CERTIFIED_TEACHER", "OCT_MEMBER", "MASTERS_DEGREE", "INDUSTRY_PROFESSIONAL"],
     oct: "154302",
     education: [
       { institution: "University of Toronto", credential: "MEd", fieldOfStudy: "Curriculum, Teaching and Learning", startYear: 2016, endYear: 2018 },
@@ -229,7 +229,7 @@ export const TUTORS = [
     city: "Oshawa", postalCode: "L1H 7K4", rate: 4500, years: 3,
     headline: "History, geography and social sciences — essays, sources and exam preparation",
     bio: "I am completing a Master's in history at Queen's and tutor the Ontario humanities courses. Students often tell me history is 'just memorising dates', which is exactly why their essays score in the 60s: the marks are for argument and use of evidence, not recall.\n\nWe work on source analysis first — how to read a document for what it reveals about its author, not just its content — and then on building a thesis that takes a genuine position. CHY4U and CHC2D both reward this heavily and teach it unevenly.\n\nI am also comfortable with HSP3U and the social sciences more broadly, including research methods, which trips up a lot of otherwise strong students.",
-    qualifications: ["UNIVERSITY_STUDENT", "GRADUATE"],
+    qualifications: ["UNIVERSITY_STUDENT", "BACHELORS_DEGREE"],
     education: [
       { institution: "Queen's University", credential: "MA", fieldOfStudy: "History", startYear: 2024, inProgress: true },
       { institution: "Trent University", credential: "BA (Honours)", fieldOfStudy: "History and Political Studies", startYear: 2019, endYear: 2023 },
@@ -253,7 +253,7 @@ export const TUTORS = [
     city: "Toronto", postalCode: "M6H 1L5", rate: 5900, years: 6,
     headline: "Grade 9–11 math and science — building the habits senior courses assume",
     bio: "Most of my students are in Grades 9 to 11, at the point where school mathematics stops being about procedures and starts being about reasoning. That transition catches out a lot of students who did well in elementary school.\n\nI teach note-taking and problem-solving habits alongside content, because a student who cannot organise their own work will keep hitting the same wall regardless of how well any individual topic is explained. We use a consistent format for every problem, which feels pedantic for about a month and then pays off permanently.\n\nI work with several families where English is a second language and am happy to explain concepts in Bengali or Urdu where that helps.",
-    qualifications: ["GRADUATE", "SUBJECT_SPECIALIST"],
+    qualifications: ["BACHELORS_DEGREE", "INDUSTRY_PROFESSIONAL"],
     education: [
       { institution: "York University", credential: "BSc (Honours)", fieldOfStudy: "Applied Mathematics", startYear: 2016, endYear: 2020 },
     ],
@@ -272,7 +272,7 @@ export const TUTORS = [
   {
     firstName: "Thomas", lastName: "Wright", email: "thomas.wright@example.com",
     city: "London", postalCode: "N6A 3K7", rate: 5000, years: 5,
-    headline: "Elementary math and literacy — Grades 4 to 8, in person across London",
+    headline: "Elementary math and literacy — Kindergarten to Grade 8, in person across London",
     bio: "I work with elementary students, mostly Grades 4 to 8, on mathematics and reading. At this age the most valuable thing tutoring provides is usually not content but attention: a patient adult who notices exactly where a student stopped following.\n\nFor mathematics I use manipulatives and visual models well past the age most textbooks abandon them, because fractions and ratios genuinely are easier to see than to state. For literacy I focus on comprehension strategies — predicting, questioning, summarising — that transfer to every subject.\n\nI am comfortable working in a family home or at a branch of the London Public Library, whichever suits. I give parents a short written note after each session rather than a verbal summary at the door.",
     qualifications: ["CERTIFIED_TEACHER", "OCT_MEMBER"],
     oct: "512987",
@@ -283,7 +283,14 @@ export const TUTORS = [
     experience: [
       { title: "Occasional Teacher", organisation: "Thames Valley District School Board", startYear: 2020, current: true },
     ],
-    courses: ["Elementary Mathematics", "Elementary Language", "Elementary Science"],
+    // Course keys: an Ontario code, "PROVINCE:CODE", or "Course name:grade"
+    // for codeless courses (see `courseKey` in scripts/seed.js).
+    courses: [
+      "Early Numeracy:0", "Early Literacy:0",
+      ...[1, 2, 3, 4, 5, 6, 8].map((g) => `Elementary Mathematics:${g}`),
+      ...[1, 2, 3, 5, 6, 8].map((g) => `Elementary Language:${g}`),
+      "Elementary Mathematics:7", "Elementary Science:7",
+    ],
     modes: ["IN_PERSON", "ONLINE"], radius: 25,
     badges: ["IDENTITY", "OCT", "EDUCATION", "BACKGROUND_CHECK"],
     languages: ["English"],
@@ -292,6 +299,78 @@ export const TUTORS = [
       { weekday: 3, start: "15:30", end: "19:30" }, { weekday: 6, start: "09:00", end: "14:00" },
     ],
     freeIntro: true,
+  },
+  {
+    // A city the bundled geocoding table does not know: search for it has to
+    // be answered from the data (tutors who serve Sudbury), never by
+    // pretending the visitor is in Toronto.
+    firstName: "Claire", lastName: "Gagnon", email: "claire.gagnon@example.com",
+    city: "Sudbury", postalCode: "P3E 2C6", coordinates: [-80.9930, 46.4917], rate: 5400, years: 8,
+    headline: "Northern Ontario math & science tutor — Grades 9 to 12, in person or online",
+    bio: "I teach secondary mathematics and science in Greater Sudbury and tutor students across the north, many of whom live a long way from the nearest in-person option. I split my week between home visits in Sudbury and online lessons for families further out.\n\nMost of my students are working through the jump from Grade 10 to the senior university-stream courses. We spend the first lesson on what the course actually assesses, then build a weekly plan around the unit tests.",
+    qualifications: ["CERTIFIED_TEACHER", "OCT_MEMBER", "BACHELORS_DEGREE"],
+    oct: "604412",
+    education: [
+      { institution: "Laurentian University", credential: "Bachelor of Education", fieldOfStudy: "Intermediate/Senior Mathematics and Science", startYear: 2014, endYear: 2016 },
+    ],
+    experience: [
+      { title: "Secondary Teacher", organisation: "Rainbow District School Board", startYear: 2016, current: true },
+    ],
+    courses: ["MHF4U", "MCR3U", "MPM2D", "SPH3U", "SNC2D"],
+    modes: ["ONLINE", "IN_PERSON"], radius: 30,
+    badges: ["IDENTITY", "OCT", "BACKGROUND_CHECK"],
+    languages: ["English", "French"],
+    availability: [
+      { weekday: 2, start: "16:00", end: "20:00" }, { weekday: 4, start: "16:00", end: "20:00" },
+      { weekday: 6, start: "10:00", end: "14:00" },
+    ],
+  },
+  {
+    province: "BC", timeZone: "America/Vancouver",
+    firstName: "Olivia", lastName: "Bennett", email: "olivia.bennett@example.com",
+    city: "Vancouver", postalCode: "V6B 1A1", rate: 7000, years: 10,
+    headline: "BC Pre-calculus & Calculus 12 specialist — Vancouver and online",
+    bio: "I taught senior mathematics in the Vancouver School Board for a decade. Pre-calculus 12 is where most of my students first meet logarithms and trigonometric identities at speed, and it is the course universities look at hardest.\n\nI work from the provincial curriculum's big ideas outward: once a student can say what a transformation does to any function, the unit stops being a list of special cases.",
+    qualifications: ["CERTIFIED_TEACHER", "MASTERS_DEGREE", "DOCTORATE"],
+    education: [
+      { institution: "University of British Columbia", credential: "PhD", fieldOfStudy: "Mathematics Education", startYear: 2018, endYear: 2023 },
+      { institution: "University of British Columbia", credential: "Bachelor of Education", fieldOfStudy: "Secondary Mathematics", startYear: 2012, endYear: 2014 },
+      { institution: "Simon Fraser University", credential: "MSc", fieldOfStudy: "Applied Mathematics", startYear: 2010, endYear: 2012 },
+    ],
+    experience: [
+      { title: "Secondary Mathematics Teacher", organisation: "Vancouver School Board", startYear: 2014, endYear: 2024 },
+    ],
+    courses: ["BC:MPREC12", "BC:MCALC12", "BC:MPREC11", "BC:Foundations of Mathematics and Pre-calculus 10:10"],
+    modes: ["ONLINE", "IN_PERSON"], radius: 15,
+    badges: ["IDENTITY", "EDUCATION", "BACKGROUND_CHECK"],
+    languages: ["English", "Mandarin"],
+    availability: [
+      { weekday: 1, start: "15:30", end: "20:00" }, { weekday: 3, start: "15:30", end: "20:00" },
+      { weekday: 0, start: "10:00", end: "15:00" },
+    ],
+    freeIntro: true,
+  },
+  {
+    province: "BC", timeZone: "America/Vancouver",
+    firstName: "Marcus", lastName: "Lee", email: "marcus.lee@example.com",
+    city: "Victoria", postalCode: "V8W 1A1", rate: 5600, years: 4,
+    headline: "English Studies 12 and middle-school literacy — in person in Victoria",
+    bio: "I am a UVic education graduate who tutors English across Greater Victoria. I only teach in person: I find younger writers do their best work with someone sitting beside them and a printed draft between us.\n\nFor English Studies 12 I focus on the literacy assessment and on building an argument that holds together over several pages.",
+    qualifications: ["BACHELORS_DEGREE"],
+    education: [
+      { institution: "University of Victoria", credential: "BA", fieldOfStudy: "English", startYear: 2016, endYear: 2020 },
+    ],
+    experience: [
+      { title: "Private Tutor", organisation: "Self-employed", startYear: 2021, current: true },
+    ],
+    courses: ["BC:MENST12", "BC:English Language Arts 7:7", "BC:Mathematics 7:7"],
+    modes: ["IN_PERSON"], radius: 12,
+    badges: ["IDENTITY"],
+    languages: ["English"],
+    availability: [
+      { weekday: 2, start: "15:00", end: "19:00" }, { weekday: 4, start: "15:00", end: "19:00" },
+      { weekday: 6, start: "09:00", end: "13:00" },
+    ],
   },
 ];
 
@@ -332,6 +411,16 @@ export const PARENTS = [
     city: "Scarborough", postalCode: "M1K 3T2",
     children: [
       { firstName: "Daniel", lastName: "Osei", birthYear: 2012, grade: 8, school: "Cedarbrae Junior Public", notes: "Preparing for the jump to Grade 9 mathematics." },
+    ],
+  },
+  {
+    // A British Columbia family: their child's grade and courses come from
+    // BC's curriculum, and they are matched with BC tutors.
+    province: "BC", timeZone: "America/Vancouver",
+    firstName: "Hannah", lastName: "Wong", email: "hannah.wong@example.com",
+    city: "Vancouver", postalCode: "V6B 2W9",
+    children: [
+      { firstName: "Ethan", lastName: "Wong", birthYear: 2008, grade: 12, school: "Point Grey Secondary", notes: "Needs Pre-calculus 12 above 86 for UBC engineering." },
     ],
   },
 ];

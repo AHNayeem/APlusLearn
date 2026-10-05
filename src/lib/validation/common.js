@@ -2,6 +2,26 @@ import { z } from "zod";
 
 /** Reusable primitives shared by every domain schema (§37). */
 
+/**
+ * The PATCH form of a create schema: every field optional, and **no
+ * defaults**.
+ *
+ * Zod's `.partial()` keeps each field's `.default()`, so a PATCH that names
+ * one field comes back from validation with every defaulted field filled in
+ * — `{ isActive: true }` on a province would also reset `usesCourseCodes`
+ * to false and `displayOrder` to 0, and an edit to a child's grade would
+ * empty their course list. An omitted field on a PATCH means "leave it as
+ * it is", so the defaults are unwrapped before the field is made optional.
+ */
+export function patchSchema(schema) {
+  const shape = {};
+  for (const [key, field] of Object.entries(schema.shape)) {
+    const inner = field instanceof z.ZodDefault ? field.unwrap() : field;
+    shape[key] = inner.optional();
+  }
+  return z.object(shape);
+}
+
 export const objectId = z
   .string()
   .regex(/^[a-f\d]{24}$/i, "That reference is not valid.");

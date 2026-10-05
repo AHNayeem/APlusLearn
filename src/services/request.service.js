@@ -1,4 +1,5 @@
 import "server-only";
+import { Types } from "mongoose";
 import {
   TutorRequest,
   TutorMatch,
@@ -6,6 +7,7 @@ import {
   Availability,
   StudentProfile,
   Course,
+  User,
 } from "@/models";
 import {
   REQUEST_STATUS,
@@ -17,6 +19,10 @@ import {
   AUDIT_ACTIONS,
   PAGE_SIZES,
   ROLES,
+  USER_STATUS,
+  REPORT_STATUS,
+  ACTIVE_REPORT_STATUSES,
+  REQUEST_REPORT_REASONS,
 } from "@/constants";
 import {
   NotFoundError,
@@ -25,6 +31,7 @@ import {
   ConflictError,
 } from "@/lib/api/errors";
 import { toPlain } from "@/lib/utils/serialize";
+import { publicName } from "@/lib/utils/format";
 import { publicReference } from "@/lib/auth/tokens";
 import { addDays } from "@/lib/utils/time";
 import { geocode } from "./external/geocoding-provider";
@@ -33,6 +40,10 @@ import {
   matchCandidateQuery,
   isEligibleForMatch,
   requestAcceptsMatches,
+  isRequestLive,
+  isRequestLapsed,
+  liveRequestFilter,
+  pairDistanceKm,
 } from "@/lib/matching/eligibility";
 import { toPublicTutor } from "./tutor.service";
 import { notify, notifyMany } from "./notification.service";
@@ -57,6 +68,14 @@ import { getSettings } from "./settings.service";
  * Every ending is terminal. A closed request gains no new matches, accepts no
  * tutor response and cannot be edited back open — `assertOpen` is the single
  * gate all of that runs through.
+ *
+ * Expiry is read from the clock, not from the job (R18.11): a request past
+ * `expiresAt` is treated as EXPIRED by every read and refused by every write
+ * from that instant, whether or not the daily sweep has stored it yet. The
+ * sweep only settles the record and tells the family.
+ *
+ * What a tutor reads is a whitelist, `toTutorRequestView()` (S17): the brief,
+ * never the family's account, address or the moderation trail.
  */
 
 const CANDIDATE_READ_LIMIT = 300;
@@ -65,8 +84,8 @@ const CANDIDATE_READ_LIMIT = 300;
 
 export async function listRequests(actor, { status, page = 1, pageSize } = {}) {
   const size = pageSize ?? PAGE_SIZES.bookings;
-  const query = { ownerId: actor.id };
-  if (status) query.status = status;
+  const now = new Date();
+  const query = { ownerId: actor.id, ...statusFilter(status, now) };
 
   const [items, total] = await Promise.all([
     TutorRequest.find(query)
@@ -78,7 +97,12 @@ export async function listRequests(actor, { status, page = 1, pageSize } = {}) {
     TutorRequest.countDocuments(query),
   ]);
 
-  return { items: toPlain(items), total, page, pageSize: size };
+  return {
+    items: toPlain(items).map((item) => withLiveStatus(item, now)),
+    total,
+    page,
+    pageSize: size,
+  };
 }
 
 /**
@@ -94,13 +118,16 @@ export async function getRequest(id, actor) {
     .lean();
   if (!request) throw new NotFoundError("That request no longer exists.");
 
-  if (String(request.ownerId) === String(actor.id)) return toPlain(request);
-  if (actor.role === ROLES.ADMIN) return toPlain(request);
+  if (String(request.ownerId) === String(actor.id)) return withLiveStatus(toPlain(request));
+  if (actor.role === ROLES.ADMIN) return withLiveStatus(toPlain(request));
 
   if (actor.role === ROLES.TUTOR) {
-    const match = await tutorMatchFor(request._id, actor.id);
+    const [match, profile] = await Promise.all([
+      tutorMatchFor(request._id, actor.id),
+      tutorProfileFor(actor.id),
+    ]);
     assertTutorMaySee(request, match);
-    return toPlain(request);
+    return toTutorRequestView(request, { tutor: profile });
   }
 
   throw new AuthorizationError("You do not have access to this request.");
@@ -112,11 +139,12 @@ export async function getRequest(id, actor) {
  */
 export async function getRequestForTutor(id, actor) {
   const [request, profile] = await Promise.all([
-    TutorRequest.findById(id).populate("studentProfileId", "firstName gradeName").lean(),
+    TutorRequest.findById(id).populate("studentProfileId", "firstName lastName gradeName").lean(),
     tutorProfileFor(actor.id),
   ]);
   if (!request) throw new NotFoundError("That request no longer exists.");
 
+  const now = new Date();
   const match = profile
     ? await TutorMatch.findOne({ requestId: request._id, tutorProfileId: profile._id }).lean()
     : null;
@@ -133,8 +161,10 @@ export async function getRequestForTutor(id, actor) {
     ]);
   }
 
+  const eligibility = tutorEligibility(profile, request);
+
   return {
-    request: toPlain(request),
+    request: toTutorRequestView(request, { tutor: profile, now }),
     match: match
       ? {
           id: String(match._id),
@@ -146,7 +176,9 @@ export async function getRequestForTutor(id, actor) {
           invitedAt: match.invitedAt?.toISOString?.() ?? null,
         }
       : null,
-    canRespond: canTutorRespond(request, match),
+    canRespond: canTutorRespond(request, match, now) && eligibility.eligible,
+    /** Why this tutor may not pitch, in their own terms — null when they may. */
+    eligibility,
   };
 }
 
@@ -234,13 +266,21 @@ export async function listOpenRequestsForTutor(actor, { page = 1, pageSize, stat
     .lean();
   const matchMap = new Map(matches.map((m) => [String(m.requestId), m]));
 
+  // An expired request leaves the board the instant it lapses, not when the
+  // sweep next runs (R18.11). A removed one never reaches a tutor at all.
+  const now = new Date();
   const query = {
-    status: status ?? REQUEST_STATUS.OPEN,
-    $or: [
-      { _id: { $in: matches.map((m) => m.requestId) } },
+    $and: [
+      statusFilter(status ?? REQUEST_STATUS.OPEN, now),
+      { status: { $ne: REQUEST_STATUS.REMOVED } },
       {
-        visibility: REQUEST_VISIBILITY.PUBLIC,
-        courseId: { $in: profile.courseIds ?? [] },
+        $or: [
+          { _id: { $in: matches.map((m) => m.requestId) } },
+          {
+            visibility: REQUEST_VISIBILITY.PUBLIC,
+            courseId: { $in: profile.courseIds ?? [] },
+          },
+        ],
       },
     ],
   };
@@ -250,21 +290,22 @@ export async function listOpenRequestsForTutor(actor, { page = 1, pageSize, stat
       .sort({ createdAt: -1 })
       .skip((page - 1) * size)
       .limit(size)
-      .populate("studentProfileId", "firstName gradeName")
+      .populate("studentProfileId", "firstName lastName gradeName")
       .lean(),
     TutorRequest.countDocuments(query),
   ]);
 
   return {
-    items: toPlain(items).map((request) => {
-      const match = matchMap.get(request.id);
+    items: items.map((request) => {
+      const match = matchMap.get(String(request._id));
       return {
-        ...request,
+        ...toTutorRequestView(request, { tutor: profile, now }),
         matchStatus: match?.status ?? null,
         matchScore: match?.score ?? null,
-        invitedAt: match?.invitedAt ?? null,
+        invitedAt: match?.invitedAt?.toISOString?.() ?? null,
         hasResponded: Boolean(match?.message),
-        canRespond: canTutorRespond(request, match),
+        canRespond:
+          canTutorRespond(request, match, now) && tutorEligibility(profile, request).eligible,
       };
     }),
     total,
@@ -278,10 +319,12 @@ export async function listOpenRequestsForTutor(actor, { page = 1, pageSize, stat
 export async function createTutorRequest(input, actor) {
   const settings = await getSettings();
 
+  // Only live requests count against the cap: one that lapsed overnight is
+  // not holding a place just because the sweep has not stored it yet.
   const [student, course, openCount] = await Promise.all([
     StudentProfile.findById(input.studentProfileId).lean(),
     Course.findById(input.courseId).lean(),
-    TutorRequest.countDocuments({ ownerId: actor.id, status: REQUEST_STATUS.OPEN }),
+    TutorRequest.countDocuments({ ownerId: actor.id, ...liveRequestFilter() }),
   ]);
 
   if (!student) throw new NotFoundError("Choose who the lessons are for.");
@@ -680,6 +723,16 @@ export async function expressInterest(requestId, { message, proposedRateCents },
     );
   }
 
+  // The same hard gates the matcher and an invitation apply (R18.9). Seeing a
+  // request on the board is not the same as being able to serve it: a pitch
+  // from a tutor who does not teach the course, cannot offer the lesson type,
+  // is out of range, has stopped taking students or whose account is
+  // suspended is refused here rather than left for the family to discover.
+  const eligibility = tutorEligibility(profile, request);
+  if (!eligibility.eligible) {
+    throw new BusinessRuleError(eligibility.reason, "NOT_ELIGIBLE_FOR_REQUEST");
+  }
+
   const match = await TutorMatch.findOneAndUpdate(
     { requestId: request._id, tutorProfileId: profile._id },
     {
@@ -789,6 +842,15 @@ export async function respondToMatch(matchId, { action }, actor) {
   if (match.status === MATCH_STATUS.BOOKED) {
     throw new BusinessRuleError("This tutor is already booked.", "MATCH_BOOKED");
   }
+  // A tutor who stepped back has ended the match from their side. Shortlisting
+  // them would put somebody who said no back on the family's list, and
+  // "declining" them would overwrite their own answer with the family's.
+  if (TUTOR_CLOSED_MATCH_STATUSES.includes(match.status)) {
+    throw new BusinessRuleError(
+      "This tutor is no longer available for this request.",
+      "MATCH_CLOSED",
+    );
+  }
 
   if (action === "SHORTLIST") {
     match.status = MATCH_STATUS.SHORTLISTED;
@@ -825,15 +887,41 @@ export async function closeRequest(requestId, { reason, bookedTutorProfileId }, 
   assertOpen(request, "This request is already closed.");
 
   const booked = reason === "BOOKED";
+
+  // "Booked" names a tutor, and only one who is actually on this request and
+  // has not stepped back from it. Otherwise any profile id could be recorded
+  // as the tutor a family hired (R18.10).
+  let bookedMatch = null;
+  if (booked && bookedTutorProfileId) {
+    bookedMatch = await TutorMatch.findOne({
+      requestId: request._id,
+      tutorProfileId: bookedTutorProfileId,
+    })
+      .select("_id status")
+      .lean();
+    if (!bookedMatch) {
+      throw new BusinessRuleError(
+        "That tutor has not responded to this request.",
+        "MATCH_NOT_FOUND",
+      );
+    }
+    if (TUTOR_CLOSED_MATCH_STATUSES.includes(bookedMatch.status)) {
+      throw new BusinessRuleError(
+        "That tutor is no longer available for this request.",
+        "MATCH_CLOSED",
+      );
+    }
+  }
+
   request.status = booked ? REQUEST_STATUS.MATCHED : REQUEST_STATUS.CLOSED;
   request.closedAt = new Date();
   request.closeReason = booked ? "BOOKED" : reason;
   if (booked) request.matchedAt = new Date();
 
-  if (bookedTutorProfileId) {
+  if (bookedMatch) {
     request.bookedTutorProfileId = bookedTutorProfileId;
     await TutorMatch.updateOne(
-      { requestId: request._id, tutorProfileId: bookedTutorProfileId },
+      { _id: bookedMatch._id },
       { $set: { status: MATCH_STATUS.BOOKED, bookedAt: new Date() } },
     );
   }
@@ -890,17 +978,24 @@ export async function cancelRequest(requestId, { reason }, actor) {
 // --- Admin moderation ------------------------------------------------------
 
 /** Every request on the platform, for the moderation queue (§23, §28). */
-export async function listAllRequests({ status, search, page = 1, pageSize } = {}) {
+export async function listAllRequests({ status, reported, search, page = 1, pageSize } = {}) {
   const size = pageSize ?? PAGE_SIZES.adminTable;
-  const query = {};
-  if (status) query.status = status;
+  const now = new Date();
+  const clauses = [];
+  if (status) clauses.push(statusFilter(status, now));
+  // The report queue is driven by the case, not by visibility: a reported
+  // request is still on the board until a moderator rules on it (R28.24).
+  if (reported) clauses.push({ reportStatus: { $in: ACTIVE_REPORT_STATUSES } });
   if (search) {
     const term = String(search).trim();
-    query.$or = [
-      { reference: new RegExp(`^${term.replace(/[^\w-]/g, "")}`, "i") },
-      { courseCode: term.toUpperCase() },
-    ];
+    clauses.push({
+      $or: [
+        { reference: new RegExp(`^${term.replace(/[^\w-]/g, "")}`, "i") },
+        { courseCode: term.toUpperCase() },
+      ],
+    });
   }
+  const query = clauses.length ? { $and: clauses } : {};
 
   const [items, total] = await Promise.all([
     TutorRequest.find(query)
@@ -909,22 +1004,35 @@ export async function listAllRequests({ status, search, page = 1, pageSize } = {
       .limit(size)
       .populate("ownerId", "firstName lastName email")
       .populate("studentProfileId", "firstName gradeName")
+      .populate("reportHistory.reporterId", "firstName lastName role")
       .lean(),
     TutorRequest.countDocuments(query),
   ]);
 
-  return { items: toPlain(items), total, page, pageSize: size };
+  return {
+    items: toPlain(items).map((item) => withLiveStatus(item, now)),
+    total,
+    page,
+    pageSize: size,
+  };
 }
 
 /**
- * A moderator removes a request, or restores one they removed.
+ * A moderator removes a request, restores one they removed, or dismisses the
+ * report case against one.
  *
  * Removal is a status, not a delete: the record, its matches and the reason
  * all survive so the decision can be reviewed and reversed (§23, §35).
+ * Removing a reported request upholds the report (RESOLVED); dismissing
+ * leaves the request exactly where it was and closes the case (DISMISSED).
+ * Either way every report in the case is stamped resolved, so the members
+ * who made them may report again if it happens again.
  */
 export async function moderateRequest(requestId, { action, note }, actor) {
   const request = await TutorRequest.findById(requestId);
   if (!request) throw new NotFoundError("That request no longer exists.");
+
+  if (action === "DISMISS_REPORT") return dismissRequestReport(request, { note }, actor);
 
   const removing = action === "REMOVE";
   if (removing && request.status === REQUEST_STATUS.REMOVED) {
@@ -947,6 +1055,9 @@ export async function moderateRequest(requestId, { action, note }, actor) {
     request.removedBy = undefined;
     request.closedAt = stillFresh ? undefined : request.closedAt;
   }
+
+  const upheld = removing && ACTIVE_REPORT_STATUSES.includes(request.reportStatus);
+  if (upheld) settleReportCase(request, REPORT_STATUS.RESOLVED);
 
   request.moderationNote = note;
   request.moderationHistory.push({
@@ -973,10 +1084,299 @@ export async function moderateRequest(requestId, { action, note }, actor) {
     action: AUDIT_ACTIONS.REQUEST_MODERATED,
     entityType: "TutorRequest",
     entityId: request._id,
-    metadata: { reference: request.reference, action, note },
+    metadata: {
+      reference: request.reference,
+      action,
+      note,
+      ...(upheld ? { reportStatus: REPORT_STATUS.RESOLVED } : {}),
+    },
   });
 
   return toPlain(request);
+}
+
+async function dismissRequestReport(request, { note }, actor) {
+  if (!ACTIVE_REPORT_STATUSES.includes(request.reportStatus)) {
+    throw new ConflictError("That request has no open report.");
+  }
+
+  const reports = request.reportCount;
+  settleReportCase(request, REPORT_STATUS.DISMISSED);
+  request.moderationHistory.push({
+    at: new Date(),
+    byId: actor.id,
+    byRole: actor.role,
+    action: "DISMISS_REPORT",
+    note,
+  });
+  await request.save();
+
+  // The family is not told: nothing about their request changed, and a
+  // report that was dismissed is not news to somebody who never heard of it.
+  await recordAudit({
+    actor,
+    action: AUDIT_ACTIONS.REQUEST_MODERATED,
+    entityType: "TutorRequest",
+    entityId: request._id,
+    metadata: {
+      reference: request.reference,
+      action: "DISMISS_REPORT",
+      reportStatus: REPORT_STATUS.DISMISSED,
+      reports,
+      note,
+    },
+  });
+
+  return toPlain(request);
+}
+
+/** Close the open report case on a loaded request document. */
+function settleReportCase(request, outcome) {
+  const now = new Date();
+  request.reportStatus = outcome;
+  request.reportCount = 0;
+  for (const entry of request.reportHistory) {
+    if (!entry.resolvedAt) entry.resolvedAt = now;
+  }
+}
+
+// --- Reports ---------------------------------------------------------------
+
+/**
+ * A member reports a tutor request (R28.24).
+ *
+ * Anyone who may read the request may report it except the family who posted
+ * it: a tutor it is visible to (public, or one they were invited to), or an
+ * administrator. Reporting opens a case; it does not take the request down —
+ * only a moderator does that, through `moderateRequest`.
+ *
+ * The duplicate rule is enforced by the write itself: the report is pushed
+ * only if this member has no unresolved report on the request, so two quick
+ * submissions cannot both land. Administrators are told once per case, when
+ * it opens, rather than once per report — the queue shows the count.
+ */
+export async function reportRequest(requestId, { reason, note }, actor) {
+  const request = await TutorRequest.findById(requestId).lean();
+  if (!request) throw new NotFoundError("That request no longer exists.");
+
+  if (String(request.ownerId) === String(actor.id)) {
+    throw new AuthorizationError("You cannot report your own request.");
+  }
+  if (actor.role === ROLES.TUTOR) {
+    assertTutorMaySee(request, await tutorMatchFor(request._id, actor.id));
+  } else if (actor.role !== ROLES.ADMIN) {
+    throw new AuthorizationError("You do not have access to this request.");
+  }
+
+  const now = new Date();
+  const entry = {
+    reporterId: actor.id,
+    reporterRole: actor.role,
+    reason,
+    note: note || undefined,
+    createdAt: now,
+  };
+
+  const claimed = await TutorRequest.findOneAndUpdate(
+    {
+      _id: request._id,
+      reportHistory: {
+        $not: {
+          $elemMatch: { reporterId: new Types.ObjectId(String(actor.id)), resolvedAt: null },
+        },
+      },
+    },
+    { $push: { reportHistory: entry }, $inc: { reportCount: 1 } },
+    { returnDocument: "after" },
+  )
+    .select("reportCount reportStatus")
+    .lean();
+  if (!claimed) {
+    throw new ConflictError("You have already reported this request. Our team is looking at it.");
+  }
+
+  // Open the case if this is the report that starts one.
+  const opened = await TutorRequest.updateOne(
+    { _id: request._id, reportStatus: { $nin: ACTIVE_REPORT_STATUSES } },
+    { $set: { reportStatus: REPORT_STATUS.OPEN, reportedAt: now } },
+  );
+
+  await recordAudit({
+    actor,
+    action: AUDIT_ACTIONS.REQUEST_REPORTED,
+    entityType: "TutorRequest",
+    entityId: request._id,
+    metadata: { reference: request.reference, reason, reportCount: claimed.reportCount },
+  });
+
+  if (opened.modifiedCount) {
+    await notifyActiveAdmins({
+      type: NOTIFICATION_TYPES.CONTENT_REPORTED,
+      title: "A tutor request was reported",
+      body: `${request.courseCode ?? request.courseName} request ${request.reference}: ${REQUEST_REPORT_REASONS[reason] ?? reason}.`,
+      href: "/admin/requests?status=reported",
+      entityType: "TutorRequest",
+      entityId: request._id,
+    });
+  }
+
+  return {
+    reported: true,
+    reportStatus: REPORT_STATUS.OPEN,
+    /** The request stays on the board while the case is open — say so. */
+    stillVisible: true,
+  };
+}
+
+/** In-app notice to every active administrator. Never breaks its caller. */
+async function notifyActiveAdmins(payload) {
+  try {
+    const admins = await User.find({
+      role: ROLES.ADMIN,
+      status: USER_STATUS.ACTIVE,
+      deletedAt: null,
+    })
+      .select("_id")
+      .lean();
+    await notifyMany(admins.map((a) => a._id), payload);
+  } catch (error) {
+    console.error("[request] could not notify administrators of a report", error);
+  }
+}
+
+// --- Booking from a request (R18.10) ---------------------------------------
+
+/**
+ * Check that a booking may be attributed to a request, before it is created.
+ *
+ * Called by booking creation when the family arrived from a request. The
+ * request must be theirs, and either live or already booked with this same
+ * tutor (a second lesson with the tutor they hired is still "from" it); the
+ * tutor must be on the request and not have stepped back from it. Every id
+ * the booking will carry comes from the stored records, never the client.
+ *
+ * @returns {Promise<{ requestId: string, tutorMatchId: string }>}
+ */
+export async function validateRequestForBooking({ requestId, purchaserId, tutorProfileId }) {
+  const request = await TutorRequest.findById(requestId)
+    .select("ownerId status expiresAt bookedTutorProfileId")
+    .lean();
+  if (!request) throw new NotFoundError("That request no longer exists.");
+  if (String(request.ownerId) !== String(purchaserId)) {
+    throw new AuthorizationError("You can only book from your own requests.");
+  }
+
+  const bookedWithThisTutor =
+    request.status === REQUEST_STATUS.MATCHED &&
+    String(request.bookedTutorProfileId) === String(tutorProfileId);
+  if (!isRequestLive(request) && !bookedWithThisTutor) {
+    throw new BusinessRuleError(
+      isRequestLapsed(request) ? "This request has expired." : "This request is no longer open.",
+      "REQUEST_CLOSED",
+    );
+  }
+
+  const match = await TutorMatch.findOne({ requestId: request._id, tutorProfileId })
+    .select("_id status")
+    .lean();
+  if (!match) {
+    throw new BusinessRuleError(
+      "That tutor is not on this request.",
+      "MATCH_NOT_FOUND",
+    );
+  }
+  if (TUTOR_CLOSED_MATCH_STATUSES.includes(match.status)) {
+    throw new BusinessRuleError(
+      "That tutor is no longer available for this request.",
+      "MATCH_CLOSED",
+    );
+  }
+
+  return { requestId: String(request._id), tutorMatchId: String(match._id) };
+}
+
+/**
+ * Record that a booking answered a request: the match becomes BOOKED and the
+ * request closes as MATCHED with this tutor (R18.10).
+ *
+ * Called once the booking is confirmed. Idempotent — every write is
+ * conditional, so a replayed confirmation changes nothing and notifies nobody
+ * twice. A request that lapsed or was swept between checkout and confirmation
+ * still closes as MATCHED, because the booking was made while it was live;
+ * one the family cancelled or a moderator removed keeps that ending, and only
+ * the match records the booking.
+ *
+ * Never throws into its caller: a booking that has been paid for must not be
+ * undone by bookkeeping about where it came from.
+ *
+ * @returns {Promise<{ matchBooked: boolean, requestClosed: boolean } | null>}
+ */
+export async function recordRequestBooking({ requestId, tutorMatchId, bookingId, tutorProfileId }) {
+  try {
+    if (!requestId || !tutorMatchId || !tutorProfileId) return null;
+    const now = new Date();
+
+    const matchWrite = await TutorMatch.updateOne(
+      {
+        _id: tutorMatchId,
+        requestId,
+        tutorProfileId,
+        status: { $ne: MATCH_STATUS.BOOKED },
+      },
+      { $set: { status: MATCH_STATUS.BOOKED, bookedAt: now } },
+    );
+
+    const request = await TutorRequest.findOneAndUpdate(
+      { _id: requestId, status: { $in: [REQUEST_STATUS.OPEN, REQUEST_STATUS.EXPIRED] } },
+      {
+        $set: {
+          status: REQUEST_STATUS.MATCHED,
+          closeReason: "BOOKED",
+          bookedTutorProfileId: tutorProfileId,
+          matchedAt: now,
+          closedAt: now,
+        },
+      },
+      { returnDocument: "after" },
+    ).lean();
+
+    if (request) {
+      // Everyone else who put work into a pitch hears that it was filled.
+      const others = await TutorMatch.find({
+        requestId,
+        tutorProfileId: { $ne: tutorProfileId },
+        status: {
+          $in: [MATCH_STATUS.TUTOR_INTERESTED, MATCH_STATUS.SHORTLISTED, MATCH_STATUS.INVITED],
+        },
+      })
+        .select("tutorUserId")
+        .lean();
+      await notifyMany(
+        others.map((m) => m.tutorUserId),
+        {
+          type: NOTIFICATION_TYPES.REQUEST_CLOSED,
+          title: "A request you answered has been filled",
+          body: `The family booked another tutor for their ${request.courseCode ?? request.courseName} request.`,
+          href: `/tutor/requests/${request._id}`,
+          entityType: "TutorRequest",
+          entityId: request._id,
+        },
+      );
+
+      await recordAudit({
+        actor: { role: "SYSTEM" },
+        action: AUDIT_ACTIONS.REQUEST_CLOSED,
+        entityType: "TutorRequest",
+        entityId: request._id,
+        metadata: { reference: request.reference, reason: "BOOKED", bookingId: String(bookingId ?? "") },
+      });
+    }
+
+    return { matchBooked: matchWrite.modifiedCount > 0, requestClosed: Boolean(request) };
+  } catch (error) {
+    console.error("[request] could not record a booking against its request", error);
+    return null;
+  }
 }
 
 // --- Scheduled work --------------------------------------------------------
@@ -1072,10 +1472,135 @@ async function warnExpiringRequests({ now, settings }) {
 
 // --- Shared rules ----------------------------------------------------------
 
-function assertOpen(request, message) {
+/**
+ * The single gate every write runs through. Clock-aware: a request past its
+ * expiry is refused as expired even while its stored status still says OPEN.
+ */
+function assertOpen(request, message, now = new Date()) {
   if (CLOSED_REQUEST_STATUSES.includes(request.status)) {
     throw new BusinessRuleError(message, "REQUEST_CLOSED");
   }
+  if (!isRequestLive(request, now)) {
+    throw new BusinessRuleError("This request has expired.", "REQUEST_CLOSED");
+  }
+}
+
+/**
+ * A status filter that reads expiry from the clock. OPEN means live; EXPIRED
+ * includes the requests that lapsed but have not been swept yet.
+ */
+function statusFilter(status, now = new Date()) {
+  if (!status) return {};
+  if (status === REQUEST_STATUS.OPEN) return liveRequestFilter(now);
+  if (status === REQUEST_STATUS.EXPIRED) {
+    return {
+      $or: [
+        { status: REQUEST_STATUS.EXPIRED },
+        { status: REQUEST_STATUS.OPEN, expiresAt: { $lte: now } },
+      ],
+    };
+  }
+  return { status };
+}
+
+/** Present a lapsed-but-unswept request as what it is: EXPIRED. */
+function withLiveStatus(plain, now = new Date()) {
+  if (!plain || !isRequestLapsed(plain, now)) return plain;
+  return { ...plain, status: REQUEST_STATUS.EXPIRED };
+}
+
+/**
+ * Everything a tutor is shown about a request (S17).
+ *
+ * A whitelist, so a field added to the model later is private until somebody
+ * decides otherwise. Deliberately absent: the family's account (`ownerId`),
+ * the full postal code and the geocoded point (a postal code is close to an
+ * address in a rural area), the learner's surname and profile id, and the
+ * whole moderation and report trail. What replaces the location is the
+ * forward sortation area — the first three characters — and, when both sides
+ * have a point, a whole-kilometre distance from the tutor's own location.
+ */
+export function toTutorRequestView(request, { tutor = null, now = new Date() } = {}) {
+  if (!request) return null;
+  const student =
+    request.studentProfileId && request.studentProfileId.firstName !== undefined
+      ? request.studentProfileId
+      : null;
+  const km = tutor ? pairDistanceKm(tutor, request) : null;
+  const postal = request.postalCode ? String(request.postalCode).replace(/\s+/g, "") : "";
+
+  return toPlain({
+    id: String(request._id ?? request.id),
+    reference: request.reference,
+    title: request.title,
+    courseId: request.courseId,
+    courseName: request.courseName,
+    courseCode: request.courseCode,
+    subjectId: request.subjectId,
+    gradeLevel: request.gradeLevel,
+    provinceCode: request.provinceCode,
+    modes: request.modes ?? [],
+    city: request.city,
+    postalPrefix: postal ? postal.slice(0, 3).toUpperCase() : null,
+    maxDistanceKm: request.maxDistanceKm,
+    distanceKm: km === null ? null : Math.max(1, Math.round(km)),
+    preferredWindows: request.preferredWindows ?? [],
+    sessionsPerWeek: request.sessionsPerWeek,
+    preferredDurationMinutes: request.preferredDurationMinutes,
+    budgetMinCents: request.budgetMinCents,
+    budgetMaxCents: request.budgetMaxCents,
+    languages: request.languages ?? [],
+    minYearsExperience: request.minYearsExperience,
+    preferredQualifications: request.preferredQualifications ?? [],
+    urgency: request.urgency,
+    visibility: request.visibility,
+    goal: request.goal,
+    startDate: request.startDate,
+    notes: request.notes,
+    status: isRequestLapsed(request, now) ? REQUEST_STATUS.EXPIRED : request.status,
+    interestedCount: request.interestedCount ?? 0,
+    expiresAt: request.expiresAt,
+    editCount: request.editCount ?? 0,
+    lastEditedAt: request.lastEditedAt,
+    createdAt: request.createdAt,
+    updatedAt: request.updatedAt,
+    student: student
+      ? {
+          name: publicName(student.firstName ?? "", student.lastName ?? ""),
+          gradeName: student.gradeName ?? null,
+        }
+      : null,
+  });
+}
+
+/**
+ * `isEligibleForMatch`, phrased for the tutor it is about. The matcher's
+ * reasons are written for a log line; a tutor refused a pitch is owed a
+ * sentence they can act on.
+ */
+const INELIGIBLE_MESSAGES = {
+  "no profile": "You need a tutor profile to respond to requests.",
+  "profile is not approved": "Your profile must be approved before you can respond to requests.",
+  "profile is not searchable": "Your profile is not currently listed, so you cannot respond to requests.",
+  "not taking new students":
+    "Your profile says you are not taking new students. Turn that back on to respond.",
+  "account is not active": "Your account is not active, so you cannot respond to requests.",
+  "account is closed": "Your account is closed, so you cannot respond to requests.",
+  "cannot be matched to their own request": "You cannot respond to your own request.",
+  "does not offer the lesson type asked for":
+    "This family asked for a lesson type you do not offer.",
+  "does not teach this subject": "You do not teach the course this request is for.",
+  "outside the travel radius":
+    "This family is outside your travel radius for in-person lessons.",
+};
+
+function tutorEligibility(profile, request) {
+  const result = isEligibleForMatch(profile, request);
+  if (result.eligible) return { eligible: true, reason: null };
+  return {
+    eligible: false,
+    reason: INELIGIBLE_MESSAGES[result.reason] ?? "You are not able to respond to this request.",
+  };
 }
 
 /**
@@ -1105,17 +1630,25 @@ function assertTutorMaySee(request, match) {
   if (!invited) throw new NotFoundError("That request no longer exists.");
 }
 
-function canTutorRespond(request, match) {
-  if (CLOSED_REQUEST_STATUSES.includes(request.status)) return false;
+function canTutorRespond(request, match, now = new Date()) {
+  if (!isRequestLive(request, now)) return false;
   if (!match) return request.visibility !== REQUEST_VISIBILITY.INVITE_ONLY;
   if (TUTOR_CLOSED_MATCH_STATUSES.includes(match.status)) return false;
   if ([MATCH_STATUS.DECLINED, MATCH_STATUS.BOOKED].includes(match.status)) return false;
   return !match.message;
 }
 
+/**
+ * The tutor's own profile, with everything `isEligibleForMatch` judges —
+ * including the account, so a suspended tutor is refused even while their
+ * profile still reads as searchable.
+ */
 function tutorProfileFor(userId) {
   return TutorProfile.findOne({ userId })
-    .select("_id courseIds subjectIds isSearchable status")
+    .select(
+      "_id userId courseIds subjectIds isSearchable status acceptingNewStudents lessonModes location travelRadiusKm",
+    )
+    .populate("userId", "status deletedAt")
     .lean();
 }
 

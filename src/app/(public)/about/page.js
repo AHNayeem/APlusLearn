@@ -7,6 +7,8 @@ import { Section } from "@/components/home/Sections";
 import { Prose } from "@/components/marketing/PageHero";
 import { formatNumber } from "@/lib/utils/format";
 import { getAppConfig } from "@/services/settings.service";
+import { listProvinces } from "@/services/curriculum.service";
+import { listNames } from "@/constants";
 
 export const metadata = {
   title: "About us",
@@ -19,7 +21,13 @@ export const revalidate = 3600;
 
 export default async function AboutPage() {
   await connectToDatabase();
-  const [stats, { contact }] = await Promise.all([marketplaceStats(), getAppConfig()]);
+  const [stats, { contact }, provinces] = await Promise.all([
+    marketplaceStats(),
+    getAppConfig(),
+    listProvinces({ activeOnly: true }),
+  ]);
+  // Coverage is whatever is live in the curriculum today (§6) — not a claim.
+  const live = listNames(provinces.map((p) => p.name));
 
   return (
     <>
@@ -41,10 +49,10 @@ export default async function AboutPage() {
                 recommendation that may or may not match the course your child is actually taking.
               </p>
               <p>
-                None of those start from the right question. Ontario&rsquo;s secondary curriculum
-                uses course codes for a reason — MHF4U is a specific set of expectations, assessed a
-                specific way. A tutor who has taught it knows which unit trips students up and what
-                the culminating task demands. A generalist doesn&rsquo;t.
+                None of those start from the right question. A provincial course is a specific set
+                of expectations, assessed a specific way — which is why so many provinces give each
+                one a code. A tutor who has taught that course knows which unit trips students up
+                and what the final assessment demands. A generalist doesn&rsquo;t.
               </p>
               <p>
                 So we built search around the curriculum itself. You search the course code on the
@@ -78,11 +86,12 @@ export default async function AboutPage() {
 
               <h2>Where we are</h2>
               <p>
-                Ontario is fully supported today, including the complete secondary course-code
-                curriculum from Grade 9 through Grade 12 plus elementary subjects. The platform was
-                built so additional provinces can be added without changing how search, booking or
-                verification work — we&rsquo;re expanding based on where demand actually comes from
-                rather than planting a flag everywhere at once.
+                {live
+                  ? `Today families can search ${formatNumber(stats.courseCount)} courses across ${live}.`
+                  : "We are preparing our first province's curriculum."}{" "}
+                The platform was built so additional provinces can be added without changing how
+                search, booking or verification work — we&rsquo;re expanding based on where demand
+                actually comes from rather than planting a flag everywhere at once.
               </p>
 
               <h2>How tutors fit in</h2>

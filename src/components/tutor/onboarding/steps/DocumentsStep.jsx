@@ -32,7 +32,8 @@ export function DocumentsStep({ value, onChange, fieldErrors }) {
     <div className="space-y-6">
       <Alert tone="info" title="Documents are private" icon={<ShieldCheck className="size-3" />}>
         Only our verification team can open what you upload. Documents are never shown on your
-        profile, never shared with families, and are deleted once a badge expires or is withdrawn.
+        profile and never shared with families. Files behind a declined or expired badge are deleted
+        after the retention period in our Privacy Policy, and all of them if you close your account.
       </Alert>
 
       <div>

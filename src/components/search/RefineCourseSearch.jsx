@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { useProvinceCurriculum } from "@/hooks/useProvinceCurriculum";
 import { Search } from "lucide-react";
 import { cn } from "@/lib/utils/cn";
 import { Button, Select } from "@/components/ui";
@@ -11,12 +12,14 @@ import { Button, Select } from "@/components/ui";
  * `RefineSearch` on /find-a-tutor. Seeded from the current URL so it always
  * reflects the search actually being displayed.
  */
-export function RefineCourseSearch({ provinces = [], grades = [], subjects = [], className }) {
+export function RefineCourseSearch({ provinces = [], grades = [], subjects = [], province: currentProvince = "", className }) {
   const router = useRouter();
   const params = useSearchParams();
+  // Grades and subjects follow the province picked here (R2.3, §6).
+  const curriculum = useProvinceCurriculum({ province: currentProvince, grades, subjects });
+  const province = curriculum.province;
 
   const [query, setQuery] = useState(params.get("q") ?? "");
-  const [province, setProvince] = useState(params.get("province") ?? "ON");
   const [grade, setGrade] = useState(params.get("grade") ?? "");
   const [subject, setSubject] = useState(params.get("subject") ?? "");
 
@@ -26,7 +29,6 @@ export function RefineCourseSearch({ provinces = [], grades = [], subjects = [],
   if (lastParams !== params) {
     setLastParams(params);
     setQuery(params.get("q") ?? "");
-    setProvince(params.get("province") ?? "ON");
     setGrade(params.get("grade") ?? "");
     setSubject(params.get("subject") ?? "");
   }
@@ -75,7 +77,11 @@ export function RefineCourseSearch({ provinces = [], grades = [], subjects = [],
         <Select
           id="course-province"
           value={province}
-          onChange={(e) => setProvince(e.target.value)}
+          onChange={(e) => {
+            curriculum.setProvince(e.target.value);
+            setGrade("");
+            setSubject("");
+          }}
           className="h-11"
         >
           {provinces.map((p) => (
@@ -93,7 +99,7 @@ export function RefineCourseSearch({ provinces = [], grades = [], subjects = [],
           className="h-11"
         >
           <option value="">Any grade</option>
-          {grades.map((g) => (
+          {curriculum.grades.map((g) => (
             <option key={g.id} value={g.slug}>{g.name}</option>
           ))}
         </Select>
@@ -106,7 +112,7 @@ export function RefineCourseSearch({ provinces = [], grades = [], subjects = [],
           className="h-11"
         >
           <option value="">Any subject</option>
-          {subjects.map((s) => (
+          {curriculum.subjects.map((s) => (
             <option key={s.id} value={s.slug}>{s.name}</option>
           ))}
         </Select>

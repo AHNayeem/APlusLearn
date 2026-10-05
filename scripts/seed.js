@@ -12,7 +12,7 @@
 import mongoose from "mongoose";
 import bcrypt from "bcryptjs";
 
-import { PROVINCES, GRADES, SUBJECTS, COURSES } from "./seed-data/curriculum.js";
+import { PROVINCES, CURRICULUM_PROVINCES, GRADES, SUBJECTS, COURSES } from "./seed-data/curriculum.js";
 import { TUTORS, PARENTS, SELF_STUDENTS, REVIEW_TEMPLATES } from "./seed-data/people.js";
 
 // Models are plain mongoose schemas with relative imports, so they load
@@ -48,6 +48,7 @@ const CITY_COORDS = {
   Brampton: [-79.7624, 43.7315], Markham: [-79.337, 43.8561],
   Ottawa: [-75.6972, 45.4215], Hamilton: [-79.8711, 43.2557],
   London: [-81.2497, 42.9849], Oshawa: [-78.8658, 43.8971],
+  Vancouver: [-123.1207, 49.2827], Victoria: [-123.3656, 48.4284],
 };
 
 /**
@@ -99,14 +100,34 @@ function nextOccurrence(weekday, minutes, weeksAhead = 0) {
   return date;
 }
 
+/**
+ * A course reference in the people fixtures: "MHF4U" (an Ontario code),
+ * "BC:MPREC12" (a code in another province), "Elementary Mathematics:4"
+ * (a codeless Ontario course by name and grade) or "BC:Mathematics 7:7".
+ */
+function courseKey(key) {
+  const parts = String(key).split(":");
+  const province = /^[A-Z]{2}$/.test(parts[0]) && parts.length > 1 ? parts.shift() : "ON";
+  return `${province}:${parts.join(":")}`;
+}
+
 function pick(array, index) {
   return array[index % array.length];
 }
 
 async function main() {
+  // The seed wipes collections and creates accounts with a published
+  // password. It must never run against a production deployment (S20).
+  const appEnv = process.env.APP_ENV ?? process.env.NODE_ENV;
+  if (appEnv === "production" && process.env.SEED_ALLOW_PRODUCTION !== "true") {
+    console.error("Refusing to seed: APP_ENV/NODE_ENV is production.");
+    process.exit(1);
+  }
+
   const uri = process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/aplus_learn";
   await mongoose.connect(uri);
-  console.log(`\nAPlus Learn seed → ${uri}`);
+  // Credentials in the URI are never printed.
+  console.log(`\nAPlus Learn seed → ${uri.replace(/\/\/[^@/]*@/, "//***@")}`);
 
   if (!KEEP) {
     section("Clearing existing data");
@@ -118,6 +139,16 @@ async function main() {
     );
     log("collections cleared");
   }
+
+  // Build every index before writing anything. On a brand-new database the
+  // background build would otherwise race the first inserts, and a unique
+  // index (webhook dedupe, slot locks) that fails to build on a duplicate
+  // leaves the guarantee it exists for silently missing.
+  const allModels = await import("../src/models/index.js");
+  for (const model of Object.values(allModels)) {
+    if (typeof model?.createIndexes === "function") await model.createIndexes();
+  }
+  log("indexes built");
 
   const passwordHash = await bcrypt.hash(SEED_PASSWORD, 10);
 
@@ -137,18 +168,21 @@ async function main() {
       { upsert: true, returnDocument: "after", setDefaultsOnInsert: true },
     );
   }
-  log(`${PROVINCES.length} provinces (Ontario active)`);
+  log(`${PROVINCES.length} provinces (${PROVINCES.filter((p) => p.isActive).map((p) => p.code).join(", ")} active)`);
 
-  const ontario = provinces.ON;
+  // Grades belong to a province: each live province gets its own rows.
   const grades = {};
-  for (const g of GRADES) {
-    grades[g.level] = await Grade.findOneAndUpdate(
-      { provinceId: ontario._id, slug: slugify(g.name) },
-      { $set: { ...g, provinceId: ontario._id, slug: slugify(g.name) } },
-      { upsert: true, returnDocument: "after", setDefaultsOnInsert: true },
-    );
+  for (const code of CURRICULUM_PROVINCES) {
+    grades[code] = {};
+    for (const g of GRADES) {
+      grades[code][g.level] = await Grade.findOneAndUpdate(
+        { provinceId: provinces[code]._id, slug: slugify(g.name) },
+        { $set: { ...g, provinceId: provinces[code]._id, slug: slugify(g.name) } },
+        { upsert: true, returnDocument: "after", setDefaultsOnInsert: true },
+      );
+    }
   }
-  log(`${GRADES.length} Ontario grades`);
+  log(`${GRADES.length} grades in each of ${CURRICULUM_PROVINCES.join(", ")}`);
 
   const subjects = {};
   for (const s of SUBJECTS) {
@@ -160,35 +194,38 @@ async function main() {
   }
   log(`${SUBJECTS.length} subjects`);
 
+  // Keyed "PROVINCE:CODE" and "PROVINCE:Name:grade"; see courseKey().
   const courses = {};
   for (const c of COURSES) {
-    const grade = grades[c.grade];
+    const code = c.province ?? "ON";
+    const province = provinces[code];
+    const grade = grades[code][c.grade];
     const subject = subjects[c.subject];
     const doc = await Course.findOneAndUpdate(
       c.code
-        ? { provinceId: ontario._id, code: c.code }
-        : { provinceId: ontario._id, gradeId: grade._id, slug: slugify(c.name) },
+        ? { provinceId: province._id, code: c.code }
+        : { provinceId: province._id, gradeId: grade._id, slug: slugify(c.name) },
       {
         // `code` is only set when the course actually has one — writing an
         // explicit null would collide under the partial unique index.
         $set: {
-          provinceId: ontario._id, gradeId: grade._id, subjectId: subject._id,
+          provinceId: province._id, gradeId: grade._id, subjectId: subject._id,
           name: c.name, slug: slugify(c.name),
           description: c.description, credits: c.credits, stream: c.stream,
-          provinceCode: "ON", gradeSlug: grade.slug, gradeLevel: grade.level,
+          provinceCode: code, gradeSlug: grade.slug, gradeLevel: grade.level,
           subjectSlug: subject.slug, subjectName: subject.name,
           isPopular: c.isPopular ?? false, isActive: true,
+          aliases: c.aliases ?? [],
           ...(c.code ? { code: c.code } : {}),
         },
         ...(c.code ? {} : { $unset: { code: "" } }),
       },
       { upsert: true, returnDocument: "after", setDefaultsOnInsert: true },
     );
-    courses[c.code ?? `${c.name}-${c.grade}`] = doc;
-    if (c.code) courses[c.code] = doc;
-    else courses[c.name] = doc; // elementary courses looked up by name
+    if (c.code) courses[`${code}:${c.code}`] = doc;
+    courses[`${code}:${c.name}:${c.grade}`] = doc;
   }
-  log(`${COURSES.length} Ontario courses (MHF4U, ENG4U, MCV4U, SBI4U, SCH4U …)`);
+  log(`${COURSES.length} courses across ${CURRICULUM_PROVINCES.join(", ")} (MHF4U, ENG4U, MPREC12 …)`);
 
   // --- Admin ---------------------------------------------------------------
   section("Accounts");
@@ -208,15 +245,17 @@ async function main() {
   // --- Tutors --------------------------------------------------------------
   const tutorProfiles = [];
   for (const t of TUTORS) {
+    const tutorProvince = t.province ?? "ON";
+    const tutorZone = t.timeZone ?? "America/Toronto";
     const user = await User.findOneAndUpdate(
       { email: t.email },
       {
         $set: {
           email: t.email, passwordHash, firstName: t.firstName, lastName: t.lastName,
           role: "TUTOR", status: "ACTIVE", emailVerifiedAt: new Date(),
-          phone: `416555${String(1000 + tutorProfiles.length).slice(-4)}`,
-          city: t.city, province: "ON", postalCode: t.postalCode,
-          timeZone: "America/Toronto", acceptedTermsAt: new Date(),
+          phone: `${tutorProvince === "BC" ? "604" : "416"}555${String(1000 + tutorProfiles.length).slice(-4)}`,
+          city: t.city, province: tutorProvince, postalCode: t.postalCode,
+          timeZone: tutorZone, acceptedTermsAt: new Date(),
           avatarUrl: null,
         },
       },
@@ -224,18 +263,21 @@ async function main() {
     );
 
     const taught = t.courses
-      .map((key) => courses[key])
+      .map((key) => courses[courseKey(key)])
       .filter(Boolean)
       .map((course, i) => ({
         courseId: course._id, code: course.code, name: course.name,
         subjectId: course.subjectId, subjectSlug: course.subjectSlug,
-        gradeLevel: course.gradeLevel, gradeSlug: course.gradeSlug, provinceCode: "ON",
+        gradeLevel: course.gradeLevel, gradeSlug: course.gradeSlug, provinceCode: course.provinceCode,
         // A couple of courses carry a premium for the tutor's specialism.
         hourlyRateCents: i === 0 ? undefined : undefined,
         yearsTeaching: Math.max(1, t.years - i),
       }));
 
-    const coords = CITY_COORDS[t.city] ?? CITY_COORDS.Toronto;
+    // Seed tutors are placed at their city's centroid (or, for a city the
+    // bundled table does not know, the centroid their own postal code would
+    // geocode to). Never a default city: a wrong location is worse than none.
+    const coords = t.coordinates ?? CITY_COORDS[t.city];
 
     const profile = await TutorProfile.findOneAndUpdate(
       { userId: user._id },
@@ -255,7 +297,7 @@ async function main() {
           subjectIds: [...new Set(taught.map((c) => String(c.subjectId)))],
           subjectSlugs: [...new Set(taught.map((c) => c.subjectSlug))],
           gradeLevels: [...new Set(taught.map((c) => c.gradeLevel))],
-          provinceCodes: ["ON"],
+          provinceCodes: [...new Set(taught.map((c) => c.provinceCode))],
           lessonModes: t.modes,
           // All three platforms §27 names. Not every tutor offers every one,
           // so the booking form has something real to choose between.
@@ -274,12 +316,12 @@ async function main() {
                 ...(tutorProfiles.length % 2 === 0 ? ["TUTOR_LOCATION"] : []),
               ]
             : [],
-          city: t.city, province: "ON", postalCodePrefix: t.postalCode.slice(0, 3),
+          city: t.city, province: tutorProvince, postalCodePrefix: t.postalCode.slice(0, 3),
           location: { type: "Point", coordinates: coords },
           travelRadiusKm: t.radius,
           hourlyRateCents: t.rate, minHourlyRateCents: t.rate,
           offersFreeIntro: t.freeIntro ?? false,
-          languages: t.languages, timeZone: "America/Toronto",
+          languages: t.languages, timeZone: tutorZone,
           verifiedTypes: t.badges,
           verificationBadges: t.badges.map((type) => ({
             type, grantedAt: new Date(), grantedBy: admin._id,
@@ -326,7 +368,7 @@ async function main() {
       { tutorProfileId: profile._id },
       {
         $set: {
-          tutorProfileId: profile._id, userId: user._id, timeZone: "America/Toronto",
+          tutorProfileId: profile._id, userId: user._id, timeZone: tutorZone,
           weeklyRules: t.availability.map((a) => ({
             weekday: a.weekday,
             startMinutes: timeToMinutes(a.start),
@@ -360,15 +402,16 @@ async function main() {
   // --- Families ------------------------------------------------------------
   const families = [];
   for (const p of PARENTS) {
+    const familyProvince = p.province ?? "ON";
     const user = await User.findOneAndUpdate(
       { email: p.email },
       {
         $set: {
           email: p.email, passwordHash, firstName: p.firstName, lastName: p.lastName,
           role: "PARENT", status: "ACTIVE", emailVerifiedAt: new Date(),
-          city: p.city, province: "ON", postalCode: p.postalCode,
-          timeZone: "America/Toronto", acceptedTermsAt: new Date(),
-          location: { type: "Point", coordinates: CITY_COORDS[p.city] ?? CITY_COORDS.Toronto },
+          city: p.city, province: familyProvince, postalCode: p.postalCode,
+          timeZone: p.timeZone ?? "America/Toronto", acceptedTermsAt: new Date(),
+          location: { type: "Point", coordinates: CITY_COORDS[p.city] },
         },
       },
       { upsert: true, returnDocument: "after", setDefaultsOnInsert: true },
@@ -376,7 +419,7 @@ async function main() {
 
     const children = [];
     for (const c of p.children) {
-      const grade = grades[c.grade];
+      const grade = grades[familyProvince][c.grade];
       children.push(
         await StudentProfile.findOneAndUpdate(
           { ownerId: user._id, firstName: c.firstName },
@@ -384,7 +427,7 @@ async function main() {
             $set: {
               ownerId: user._id, isSelf: false,
               firstName: c.firstName, lastName: c.lastName, birthYear: c.birthYear,
-              provinceCode: "ON", gradeId: grade._id, gradeLevel: grade.level,
+              provinceCode: familyProvince, gradeId: grade._id, gradeLevel: grade.level,
               gradeName: grade.name, school: c.school, notes: c.notes,
               isMinor: new Date().getFullYear() - c.birthYear < 18,
             },
@@ -405,12 +448,12 @@ async function main() {
           role: "STUDENT", status: "ACTIVE", emailVerifiedAt: new Date(),
           city: s.city, province: "ON", postalCode: s.postalCode,
           timeZone: "America/Toronto", acceptedTermsAt: new Date(),
-          location: { type: "Point", coordinates: CITY_COORDS[s.city] ?? CITY_COORDS.Toronto },
+          location: { type: "Point", coordinates: CITY_COORDS[s.city] },
         },
       },
       { upsert: true, returnDocument: "after", setDefaultsOnInsert: true },
     );
-    const grade = grades[s.grade];
+    const grade = grades.ON[s.grade];
     const self = await StudentProfile.findOneAndUpdate(
       { ownerId: user._id, isSelf: true },
       {
@@ -437,11 +480,12 @@ async function main() {
     for (const [childIndex, child] of family.children.entries()) {
       // Pair each learner with two tutors who teach at their grade level.
       const matches = tutorProfiles.filter((t) =>
+        t.profile.provinceCodes.includes(child.provinceCode) &&
         t.profile.gradeLevels.includes(child.gradeLevel),
       );
       const chosen = matches.length
         ? [pick(matches, familyIndex + childIndex), pick(matches, familyIndex + childIndex + 3)]
-        : [pick(tutorProfiles, familyIndex)];
+        : [pick(tutorProfiles.filter((t) => t.profile.provinceCodes.includes(child.provinceCode)), familyIndex)];
 
       for (const [tutorIndex, { user: tutorUser, profile, seed }] of chosen.entries()) {
         const taught = profile.courses.filter((c) => c.gradeLevel === child.gradeLevel);
@@ -478,7 +522,7 @@ async function main() {
             location: profile.lessonModes[0] === "IN_PERSON"
               ? { type: "LIBRARY", label: "Local public library", city: profile.city }
               : undefined,
-            startAt, endAt, durationMinutes: duration, timeZone: "America/Toronto",
+            startAt, endAt, durationMinutes: duration, timeZone: profile.timeZone,
             status: "COMPLETED", price,
             confirmedAt: new Date(startAt.getTime() - 5 * 86400000),
             completedAt: endAt,
@@ -535,7 +579,7 @@ async function main() {
             ? { type: "STUDENT_HOME", label: "Student's home", city: family.user.city }
             : undefined,
           startAt: upcomingStart, endAt: upcomingEnd, durationMinutes: duration,
-          timeZone: "America/Toronto", status: "CONFIRMED", price,
+          timeZone: profile.timeZone, status: "CONFIRMED", price,
           confirmedAt: new Date(),
         });
         const upcomingPayment = await Payment.create({
@@ -599,7 +643,7 @@ async function main() {
 
   // --- An open tutor request with matches ----------------------------------
   const requester = families[0];
-  const requestCourse = courses.SBI4U;
+  const requestCourse = courses[courseKey("SBI4U")];
   const request = await TutorRequest.create({
     reference: reference("REQ"),
     ownerId: requester.user._id, studentProfileId: requester.children[0]._id,
@@ -650,7 +694,7 @@ async function main() {
     { upsert: true, returnDocument: "after", setDefaultsOnInsert: true },
   );
 
-  const pendingCourses = ["MCV4U", "MHF4U", "ICS4U"].map((c) => courses[c]).filter(Boolean);
+  const pendingCourses = ["MCV4U", "MHF4U", "ICS4U"].map((c) => courses[courseKey(c)]).filter(Boolean);
   const pendingProfile = await TutorProfile.findOneAndUpdate(
     { userId: pendingUser._id },
     {
@@ -666,7 +710,7 @@ async function main() {
           { title: "Software Developer", organisation: "Contract", startYear: 2022, current: true },
           { title: "Private Tutor", organisation: "Self-employed", startYear: 2021, current: true },
         ],
-        qualifications: ["GRADUATE", "SUBJECT_SPECIALIST"],
+        qualifications: ["BACHELORS_DEGREE", "INDUSTRY_PROFESSIONAL"],
         yearsExperience: 3,
         courses: pendingCourses.map((c) => ({
           courseId: c._id, code: c.code, name: c.name, subjectId: c.subjectId,

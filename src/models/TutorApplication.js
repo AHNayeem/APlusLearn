@@ -28,6 +28,18 @@ const TutorApplicationSchema = new mongoose.Schema(
       unique: true,
       index: true,
     },
+    /**
+     * The id the applicant's TutorProfile has — or *will* have (R13.11).
+     *
+     * Reserved the first time the applicant uploads a verification document,
+     * before any profile exists, and used as the profile's `_id` when the
+     * profile is materialised at submission. So the documents uploaded inside
+     * the wizard hang off the profile from the moment they are stored: there
+     * is nothing to move across at submission, and every reader keyed by
+     * profile (the tutor's verification page, the admin review) already finds
+     * them. A reference that may not resolve yet — populate() returns null
+     * until the application is submitted.
+     */
     tutorProfileId: { type: mongoose.Schema.Types.ObjectId, ref: "TutorProfile", index: true },
 
     status: {

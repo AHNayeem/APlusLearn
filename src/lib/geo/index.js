@@ -50,6 +50,34 @@ export const CITY_CENTROIDS = {
   kingston: { city: "Kingston", province: "ON", coordinates: [-76.4860, 44.2312] },
   barrie: { city: "Barrie", province: "ON", coordinates: [-79.6903, 44.3894] },
   oshawa: { city: "Oshawa", province: "ON", coordinates: [-78.8658, 43.8971] },
+
+  // Outside Ontario. The bundled table is the development stand-in for a
+  // real geocoder, so it carries the larger centres of every province with
+  // curriculum a deployment might switch on — and nothing it does not know
+  // is ever answered with a guess (see geocoding-provider.js).
+  vancouver: { city: "Vancouver", province: "BC", coordinates: [-123.1207, 49.2827] },
+  burnaby: { city: "Burnaby", province: "BC", coordinates: [-122.9805, 49.2488] },
+  surrey: { city: "Surrey", province: "BC", coordinates: [-122.849, 49.1913] },
+  richmond: { city: "Richmond", province: "BC", coordinates: [-123.1336, 49.1666] },
+  coquitlam: { city: "Coquitlam", province: "BC", coordinates: [-122.7932, 49.2838] },
+  "north vancouver": { city: "North Vancouver", province: "BC", coordinates: [-123.0724, 49.32] },
+  victoria: { city: "Victoria", province: "BC", coordinates: [-123.3656, 48.4284] },
+  kelowna: { city: "Kelowna", province: "BC", coordinates: [-119.496, 49.888] },
+  calgary: { city: "Calgary", province: "AB", coordinates: [-114.0719, 51.0447] },
+  edmonton: { city: "Edmonton", province: "AB", coordinates: [-113.4938, 53.5461] },
+  saskatoon: { city: "Saskatoon", province: "SK", coordinates: [-106.67, 52.1332] },
+  regina: { city: "Regina", province: "SK", coordinates: [-104.6189, 50.4452] },
+  winnipeg: { city: "Winnipeg", province: "MB", coordinates: [-97.1384, 49.8951] },
+  montreal: { city: "Montreal", province: "QC", coordinates: [-73.5674, 45.5019] },
+  laval: { city: "Laval", province: "QC", coordinates: [-73.7124, 45.6066] },
+  gatineau: { city: "Gatineau", province: "QC", coordinates: [-75.7013, 45.4765] },
+  "quebec city": { city: "Quebec City", province: "QC", coordinates: [-71.208, 46.8139] },
+  halifax: { city: "Halifax", province: "NS", coordinates: [-63.5752, 44.6488] },
+  moncton: { city: "Moncton", province: "NB", coordinates: [-64.7782, 46.0878] },
+  fredericton: { city: "Fredericton", province: "NB", coordinates: [-66.6431, 45.9636] },
+  "saint john": { city: "Saint John", province: "NB", coordinates: [-66.0633, 45.2733] },
+  charlottetown: { city: "Charlottetown", province: "PE", coordinates: [-63.1311, 46.2382] },
+  "st. john's": { city: "St. John's", province: "NL", coordinates: [-52.7126, 47.5615] },
 };
 
 /** First three characters of a postal code -> approximate centroid. */
@@ -86,16 +114,38 @@ export const FSA_CENTROIDS = {
   K2P: { city: "Ottawa", province: "ON", coordinates: [-75.6960, 45.4141] },
   N2L: { city: "Waterloo", province: "ON", coordinates: [-80.5204, 43.4643] },
   N6A: { city: "London", province: "ON", coordinates: [-81.2497, 42.9849] },
+  V6B: { city: "Vancouver", province: "BC", coordinates: [-123.115, 49.279] },
+  V5K: { city: "Vancouver", province: "BC", coordinates: [-123.04, 49.28] },
+  V5H: { city: "Burnaby", province: "BC", coordinates: [-122.99, 49.227] },
+  V3T: { city: "Surrey", province: "BC", coordinates: [-122.848, 49.189] },
+  V6X: { city: "Richmond", province: "BC", coordinates: [-123.137, 49.172] },
+  V8W: { city: "Victoria", province: "BC", coordinates: [-123.365, 48.424] },
+  V1Y: { city: "Kelowna", province: "BC", coordinates: [-119.492, 49.887] },
+  T2P: { city: "Calgary", province: "AB", coordinates: [-114.071, 51.048] },
+  T5J: { city: "Edmonton", province: "AB", coordinates: [-113.49, 53.544] },
+  H3B: { city: "Montreal", province: "QC", coordinates: [-73.57, 45.5] },
+  R3C: { city: "Winnipeg", province: "MB", coordinates: [-97.139, 49.895] },
+  B3H: { city: "Halifax", province: "NS", coordinates: [-63.585, 44.637] },
 };
 
-/** First letter of a Canadian FSA maps to a region. */
+/**
+ * The province(s) a postal code's first letter belongs to. Canada Post's
+ * allocation is fixed; `X` is shared by the Northwest Territories and
+ * Nunavut, which is why this is a list.
+ */
+const POSTAL_LETTER_PROVINCES = {
+  A: ["NL"], B: ["NS"], C: ["PE"], E: ["NB"], G: ["QC"], H: ["QC"], J: ["QC"],
+  K: ["ON"], L: ["ON"], M: ["ON"], N: ["ON"], P: ["ON"], R: ["MB"], S: ["SK"],
+  T: ["AB"], V: ["BC"], X: ["NT", "NU"], Y: ["YT"],
+};
+
+export function provincesForPostalCode(code) {
+  return POSTAL_LETTER_PROVINCES[String(code ?? "").trim().toUpperCase().charAt(0)] ?? [];
+}
+
+/** First letter of a Canadian FSA maps to a region (the first, where shared). */
 export function provinceFromFsa(fsa) {
-  const map = {
-    A: "NL", B: "NS", C: "PE", E: "NB", G: "QC", H: "QC", J: "QC",
-    K: "ON", L: "ON", M: "ON", N: "ON", P: "ON", R: "MB", S: "SK",
-    T: "AB", V: "BC", X: "NT", Y: "YT",
-  };
-  return map[fsa?.charAt(0)] ?? null;
+  return provincesForPostalCode(fsa)[0] ?? null;
 }
 
 /**

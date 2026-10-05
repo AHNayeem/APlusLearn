@@ -3,6 +3,7 @@ import { User, AuthToken, AUTH_TOKEN_PURPOSE, StudentProfile, TutorApplication }
 import {
   ROLES,
   USER_STATUS,
+  BLOCKED_USER_STATUSES,
   AUTH_PROVIDERS,
   AUDIT_ACTIONS,
   EMAIL_CATEGORIES,
@@ -14,8 +15,10 @@ import { toPlain } from "@/lib/utils/serialize";
 import { sendEmail, brandedEmailTemplates } from "./external/email-provider";
 import { DevOAuthProvider } from "./external/oauth-provider";
 import { recordAudit } from "./audit.service";
+import { clientIp } from "@/lib/security/rate-limit";
 import { attributeReferral } from "./referral.service";
 import { renderableImageSrc } from "@/lib/images/remote";
+import { isMinorByBirthYear } from "@/lib/utils/age";
 
 /**
  * A photo an identity provider handed us, or nothing.
@@ -56,10 +59,14 @@ export async function register(input, { request } = {}) {
     status: USER_STATUS.PENDING_VERIFICATION,
     province: input.provinceCode,
     city: input.city,
+    postalCode: input.postalCode,
     marketingOptIn: input.marketingOptIn,
     acceptedTermsAt: new Date(),
   });
 
+  // A self-serve student is a minor or an adult by the birth year they gave,
+  // never by assumption: the surname rules that protect minors (§3, §30)
+  // hang off this flag.
   if (input.role === ROLES.STUDENT) {
     await StudentProfile.create({
       ownerId: user._id,
@@ -67,7 +74,8 @@ export async function register(input, { request } = {}) {
       firstName: user.firstName,
       lastName: user.lastName,
       provinceCode: input.provinceCode,
-      isMinor: false,
+      birthYear: input.birthYear,
+      isMinor: isMinorByBirthYear(input.birthYear),
     });
   }
 
@@ -79,7 +87,7 @@ export async function register(input, { request } = {}) {
       code: input.referralCode,
       refereeUserId: user._id,
       email: user.email,
-      ip: request?.headers?.get?.("x-forwarded-for")?.split(",")[0]?.trim(),
+      ip: request ? clientIp(request) ?? undefined : undefined,
     });
   }
 
@@ -93,6 +101,13 @@ export async function register(input, { request } = {}) {
           phone: user.phone,
           province: input.provinceCode,
           city: input.city,
+        },
+        // Pre-filled, not completed: the service-area step still asks for
+        // a travel radius, so it is not marked done until they save it.
+        LOCATION: {
+          province: input.provinceCode,
+          city: input.city,
+          postalCode: input.postalCode,
         },
       },
     });
@@ -156,17 +171,23 @@ export async function verifyEmail(rawToken) {
   record.consumedAt = new Date();
   await record.save();
 
-  const user = await User.findByIdAndUpdate(
-    record.userId,
-    {
-      $set: {
-        emailVerifiedAt: new Date(),
-        // Verifying is what activates a pending account.
-        status: USER_STATUS.ACTIVE,
-      },
-    },
+  // Verifying is what activates a *pending* account, and nothing else: a
+  // suspended or deleted account that still holds a live link must not be
+  // able to reinstate itself by clicking it (audit S7). The status move is
+  // conditional on the stored status, so it is decided by the database.
+  const now = new Date();
+  let user = await User.findOneAndUpdate(
+    { _id: record.userId, status: USER_STATUS.PENDING_VERIFICATION },
+    { $set: { emailVerifiedAt: now, status: USER_STATUS.ACTIVE } },
     { returnDocument: "after" },
   ).lean();
+  if (!user) {
+    user = await User.findOneAndUpdate(
+      { _id: record.userId, deletedAt: null },
+      { $set: { emailVerifiedAt: now } },
+      { returnDocument: "after" },
+    ).lean();
+  }
 
   if (!user) throw new NotFoundError("We couldn't find that account.");
   return toPlain({ ...user, passwordHash: undefined });
@@ -202,14 +223,26 @@ export async function authenticateWithPassword({ email, password }) {
     throw new AuthenticationError("That email or password is incorrect.");
   }
 
-  if (user.status === USER_STATUS.SUSPENDED) {
-    throw new AppError(
-      "This account has been suspended. Contact support if you think this is a mistake.",
-      { status: 403, code: "ACCOUNT_SUSPENDED" },
-    );
-  }
+  if (BLOCKED_USER_STATUSES.includes(user.status)) throw accountBlockedError(user.status);
 
   return toPlain({ ...user.toObject(), passwordHash: undefined });
+}
+
+/**
+ * The refusal for an account an administrator has suspended or banned
+ * (R28.2). One function, so password and social sign-in say the same thing.
+ */
+function accountBlockedError(status) {
+  if (status === USER_STATUS.BANNED) {
+    return new AppError(
+      "This account has been closed by APlus Learn. Contact support if you think this is a mistake.",
+      { status: 403, code: "ACCOUNT_BANNED" },
+    );
+  }
+  return new AppError(
+    "This account has been suspended. Contact support if you think this is a mistake.",
+    { status: 403, code: "ACCOUNT_SUSPENDED" },
+  );
 }
 
 /** A session was issued for a password sign-in: stamp it and audit it. */
@@ -332,13 +365,15 @@ export async function signInWithIdentity(identity, { role, request } = {}) {
       lastLoginAt: new Date(),
     });
 
+    // A social sign-up carries no age, so the learner is treated as a minor
+    // until a birth year says otherwise — the privacy rules fail closed.
     if (newRole === ROLES.STUDENT) {
       await StudentProfile.create({
         ownerId: user._id,
         isSelf: true,
         firstName: user.firstName,
         lastName: user.lastName,
-        isMinor: false,
+        isMinor: true,
       });
     }
     if (newRole === ROLES.TUTOR) {
@@ -355,12 +390,7 @@ export async function signInWithIdentity(identity, { role, request } = {}) {
     });
   }
 
-  if (user.status === USER_STATUS.SUSPENDED) {
-    throw new AppError("This account has been suspended.", {
-      status: 403,
-      code: "ACCOUNT_SUSPENDED",
-    });
-  }
+  if (BLOCKED_USER_STATUSES.includes(user.status)) throw accountBlockedError(user.status);
 
   return toPlain({ ...user.toObject(), passwordHash: undefined });
 }

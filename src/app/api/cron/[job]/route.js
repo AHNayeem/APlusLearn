@@ -21,7 +21,13 @@ import { JOBS, listJobs, runScheduledJob, runAllScheduledJobs } from "@/services
  *      time. When `CRON_SECRET` is unset the bearer route is closed entirely
  *      rather than open: an unset secret must never mean "no secret needed".
  *   2. A signed-in administrator — so an operator can run a job by hand from
- *      the admin console without holding the deployment secret.
+ *      the admin console without holding the deployment secret. **POST
+ *      only** (audit S18): a session cookie is `SameSite=Lax`, and Lax
+ *      cookies ride along on a cross-site top-level GET, so any page an
+ *      administrator visited could have run a job with their session by
+ *      linking to it. A GET with a session may read the catalogue (`list`,
+ *      which changes nothing) and nothing else. The scheduler's bearer GET is
+ *      unaffected — a bearer header is never attached by a browser.
  *
  * This is written by hand rather than through `routeHandler` for one reason:
  * the pipeline authenticates a *person*, and a cron caller is not one.
@@ -44,7 +50,7 @@ async function handle(request, context) {
     const { job } = parsed.data;
 
     await connectToDatabase();
-    const actor = await authorize(request);
+    const actor = await authorize(request, { job });
 
     if (job === "list") return ok({ jobs: listJobs() });
     if (job === "all") return ok(await runAllScheduledJobs({ actor }));
@@ -61,7 +67,7 @@ async function handle(request, context) {
 /**
  * @returns {Promise<object>} the actor to attribute the run to.
  */
-async function authorize(request) {
+async function authorize(request, { job }) {
   const secret = process.env.CRON_SECRET?.trim();
   const header = request.headers.get("authorization") ?? "";
   const presented = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
@@ -71,7 +77,14 @@ async function authorize(request) {
   }
 
   const user = await getCurrentUser();
-  if (user?.role === ROLES.ADMIN) return user;
+  if (user?.role === ROLES.ADMIN) {
+    // A cookie-authenticated run must be a deliberate POST from the console,
+    // never a navigation another site can trigger (S18).
+    if (request.method !== "POST" && job !== "list") {
+      throw new AuthorizationError("Run a job from the admin console (POST), not by visiting a link.");
+    }
+    return user;
+  }
 
   throw new AuthorizationError("This endpoint is for the platform scheduler.");
 }

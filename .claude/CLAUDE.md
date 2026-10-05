@@ -19,6 +19,8 @@ Package manager is **bun** (`bun.lock`, `packageManager: bun@1.3.12`); npm works
 | `bun run test:integrations` | Provider adapters and DB-backed service rules, with `fetch` stubbed — no third-party service is contacted |
 | `bun run e2e` | Forgot password in a real browser (Playwright + system Chrome, not a dependency) — **requires `bun run dev` running**, no mail provider configured |
 | `bun run e2e:realtime` | Two browsers (parent + tutor): live messages, badges, notifications, offline recovery, failed send + Retry — **requires `bun run dev` running** |
+| `bun run e2e:journeys` | Core journeys in real Chrome: search (province → grades, words → curriculum, location), filters ↔ URL, a province activated in admin, child profiles, booking through the development checkout, contact masking, admin pages — **requires `bun run dev` running with `PAYMENT_PROVIDER=development`** |
+| `node scripts/migrate-qualifications.mjs` | One-off: maps stored GRADUATE / POSTGRADUATE / SUBJECT_SPECIALIST qualifications onto the §8 categories (`--dry-run` to preview) |
 | `bun run e2e:install` | The PWA install prompt in real Chrome: native flow, cooldown, installed, iOS Safari, unsupported browsers, phone layouts, and every signed-in area with the card shown — **requires `bun run dev` running** |
 | `node scripts/pwa-icons.mjs` | Regenerate `public/icons/*` from `public/icon.svg` after a rebrand. Outputs are committed; no build step runs this |
 
@@ -42,9 +44,15 @@ stops meaning anything, and the run makes real, billable calls to a real Stripe 
 can hand a secret back (that is the feature working), so it cannot restore them. **Run
 `qa` against a development database.**
 
-`qa` also consumes one seeded `COMPLETED` lesson per run for the no-show happy path and
-cannot recreate one over HTTP — it leaves the last one for the risk section and tells you
-to `bun run seed` when the pool runs down.
+A learner can no longer report a tutor no-show on a `COMPLETED` lesson (S2), so `qa`
+asserts that refusal; the no-show → dispute path, which needs a lesson that has *ended*
+and cannot be created over HTTP, is covered by `scripts/integration/40-money.mjs`.
+
+Area suites live in `scripts/integration/*.mjs` (run one with
+`INTEGRATION_ONLY=<file-regex>`). Test scripts pin a per-run client address with
+`X-Real-IP`: the rate limiter no longer believes the client-written left-most
+`X-Forwarded-For` (S11). Run suites against a separate database
+(`MONGODB_URI=…/aplus_learn_e2e`) — `bun run seed` there builds every index first.
 
 **Restart the dev server after `bun run seed`.** Curriculum reference data is memoised per
 process (`refCache` in [src/services/curriculum.service.js](src/services/curriculum.service.js),
@@ -179,6 +187,25 @@ ad-hoc JSON responses, and never let a raw driver error reach the client.
   reconciles from the database. `Message.clientId` makes a retried send one message — look it up
   before writing, never after. One stream per tab *in view*, opened only by `RealtimeProvider`; no
   component opens its own. See [docs/REALTIME.md](docs/REALTIME.md).
+- **No province is ever a literal.** Pickers start on `defaultProvinceCode()` (first live
+  province in admin order) and load grades/subjects/courses for the *selected* province from
+  `/api/curriculum/*` (`hooks/useProvinceCurriculum.js` on the client). Curriculum writes
+  revalidate cached pages. A province activated in admin must work with no code change.
+- **Search reads words through the curriculum, and never invents a place.**
+  `search.service.interpretQuery` decides whether `q` is a course code, a subject (or alias),
+  a course name, or free text — never a regex on the word's shape. Locations are RESOLVED /
+  UNRESOLVED / INVALID; an unknown place is answered from tutors who list it, never replaced
+  with another city. Distance constrains in-person teaching only, so online tutors stay in
+  local searches. Availability filters and "next available" ask the real calendar through
+  `availability.service.firstOpenSlots` — the same slot rules the booking widget uses.
+- **Busy time has one definition.** `busyPeriodsForTutors` (bookings + PUBLISHED/CONFIRMED
+  group sessions + external calendars) feeds slot display, the booking claim, reschedule,
+  group publishing and search. Don't load bookings inline for a slot check.
+- **Money follows the lesson.** Every refund path records `Booking.refundedCents`
+  (`payout.service.recordBookingRefund`); the payable share is `netTutorEarnings`. Refunds are
+  planned from what was collected (`planLessonRefund`) *before* a lesson is saved as
+  cancelled. A refund after payout becomes a `PayoutAdjustment`. A learner's tutor-no-show
+  report opens a dispute — it never refunds by itself.
 - **Risk detects; it never punishes.** [src/services/risk.service.js](src/services/risk.service.js) is the only place fraud logic lives. Every signal carries a `dedupeKey` derived from the event, so replays record once, and every call site uses `safelyRecordRiskSignal` so detection can never break the action being taken. No score restricts an account — an administrator does, from user management.
 - **The client supplies intent, never state.** Amounts, commission and statuses are derived server-side from stored data. `bun run qa` asserts an injected `price` or `status` is ignored.
 - **Ownership is checked against the loaded DB record**, never a request field (`requireOwnership`, `requireParticipant`, `ownsOrAdmin`).

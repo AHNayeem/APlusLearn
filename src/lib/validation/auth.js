@@ -1,8 +1,22 @@
 import { z } from "zod";
-import { ROLES } from "@/constants";
-import { email, password, personName, phone, provinceCode } from "./common";
+import { ROLES, AGE_RULES } from "@/constants";
+import { email, password, personName, phone, postalCode, provinceCode } from "./common";
 import { internalPath } from "@/lib/utils/url";
+import { provincesForPostalCode } from "@/lib/geo";
+import { latestStudentBirthYear } from "@/lib/utils/age";
 
+/**
+ * Registration (§4).
+ *
+ * §4 lists phone, province, city and postal code as part of signing up, so
+ * they are collected here rather than discovered missing at the first
+ * booking. They land on the one canonical place for them — the `User`
+ * record — and nowhere else.
+ *
+ * A self-serve student also gives a birth year (§3): the platform has to
+ * know whether an account belongs to a minor to apply the privacy rules
+ * that depend on it, and an age it never asked for cannot be enforced.
+ */
 export const registerSchema = z
   .object({
     role: z.enum([ROLES.PARENT, ROLES.STUDENT, ROLES.TUTOR]),
@@ -11,9 +25,11 @@ export const registerSchema = z
     email,
     password,
     confirmPassword: z.string(),
-    phone: phone.optional().or(z.literal("").transform(() => undefined)),
-    provinceCode: provinceCode.optional(),
-    city: z.string().trim().max(80).optional(),
+    phone,
+    provinceCode,
+    city: z.string().trim().min(2, "Enter your city.").max(80),
+    postalCode,
+    birthYear: z.coerce.number().int().min(1900).optional(),
     acceptTerms: z.literal(true, { message: "You must accept the terms to continue." }),
     marketingOptIn: z.boolean().default(false),
     /**
@@ -34,6 +50,27 @@ export const registerSchema = z
   .refine((data) => data.password === data.confirmPassword, {
     message: "Passwords do not match.",
     path: ["confirmPassword"],
+  })
+  // A postal code's first letter fixes its province; an address that
+  // disagrees with itself would geocode somewhere the person does not live.
+  .refine((data) => provincesForPostalCode(data.postalCode).includes(data.provinceCode), {
+    message: "That postal code is not in the province you chose.",
+    path: ["postalCode"],
+  })
+  .refine((data) => data.role !== ROLES.STUDENT || Number.isInteger(data.birthYear), {
+    message: "Enter the year you were born.",
+    path: ["birthYear"],
+  })
+  .refine(
+    (data) => data.role !== ROLES.STUDENT || !data.birthYear || data.birthYear <= latestStudentBirthYear(),
+    {
+      message: `Students under ${AGE_RULES.minimumStudentAge} need a parent to create the account and add them as a child.`,
+      path: ["birthYear"],
+    },
+  )
+  .refine((data) => !data.birthYear || data.birthYear <= new Date().getFullYear(), {
+    message: "Enter a valid year.",
+    path: ["birthYear"],
   });
 
 /**

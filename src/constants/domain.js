@@ -7,8 +7,31 @@ export const USER_STATUS = {
   ACTIVE: "ACTIVE",
   PENDING_VERIFICATION: "PENDING_VERIFICATION",
   SUSPENDED: "SUSPENDED",
+  /**
+   * Permanently removed from the marketplace by an administrator (R28.2).
+   * Blocks exactly what a suspension blocks; the difference is intent, and
+   * that nothing the member does — verifying an email, resetting a password,
+   * signing in with Google — can lift it. Only an administrator restores it,
+   * with a recorded reason.
+   */
+  BANNED: "BANNED",
   DELETED: "DELETED",
 };
+
+export const USER_STATUS_LABELS = {
+  ACTIVE: "Active",
+  PENDING_VERIFICATION: "Email not verified",
+  SUSPENDED: "Suspended",
+  BANNED: "Banned",
+  DELETED: "Deleted",
+};
+
+/**
+ * Statuses that cannot hold a session, a sign-in or a realtime stream. Every
+ * check that used to compare against SUSPENDED alone reads this list, so a
+ * new blocking state is one edit rather than a grep.
+ */
+export const BLOCKED_USER_STATUSES = [USER_STATUS.SUSPENDED, USER_STATUS.BANNED];
 
 export const AUTH_PROVIDERS = {
   CREDENTIALS: "CREDENTIALS",
@@ -69,6 +92,22 @@ export const VERIFICATION_STATUS = {
   APPROVED: "APPROVED",
   REJECTED: "REJECTED",
   EXPIRED: "EXPIRED",
+};
+
+/**
+ * A learner's lesson-format preference (§5). "Either" is a real answer, not
+ * an absence of one — it is what a search for that learner should assume.
+ */
+export const LEARNER_MODE_PREFERENCES = {
+  ONLINE: "ONLINE",
+  IN_PERSON: "IN_PERSON",
+  EITHER: "EITHER",
+};
+
+export const LEARNER_MODE_PREFERENCE_LABELS = {
+  ONLINE: "Online",
+  IN_PERSON: "In person",
+  EITHER: "Online or in person",
 };
 
 export const LESSON_MODES = {
@@ -226,6 +265,34 @@ export const PAYOUT_STATUS_LABELS = {
 };
 
 /**
+ * Where a payout may go next (S3, R28.19).
+ *
+ * PAID and FAILED are terminal: a paid payout has moved money and a failed
+ * one has already released its lessons to a new payout, so FAILED → PAID
+ * would pay those lessons twice. `payout.service` enforces this with a
+ * conditional update on the *from* status; the admin form reads the same
+ * table so it never offers a move the server would refuse.
+ */
+export const PAYOUT_STATUS_TRANSITIONS = {
+  PENDING: ["SCHEDULED", "IN_TRANSIT", "PAID", "FAILED"],
+  SCHEDULED: ["IN_TRANSIT", "PAID", "FAILED"],
+  IN_TRANSIT: ["PAID", "FAILED"],
+  PAID: [],
+  FAILED: [],
+};
+
+/**
+ * A refund that reached a lesson after its earnings were already paid out
+ * (S3, R16.4). It is carried as an explicit deduction on the tutor's next
+ * payout rather than written off or clawed back silently.
+ */
+export const PAYOUT_ADJUSTMENT_STATUS = {
+  OPEN: "OPEN",
+  APPLIED: "APPLIED",
+  VOID: "VOID",
+};
+
+/**
  * Tutor request lifecycle (§22, §41 Phase 2).
  *
  * OPEN is the only status that gains new matches or accepts tutor responses.
@@ -359,6 +426,20 @@ export const REPORT_STATUS_LABELS = {
 /** Reports a moderator has not finished with. */
 export const ACTIVE_REPORT_STATUSES = [REPORT_STATUS.OPEN, REPORT_STATUS.REVIEWING];
 
+/**
+ * Why a member reported a tutor request (R28.24), code → label. The code is
+ * what is stored and validated; the label is what the form and the admin
+ * queue show.
+ */
+export const REQUEST_REPORT_REASONS = {
+  CONTACT_DETAILS: "Shares contact details",
+  INAPPROPRIATE: "Inappropriate or offensive",
+  SPAM: "Spam or advertising",
+  NOT_GENUINE: "Not a genuine request",
+  SAFETY: "Safety concern about a learner",
+  OTHER: "Something else",
+};
+
 export const DISPUTE_STATUS = {
   OPEN: "OPEN",
   UNDER_REVIEW: "UNDER_REVIEW",
@@ -455,6 +536,10 @@ export const NOTIFICATION_TYPES = {
   DISPUTE_UPDATED: "DISPUTE_UPDATED",
   PROFILE_PROMOTED: "PROFILE_PROMOTED",
   ACCOUNT_UNDER_REVIEW: "ACCOUNT_UNDER_REVIEW",
+  /** To administrators: a member reported a conversation (§21, R17.6). */
+  CONVERSATION_REPORTED: "CONVERSATION_REPORTED",
+  /** To administrators: a member reported a request or a review (R21.5, R28.24). */
+  CONTENT_REPORTED: "CONTENT_REPORTED",
 };
 
 export const NOTIFICATION_CHANNELS = {
@@ -688,6 +773,8 @@ export const CREDIT_REASONS = {
   SPEND_RELEASED: "SPEND_RELEASED",
   REFERRAL_REVERSAL: "REFERRAL_REVERSAL",
   ADMIN_ADJUSTMENT: "ADMIN_ADJUSTMENT",
+  /** The credit share of a refund on a lesson part-paid with credit (R16.7). */
+  REFUND_RECREDITED: "REFUND_RECREDITED",
 };
 
 export const CREDIT_REASON_LABELS = {
@@ -697,6 +784,7 @@ export const CREDIT_REASON_LABELS = {
   SPEND_RELEASED: "Returned from a booking",
   REFERRAL_REVERSAL: "Referral reversed",
   ADMIN_ADJUSTMENT: "Adjustment by APlus Learn",
+  REFUND_RECREDITED: "Refunded to your credit",
 };
 
 /**
@@ -781,6 +869,16 @@ export const ACTIVE_GROUP_STATUSES = [
 
 /** Statuses a learner can still join. */
 export const JOINABLE_GROUP_STATUSES = [
+  GROUP_SESSION_STATUS.PUBLISHED,
+  GROUP_SESSION_STATUS.CONFIRMED,
+];
+
+/**
+ * Statuses in which a session blocks one-to-one lessons in the same hour
+ * (R14.4) — the group counterpart of `BLOCKING_BOOKING_STATUSES`. A finished
+ * session is in the past, so it blocks nothing bookable.
+ */
+export const BLOCKING_GROUP_SESSION_STATUSES = [
   GROUP_SESSION_STATUS.PUBLISHED,
   GROUP_SESSION_STATUS.CONFIRMED,
 ];
@@ -891,6 +989,7 @@ export const RISK_SIGNALS = {
   PAYMENT_FAILURES: "PAYMENT_FAILURES",
   REPEATED_DISPUTES: "REPEATED_DISPUTES",
   REFERRAL_ABUSE: "REFERRAL_ABUSE",
+  OFF_PLATFORM_CONTACT: "OFF_PLATFORM_CONTACT",
 };
 
 export const RISK_SIGNAL_LABELS = {
@@ -899,6 +998,7 @@ export const RISK_SIGNAL_LABELS = {
   PAYMENT_FAILURES: "Repeated payment failures",
   REPEATED_DISPUTES: "Several disputes raised against this account",
   REFERRAL_ABUSE: "Referral scheme abuse",
+  OFF_PLATFORM_CONTACT: "Tried to move contact or payment off the platform",
 };
 
 export const RISK_SIGNAL_DESCRIPTIONS = {
@@ -910,6 +1010,8 @@ export const RISK_SIGNAL_DESCRIPTIONS = {
   REPEATED_DISPUTES: "Other people have opened disputes naming this account.",
   REFERRAL_ABUSE:
     "A referral this account was part of was flagged — shared numbers, or sign-ups faster than a person plausibly refers friends.",
+  OFF_PLATFORM_CONTACT:
+    "Sent contact details or off-platform payment language in a message. The details were removed before the message was stored; the evidence names the kinds found, never the text.",
 };
 
 /**
@@ -1041,19 +1143,49 @@ export const RECURRENCE_LABELS = {
   BIWEEKLY: "Every two weeks",
 };
 
+/**
+ * A tutor's qualifications (§8, §13).
+ *
+ * The first seven are the categories §8 lists as search filters — OCT /
+ * certified teacher, university or college student, Bachelor's, Master's,
+ * PhD and professional or industry expert — and are the only ones offered on
+ * any form (`OFFERED_QUALIFICATION_TYPES`). `GRADUATE`, `POSTGRADUATE` and
+ * `SUBJECT_SPECIALIST` are the coarser categories earlier builds stored; they
+ * stay valid so an existing profile still loads and saves, and
+ * `scripts/migrate-qualifications.mjs` maps them onto the new ones.
+ */
 export const QUALIFICATION_TYPES = {
   CERTIFIED_TEACHER: "CERTIFIED_TEACHER",
   OCT_MEMBER: "OCT_MEMBER",
   UNIVERSITY_STUDENT: "UNIVERSITY_STUDENT",
+  BACHELORS_DEGREE: "BACHELORS_DEGREE",
+  MASTERS_DEGREE: "MASTERS_DEGREE",
+  DOCTORATE: "DOCTORATE",
+  INDUSTRY_PROFESSIONAL: "INDUSTRY_PROFESSIONAL",
+  // Legacy — stored by earlier builds, never offered.
   GRADUATE: "GRADUATE",
   POSTGRADUATE: "POSTGRADUATE",
   SUBJECT_SPECIALIST: "SUBJECT_SPECIALIST",
 };
 
+export const OFFERED_QUALIFICATION_TYPES = [
+  QUALIFICATION_TYPES.CERTIFIED_TEACHER,
+  QUALIFICATION_TYPES.OCT_MEMBER,
+  QUALIFICATION_TYPES.UNIVERSITY_STUDENT,
+  QUALIFICATION_TYPES.BACHELORS_DEGREE,
+  QUALIFICATION_TYPES.MASTERS_DEGREE,
+  QUALIFICATION_TYPES.DOCTORATE,
+  QUALIFICATION_TYPES.INDUSTRY_PROFESSIONAL,
+];
+
 export const QUALIFICATION_LABELS = {
   CERTIFIED_TEACHER: "Certified teacher",
-  OCT_MEMBER: "Ontario College of Teachers member",
-  UNIVERSITY_STUDENT: "University student",
+  OCT_MEMBER: "OCT certified (Ontario College of Teachers)",
+  UNIVERSITY_STUDENT: "University or college student",
+  BACHELORS_DEGREE: "Bachelor's degree",
+  MASTERS_DEGREE: "Master's degree",
+  DOCTORATE: "PhD",
+  INDUSTRY_PROFESSIONAL: "Professional or industry expert",
   GRADUATE: "University graduate",
   POSTGRADUATE: "Postgraduate degree",
   SUBJECT_SPECIALIST: "Subject specialist",
@@ -1111,12 +1243,28 @@ export const AUDIT_ACTIONS = {
   USER_SUSPENDED: "USER_SUSPENDED",
   USER_REINSTATED: "USER_REINSTATED",
   USER_DELETED: "USER_DELETED",
+  /** A permanent ban (R28.2); restored, like a suspension, as USER_REINSTATED. */
+  USER_BANNED: "USER_BANNED",
+  /** An administrator marked the address verified on the member's behalf (S15). */
+  USER_EMAIL_VERIFIED_BY_ADMIN: "USER_EMAIL_VERIFIED_BY_ADMIN",
+  /** An administrator ended every session and device trust for an account (S15). */
+  USER_SESSIONS_REVOKED: "USER_SESSIONS_REVOKED",
   TUTOR_APPLICATION_SUBMITTED: "TUTOR_APPLICATION_SUBMITTED",
   TUTOR_APPROVED: "TUTOR_APPROVED",
   TUTOR_REJECTED: "TUTOR_REJECTED",
   TUTOR_INFO_REQUESTED: "TUTOR_INFO_REQUESTED",
   VERIFICATION_BADGE_GRANTED: "VERIFICATION_BADGE_GRANTED",
   VERIFICATION_BADGE_REVOKED: "VERIFICATION_BADGE_REVOKED",
+  /**
+   * Verification paperwork (§16, R28.5, S9, S15). Opening a document is its
+   * own event — never logged as a grant — and so is the retention sweep or an
+   * anonymisation deleting the bytes.
+   */
+  VERIFICATION_DOCUMENT_VIEWED: "VERIFICATION_DOCUMENT_VIEWED",
+  VERIFICATION_DOCUMENTS_DISCARDED: "VERIFICATION_DOCUMENTS_DISCARDED",
+  /** "Remove from search" / "Restore to search" on the admin tutor list (R28.8). */
+  TUTOR_SEARCH_HIDDEN: "TUTOR_SEARCH_HIDDEN",
+  TUTOR_SEARCH_RESTORED: "TUTOR_SEARCH_RESTORED",
   BOOKING_CANCELLED: "BOOKING_CANCELLED",
   BOOKING_NO_SHOW_REPORTED: "BOOKING_NO_SHOW_REPORTED",
   BOOKING_EXPIRED: "BOOKING_EXPIRED",
@@ -1127,9 +1275,18 @@ export const AUDIT_ACTIONS = {
   PAYMENT_SETTLED: "PAYMENT_SETTLED",
   REFUND_ISSUED: "REFUND_ISSUED",
   PAYOUT_MARKED_PAID: "PAYOUT_MARKED_PAID",
+  /** Payout lifecycle (S3, R28.19): creation, each status move, and deductions. */
+  PAYOUT_CREATED: "PAYOUT_CREATED",
+  PAYOUT_STATUS_CHANGED: "PAYOUT_STATUS_CHANGED",
+  PAYOUT_ADJUSTMENT_RECORDED: "PAYOUT_ADJUSTMENT_RECORDED",
+  /** A confirmed lesson completed by the `lesson-completion` job (R22.2). */
+  BOOKING_AUTO_COMPLETED: "BOOKING_AUTO_COMPLETED",
+  DISPUTE_OPENED: "DISPUTE_OPENED",
   REVIEW_MODERATED: "REVIEW_MODERATED",
   CONVERSATION_REPORT_VIEWED: "CONVERSATION_REPORT_VIEWED",
   CONVERSATION_MODERATED: "CONVERSATION_MODERATED",
+  /** A participant reported a thread (§21, R17.6); the reason stays on the case. */
+  CONVERSATION_REPORTED: "CONVERSATION_REPORTED",
   DISPUTE_RESOLVED: "DISPUTE_RESOLVED",
   SCHEDULED_JOB_RUN: "SCHEDULED_JOB_RUN",
   SETTINGS_UPDATED: "SETTINGS_UPDATED",
@@ -1164,6 +1321,24 @@ export const AUDIT_ACTIONS = {
   INTEGRATION_SECRET_ROTATED: "INTEGRATION_SECRET_ROTATED",
   INTEGRATION_TESTED: "INTEGRATION_TESTED",
   INTEGRATION_IMPORTED_FROM_ENV: "INTEGRATION_IMPORTED_FROM_ENV",
+
+  /**
+   * Support tickets (§33, §36). Every enquiry is stored before anything is
+   * emailed, and every change an administrator makes to one is recorded —
+   * a complaint's handling is exactly the kind of thing that is questioned
+   * later.
+   */
+  SUPPORT_TICKET_CREATED: "SUPPORT_TICKET_CREATED",
+  SUPPORT_TICKET_STATUS_CHANGED: "SUPPORT_TICKET_STATUS_CHANGED",
+  SUPPORT_TICKET_NOTE_ADDED: "SUPPORT_TICKET_NOTE_ADDED",
+
+  /**
+   * Member reports (R21.5, R28.24). The report is the member's act; the
+   * ruling on it is a moderator's, recorded as REQUEST_MODERATED /
+   * REVIEW_MODERATED.
+   */
+  REQUEST_REPORTED: "REQUEST_REPORTED",
+  REVIEW_REPORTED: "REVIEW_REPORTED",
 };
 
 /**
@@ -1191,4 +1366,49 @@ export const SUPPORT_TOPIC_LABELS = {
   [SUPPORT_TOPICS.TUTORING]: "Tutoring on the platform",
   [SUPPORT_TOPICS.ACCOUNT]: "My account",
   [SUPPORT_TOPICS.OTHER]: "Something else",
+};
+
+/**
+ * Where a stored support enquiry is in its handling (§33, R28.20).
+ *
+ * `RESOLVED` means the question was answered or the problem fixed; `CLOSED`
+ * means it was finished without that — spam, a duplicate, a person who never
+ * replied. Which moves are allowed lives in `support.service`, next to the
+ * conditional update that enforces them.
+ */
+export const SUPPORT_TICKET_STATUS = {
+  OPEN: "OPEN",
+  IN_PROGRESS: "IN_PROGRESS",
+  RESOLVED: "RESOLVED",
+  CLOSED: "CLOSED",
+};
+
+export const SUPPORT_TICKET_STATUS_LABELS = {
+  [SUPPORT_TICKET_STATUS.OPEN]: "Open",
+  [SUPPORT_TICKET_STATUS.IN_PROGRESS]: "In progress",
+  [SUPPORT_TICKET_STATUS.RESOLVED]: "Resolved",
+  [SUPPORT_TICKET_STATUS.CLOSED]: "Closed",
+};
+
+/** Tickets somebody still has to do something about. */
+export const ACTIVE_SUPPORT_TICKET_STATUSES = [
+  SUPPORT_TICKET_STATUS.OPEN,
+  SUPPORT_TICKET_STATUS.IN_PROGRESS,
+];
+
+/**
+ * Topics that jump the queue. A safety report sits above everything else in
+ * the admin list whatever its age — the support page tells a family that
+ * safety concerns are acted on first, and this is what makes that true.
+ */
+export const URGENT_SUPPORT_TOPICS = [SUPPORT_TOPICS.SAFETY];
+
+/**
+ * Booking events narrated inside a conversation as SYSTEM messages (§21,
+ * R17.3). `postSystemMessage` in message.service is the only writer.
+ */
+export const MESSAGE_SYSTEM_EVENTS = {
+  BOOKING_CONFIRMED: "BOOKING_CONFIRMED",
+  BOOKING_CANCELLED: "BOOKING_CANCELLED",
+  BOOKING_RESCHEDULED: "BOOKING_RESCHEDULED",
 };

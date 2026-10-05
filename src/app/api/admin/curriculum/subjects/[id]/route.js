@@ -1,8 +1,8 @@
 import { z } from "zod";
 import { routeHandler, ok } from "@/lib/api";
 import { subjectSchema } from "@/lib/validation/admin";
-import { objectId } from "@/lib/validation/common";
-import { updateSubject } from "@/services/curriculum.service";
+import { objectId, patchSchema } from "@/lib/validation/common";
+import { updateSubject, deleteSubject } from "@/services/curriculum.service";
 import { PERMISSIONS } from "@/constants";
 
 export const PATCH = routeHandler(
@@ -10,6 +10,12 @@ export const PATCH = routeHandler(
   {
     permission: PERMISSIONS.ADMIN_CURRICULUM_MANAGE,
     paramsSchema: z.object({ id: objectId }),
-    bodySchema: subjectSchema.partial(),
+    bodySchema: patchSchema(subjectSchema),
   },
+);
+
+/** Refuses while anything references it — deactivate instead. */
+export const DELETE = routeHandler(
+  async ({ user, params }) => ok(await deleteSubject(params.id, user)),
+  { permission: PERMISSIONS.ADMIN_CURRICULUM_MANAGE, paramsSchema: z.object({ id: objectId }) },
 );

@@ -1,8 +1,8 @@
 import "server-only";
 import { AUDIT_ACTIONS } from "@/constants";
 import { NotFoundError } from "@/lib/api/errors";
-import { sendBookingReminders, expireStaleBookings } from "./booking.service";
-import { expireStaleVerifications } from "./verification.service";
+import { sendBookingReminders, expireStaleBookings, completeEndedLessons } from "./booking.service";
+import { expireStaleVerifications, discardStaleVerificationDocuments } from "./verification.service";
 import { runScheduledPayouts } from "./payout.service";
 import { expireStaleRequests } from "./request.service";
 import { syncStaleCalendars } from "./calendar.service";
@@ -36,7 +36,9 @@ import { recordAudit } from "./audit.service";
 export const JOBS = {
   BOOKING_REMINDERS: "booking-reminders",
   BOOKING_EXPIRY: "booking-expiry",
+  LESSON_COMPLETION: "lesson-completion",
   VERIFICATION_EXPIRY: "verification-expiry",
+  VERIFICATION_DOCUMENT_RETENTION: "verification-document-retention",
   PAYOUTS: "payouts",
   REQUEST_EXPIRY: "request-expiry",
   CALENDAR_SYNC: "calendar-sync",
@@ -65,12 +67,26 @@ const REGISTRY = {
     suggestedCron: "*/10 * * * *",
     run: (options) => expireStaleBookings(options),
   },
+  [JOBS.LESSON_COMPLETION]: {
+    name: "Lesson completion",
+    description:
+      "Marks confirmed lessons complete once their no-show window has closed with no report or dispute, so they become reviewable and, after the payout hold, payable. Each lesson is claimed on its CONFIRMED status, so repeat runs complete it once.",
+    suggestedCron: "0 * * * *",
+    run: (options) => completeEndedLessons(options),
+  },
   [JOBS.VERIFICATION_EXPIRY]: {
     name: "Verification expiry",
     description:
       "Expires approved verification badges whose documents have lapsed, and takes the badge off the public profile.",
     suggestedCron: "0 3 * * *",
-    run: () => expireStaleVerifications(),
+    run: (options) => expireStaleVerifications(options),
+  },
+  [JOBS.VERIFICATION_DOCUMENT_RETENTION]: {
+    name: "Verification document retention",
+    description:
+      "Deletes the stored files behind verification badges that were declined or have expired, once the retention period in settings has passed. The record of the decision is kept. Each document is marked only after its file is gone, so a repeat run deletes nothing twice and a failed deletion is retried.",
+    suggestedCron: "30 3 * * *",
+    run: (options) => discardStaleVerificationDocuments(options),
   },
   [JOBS.PAYOUTS]: {
     name: "Tutor payouts",

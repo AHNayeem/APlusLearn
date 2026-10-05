@@ -15,7 +15,7 @@ import { minutesToLabel } from "@/lib/utils/time";
  * A single summary of everything the tutor entered, with any missing step
  * called out before they can submit.
  */
-export function ReviewStep({ value, onChange, fieldErrors, application }) {
+export function ReviewStep({ value, onChange, fieldErrors, application, account }) {
   const data = application?.data ?? {};
   const completed = application?.completedSteps ?? [];
   const required = ONBOARDING_STEPS.filter((s) => s !== "REVIEW");
@@ -41,6 +41,7 @@ export function ReviewStep({ value, onChange, fieldErrors, application }) {
       <div className="divide-y divide-ink-100 rounded-xl border border-ink-200">
         <Section title="About you">
           <Row label="Name" value={`${data.PERSONAL?.firstName ?? ""} ${data.PERSONAL?.lastName ?? ""}`.trim()} />
+          <Row label="Profile photo" value={account?.avatarUrl ? "Added" : "Required — add one in the Profile step before submitting"} />
           <Row label="Phone" value={data.PERSONAL?.phone} />
           <Row label="Location" value={[data.LOCATION?.city, data.LOCATION?.province].filter(Boolean).join(", ")} />
           <Row label="Headline" value={data.PROFILE?.headline} />
@@ -69,6 +70,9 @@ export function ReviewStep({ value, onChange, fieldErrors, application }) {
                 : undefined
             }
           />
+          {data.QUALIFICATIONS?.otherCredentials?.length > 0 && (
+            <Row label="Other credentials" value={data.QUALIFICATIONS.otherCredentials.join(", ")} />
+          )}
           {data.QUALIFICATIONS?.octNumber && (
             <Row label="OCT number" value={data.QUALIFICATIONS.octNumber} />
           )}

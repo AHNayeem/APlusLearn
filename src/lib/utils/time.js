@@ -32,10 +32,28 @@ export function minutesToLabel(minutes) {
   return `${h12}:${String(m).padStart(2, "0")} ${suffix}`;
 }
 
+/**
+ * `Intl.DateTimeFormat` instances, one per (kind, zone).
+ *
+ * Constructing a formatter is far more expensive than using one, and slot
+ * generation formats several instants per candidate slot. Search computes
+ * real availability for every candidate tutor (§8), so the formatters are
+ * built once per zone and reused.
+ */
+const FORMATTERS = new Map();
+function formatter(kind, timeZone, options) {
+  const key = `${kind}|${timeZone}`;
+  let dtf = FORMATTERS.get(key);
+  if (!dtf) {
+    dtf = new Intl.DateTimeFormat(kind === "dayKey" ? "en-CA" : "en-US", { timeZone, ...options });
+    FORMATTERS.set(key, dtf);
+  }
+  return dtf;
+}
+
 /** Minutes offset of `date` from UTC in `timeZone`, accounting for DST. */
 export function timeZoneOffsetMinutes(date, timeZone) {
-  const dtf = new Intl.DateTimeFormat("en-US", {
-    timeZone,
+  const dtf = formatter("offset", timeZone, {
     hour12: false,
     year: "numeric",
     month: "2-digit",
@@ -74,8 +92,7 @@ export function zonedTimeToUtc(dayKey, minutes, timeZone) {
 
 /** "YYYY-MM-DD" for a UTC instant rendered in `timeZone`. */
 export function dayKeyInZone(date, timeZone) {
-  const dtf = new Intl.DateTimeFormat("en-CA", {
-    timeZone,
+  const dtf = formatter("dayKey", timeZone, {
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -85,16 +102,13 @@ export function dayKeyInZone(date, timeZone) {
 
 /** 0 (Sunday) – 6 (Saturday) for a UTC instant rendered in `timeZone`. */
 export function weekdayInZone(date, timeZone) {
-  const name = new Intl.DateTimeFormat("en-US", { timeZone, weekday: "short" }).format(
-    new Date(date),
-  );
+  const name = formatter("weekday", timeZone, { weekday: "short" }).format(new Date(date));
   return ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(name);
 }
 
 /** Minutes-from-midnight for a UTC instant rendered in `timeZone`. */
 export function minutesInZone(date, timeZone) {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone,
+  const parts = formatter("minutes", timeZone, {
     hour12: false,
     hour: "2-digit",
     minute: "2-digit",

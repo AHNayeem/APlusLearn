@@ -1,9 +1,10 @@
-import { Megaphone, Users, Eye } from "lucide-react";
+import { Megaphone, Users, Eye, Flag } from "lucide-react";
 import { connectToDatabase } from "@/lib/db/connect";
 import { enforceRole } from "@/lib/auth/guards";
 import {
   ROLES, REQUEST_STATUS, REQUEST_STATUS_LABELS, REQUEST_VISIBILITY,
-  REQUEST_VISIBILITY_LABELS,
+  REQUEST_VISIBILITY_LABELS, REQUEST_REPORT_REASONS, REPORT_STATUS_LABELS,
+  ACTIVE_REPORT_STATUSES,
 } from "@/constants";
 import { listAllRequests } from "@/services/request.service";
 import {
@@ -11,12 +12,16 @@ import {
 } from "@/components/ui";
 import { DashboardPage, PageHeader } from "@/components/layout/DashboardShell";
 import { RequestModeration } from "@/components/admin/RequestModeration";
+import { DismissReportButton } from "./DismissReportButton";
 import { formatMoney, formatRelative } from "@/lib/utils/format";
 
 export const metadata = { title: "Tutor requests" };
 export const dynamic = "force-dynamic";
 
+const REPORTED_TAB = "reported";
+
 const TABS = [
+  { value: REPORTED_TAB, label: "Reported" },
   { value: REQUEST_STATUS.OPEN, label: "Open" },
   { value: REQUEST_STATUS.MATCHED, label: "Matched" },
   { value: REQUEST_STATUS.REMOVED, label: "Removed" },
@@ -36,8 +41,10 @@ export default async function AdminRequestsPage({ searchParams }) {
   await connectToDatabase();
 
   const { status = REQUEST_STATUS.OPEN, page = "1", search = "" } = await searchParams;
+  const reported = status === REPORTED_TAB;
   const { items, total, pageSize } = await listAllRequests({
-    status: status || undefined,
+    status: reported ? undefined : status || undefined,
+    reported,
     search: search || undefined,
     page: Number(page),
   });
@@ -61,8 +68,10 @@ export default async function AdminRequestsPage({ searchParams }) {
         {items.length === 0 ? (
           <EmptyState
             icon={<Megaphone className="size-7" />}
-            title="Nothing here"
-            description="No requests match this filter."
+            title={reported ? "No reported requests" : "Nothing here"}
+            description={
+              reported ? "Nothing waiting on moderation." : "No requests match this filter."
+            }
           />
         ) : (
           items.map((request) => (
@@ -91,7 +100,12 @@ export default async function AdminRequestsPage({ searchParams }) {
                     </p>
                   </div>
 
-                  <RequestModeration request={request} />
+                  <div className="flex flex-wrap gap-2">
+                    {ACTIVE_REPORT_STATUSES.includes(request.reportStatus) && (
+                      <DismissReportButton request={request} />
+                    )}
+                    <RequestModeration request={request} />
+                  </div>
                 </div>
 
                 <p className="mt-3 line-clamp-2 text-sm leading-relaxed text-ink-600">
@@ -115,6 +129,10 @@ export default async function AdminRequestsPage({ searchParams }) {
                     value={`up to ${formatMoney(request.budgetMaxCents, { compact: true })}/hr`}
                   />
                 </dl>
+
+                {request.reportHistory?.length > 0 && (
+                  <ReportCase request={request} />
+                )}
 
                 {request.moderationNote && (
                   <p className="mt-3 rounded-lg bg-ink-50 p-3 text-xs text-ink-600">
@@ -149,6 +167,52 @@ function Fact({ icon, label, value }) {
         <dt className="sr-only">{label}</dt>
         <dd className="font-semibold text-ink-700">{value}</dd>
       </span>
+    </div>
+  );
+}
+
+/**
+ * The report case on one request: every report, newest first, with the
+ * reports a moderator has already ruled on shown as such (R28.24).
+ */
+function ReportCase({ request }) {
+  const open = ACTIVE_REPORT_STATUSES.includes(request.reportStatus);
+  const reports = [...request.reportHistory].reverse();
+
+  return (
+    <div
+      className={
+        open
+          ? "mt-4 rounded-xl border border-warning-100 bg-warning-50 p-3"
+          : "mt-4 rounded-xl bg-ink-50 p-3"
+      }
+    >
+      <p
+        className={`flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide ${open ? "text-warning-700" : "text-ink-500"}`}
+      >
+        <Flag className="size-3" />
+        {open
+          ? `${request.reportCount} open ${request.reportCount === 1 ? "report" : "reports"} · since ${formatRelative(request.reportedAt)}`
+          : `Report ${(REPORT_STATUS_LABELS[request.reportStatus] ?? "closed").toLowerCase()}`}
+      </p>
+      <ul className="mt-2 space-y-2">
+        {reports.map((report, index) => (
+          <li key={`${report.createdAt}-${index}`} className="text-sm text-ink-700">
+            <span className="font-semibold">
+              {REQUEST_REPORT_REASONS[report.reason] ?? report.reason}
+            </span>
+            <span className="text-xs text-ink-500">
+              {" "}
+              · {report.reporterId?.firstName ?? "A member"}{" "}
+              {report.reporterId?.lastName ?? ""}
+              {report.reporterRole ? ` (${report.reporterRole.toLowerCase()})` : ""} ·{" "}
+              {formatRelative(report.createdAt)}
+              {report.resolvedAt ? " · ruled on" : ""}
+            </span>
+            {report.note && <p className="mt-0.5 text-xs text-ink-600">{report.note}</p>}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

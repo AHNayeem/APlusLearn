@@ -1,4 +1,11 @@
-import { BOOKING_STATUS, CANCELLED_STATUSES, PAYMENT_STATUS, CHECKOUT_HOLD } from "@/constants";
+import {
+  BOOKING_STATUS,
+  CANCELLED_STATUSES,
+  PAYMENT_STATUS,
+  CHECKOUT_HOLD,
+  DEFAULT_SETTINGS,
+  DISPUTE_REASONS,
+} from "@/constants";
 import { hoursUntil } from "@/lib/utils/time";
 import { calculateRefund } from "./pricing";
 
@@ -17,6 +24,13 @@ export const POLICY = {
   ADMIN_CANCELLATION: "ADMIN_CANCELLATION",
   STUDENT_NO_SHOW: "STUDENT_NO_SHOW",
   TUTOR_NO_SHOW: "TUTOR_NO_SHOW",
+  /**
+   * Cancelled before any money was taken (R27.2). Nothing is refunded because
+   * nothing was collected; the checkout is voided instead. Recorded on the
+   * booking so a payment that settles *afterwards* is recognised as money
+   * taken for a lesson that no longer exists, and sent back.
+   */
+  UNPAID_CANCELLATION: "UNPAID_CANCELLATION",
 };
 
 export const POLICY_LABELS = {
@@ -26,6 +40,7 @@ export const POLICY_LABELS = {
   ADMIN_CANCELLATION: "Cancelled by APlus Learn",
   STUDENT_NO_SHOW: "Student did not attend",
   TUTOR_NO_SHOW: "Tutor did not attend",
+  UNPAID_CANCELLATION: "Cancelled before payment",
 };
 
 /**
@@ -33,12 +48,20 @@ export const POLICY_LABELS = {
  *
  * @param {object} args
  * @param {Date|string} args.startAt      When the lesson begins.
- * @param {number} args.totalCents        What the student paid.
+ * @param {number} args.totalCents        The lesson's value (its list price).
  * @param {"STUDENT"|"TUTOR"|"ADMIN"} args.cancelledBy
  * @param {object} args.settings          Platform settings (admin-configurable).
+ * @param {boolean} [args.paid=true]      Whether any money was collected for
+ *   it. An unpaid booking resolves to UNPAID_CANCELLATION whoever cancels:
+ *   there is nothing to refund, and saying "$X will be refunded" to someone
+ *   who was never charged is the defect R27.2 describes.
  */
-export function resolveCancellation({ startAt, totalCents, cancelledBy, settings }) {
+export function resolveCancellation({ startAt, totalCents, cancelledBy, settings, paid = true }) {
   const hoursBeforeStart = hoursUntil(startAt);
+
+  if (!paid) {
+    return outcome(POLICY.UNPAID_CANCELLATION, 0, totalCents, hoursBeforeStart);
+  }
 
   // A tutor or admin cancelling is never the student's fault: always full.
   if (cancelledBy === "TUTOR") {
@@ -85,7 +108,10 @@ export function cancellationPolicyText(settings) {
     settings.lateCancellationRefundPercent > 0
       ? `Cancel inside ${settings.freeCancellationWindowHours} hours and ${settings.lateCancellationRefundPercent}% is refunded.`
       : `Cancellations inside ${settings.freeCancellationWindowHours} hours are not refunded.`,
-    "If your tutor cancels or does not attend, you are refunded in full.",
+    "If your tutor cancels, you are refunded in full.",
+    // A tutor no-show is reviewed before money moves (S2), so the promise is
+    // the review and the window, not an automatic refund.
+    `If your tutor does not attend, report it within ${noShowWindowHours(settings)} hours of the lesson ending and our team will review it for a refund.`,
   ];
 }
 
@@ -211,6 +237,218 @@ export function canComplete(booking) {
 /** Reviews require a completed lesson and no existing review (§23, §42). */
 export function canReview(booking) {
   return booking.status === BOOKING_STATUS.COMPLETED && !booking.reviewId;
+}
+
+// --- No-shows, disputes and lessons nobody marked (S2, S4, R22.2, R27.5) ---
+
+const HOUR_MS = 3_600_000;
+const DAY_MS = 86_400_000;
+
+function configured(value, fallback) {
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+/** Hours after a lesson ends during which a no-show may still be reported. */
+export function noShowWindowHours(settings) {
+  return configured(settings?.noShowReportWindowHours, DEFAULT_SETTINGS.noShowReportWindowHours);
+}
+
+/** The moment the no-show window on this lesson closes. */
+export function noShowWindowEndsAt(booking, settings) {
+  return new Date(new Date(booking.endAt).getTime() + noShowWindowHours(settings) * HOUR_MS);
+}
+
+/**
+ * Whether a no-show may be reported on this lesson now (S2, R27.5).
+ *
+ * Only a CONFIRMED lesson that has ended and is still inside the window. A
+ * COMPLETED lesson was settled as having happened — by the tutor, or by the
+ * `lesson-completion` job once this same window closed — and a lesson that is
+ * paid out, cancelled, unpaid or already reported has had its money decided.
+ * Re-opening any of those through a no-show is what let a learner refund a
+ * lesson months after the tutor was paid; that route is a dispute now, and
+ * disputes have their own window and an administrator in the loop.
+ *
+ * `enforceWindow: false` is for an administrator recording an outcome after
+ * the fact — the adjudication path — and nothing else.
+ *
+ * @returns {{ ok: boolean, code?: string, message?: string, closesAt: Date }}
+ */
+export function noShowReportEligibility(booking, { settings, now = new Date(), enforceWindow = true } = {}) {
+  const closesAt = noShowWindowEndsAt(booking, settings);
+  const refuse = (code, message) => ({ ok: false, code, message, closesAt });
+
+  if (booking.status === BOOKING_STATUS.COMPLETED) {
+    return refuse(
+      "ALREADY_COMPLETED",
+      "This lesson has already been completed. If something went wrong, report a problem instead.",
+    );
+  }
+  if (booking.status !== BOOKING_STATUS.CONFIRMED) {
+    return refuse("NOT_REPORTABLE", "This lesson is no longer open to a no-show report.");
+  }
+  if (booking.payoutId) {
+    return refuse("ALREADY_PAID_OUT", "This lesson has already been paid out. Report a problem instead.");
+  }
+  if (new Date(booking.endAt) > now) {
+    return refuse("TOO_EARLY", "You can report a no-show once the lesson has finished.");
+  }
+  if (enforceWindow && now > closesAt) {
+    return refuse(
+      "WINDOW_CLOSED",
+      `No-shows can be reported for ${noShowWindowHours(settings)} hours after a lesson ends. Report a problem instead.`,
+    );
+  }
+  return { ok: true, closesAt };
+}
+
+/**
+ * Before this instant, an ended CONFIRMED lesson is still inside its no-show
+ * window and must be left alone; at or after it, the `lesson-completion` job
+ * settles it as COMPLETED (R22.2). One window, two readers — the report and
+ * the job can never disagree about whether a lesson was still reportable.
+ */
+export function lessonCompletionCutoff(settings, now = new Date()) {
+  return new Date(now.getTime() - noShowWindowHours(settings) * HOUR_MS);
+}
+
+/** Lessons a dispute may be raised against (S4, R27.6). */
+export const DISPUTABLE_BOOKING_STATUSES = [
+  BOOKING_STATUS.CONFIRMED,
+  BOOKING_STATUS.COMPLETED,
+  BOOKING_STATUS.NO_SHOW_STUDENT,
+  BOOKING_STATUS.NO_SHOW_TUTOR,
+];
+
+/** Days after a lesson ends during which a dispute may still be opened. */
+export function disputeWindowDays(settings) {
+  return configured(settings?.disputeWindowDays, DEFAULT_SETTINGS.disputeWindowDays);
+}
+
+/**
+ * Whether a dispute may be opened on this lesson now (S4, R27.6).
+ *
+ * The lesson must have ended, be in one of the outcomes a dispute can change,
+ * be inside the dispute window, and have actually been paid for. An unpaid,
+ * cancelled or expired booking has no lesson to argue about — and a dispute
+ * on one used to be resolved by rewriting it as COMPLETED.
+ *
+ * @param {object} booking
+ * @param {object} options
+ * @param {object} [options.payment]  The booking's payment, when it has one.
+ */
+export function disputeEligibility(booking, { settings, payment, now = new Date() } = {}) {
+  const refuse = (code, message) => ({ ok: false, code, message });
+
+  if (new Date(booking.endAt) > now) {
+    return refuse("TOO_EARLY", "You can open a dispute once the lesson has finished.");
+  }
+  if (!DISPUTABLE_BOOKING_STATUSES.includes(booking.status)) {
+    return refuse("NOT_DISPUTABLE", "This lesson cannot be disputed.");
+  }
+  const closesAt = new Date(new Date(booking.endAt).getTime() + disputeWindowDays(settings) * DAY_MS);
+  if (now > closesAt) {
+    return refuse(
+      "WINDOW_CLOSED",
+      `Disputes can be opened for ${disputeWindowDays(settings)} days after a lesson. Contact support instead.`,
+    );
+  }
+  const paid =
+    Boolean(booking.packagePurchaseId) ||
+    Boolean(payment && SETTLED_PAYMENT_STATUSES.includes(payment.status));
+  if (!paid) return refuse("NOT_PAID", "This lesson was never paid for, so there is nothing to dispute.");
+
+  return { ok: true, closesAt };
+}
+
+/**
+ * What a decided dispute leaves the lesson as (S4, R27.6).
+ *
+ * The default is the status the dispute interrupted: a dispute that changes
+ * nothing about what happened must not rewrite it, and a partial refund keeps
+ * the lesson's real status — the refund is recorded on the booking instead,
+ * where the payout nets it. Only two decisions change the outcome:
+ *
+ *   • an upheld tutor no-show is a tutor no-show, whatever money was left;
+ *   • a full refund for anything else leaves nothing of the lesson that was
+ *     paid for, which is a cancellation.
+ *
+ * A legacy dispute opened before `preDisputeStatus` was recorded falls back
+ * on the money: paid becomes COMPLETED, unpaid never does.
+ */
+export function disputeOutcomeStatus({ reason, resolution, preDisputeStatus, fullyRefunded, paid }) {
+  if (resolution === "RESOLVED_REFUND" && reason === DISPUTE_REASONS.TUTOR_NO_SHOW) {
+    return BOOKING_STATUS.NO_SHOW_TUTOR;
+  }
+  if (resolution === "RESOLVED_REFUND" && fullyRefunded) return BOOKING_STATUS.CANCELLED_BY_ADMIN;
+  if (preDisputeStatus && preDisputeStatus !== BOOKING_STATUS.DISPUTED) return preDisputeStatus;
+  return paid ? BOOKING_STATUS.COMPLETED : BOOKING_STATUS.CANCELLED_BY_ADMIN;
+}
+
+/**
+ * Repeated no-shows (R27.7, R27.8). The same shape and the same two steps as
+ * `assessCancellationAbuse` — a warning at the threshold, an administrator's
+ * review at twice it — measured against the risk settings an operator
+ * already uses for the no-show signal, so the warning and the signal fire
+ * at the same count.
+ */
+export function assessNoShowAbuse(recentNoShows, settings) {
+  const threshold = configured(settings?.risk?.noShowThreshold, DEFAULT_SETTINGS.risk.noShowThreshold);
+  const windowDays = configured(settings?.risk?.signalWindowDays, DEFAULT_SETTINGS.risk.signalWindowDays);
+
+  if (recentNoShows < threshold) return { action: "NONE", recentNoShows };
+  if (recentNoShows < threshold * 2) {
+    return {
+      action: "WARN",
+      recentNoShows,
+      message: `${recentNoShows} lessons have been missed in the last ${windowDays} days. Repeatedly missing lessons may lead to your account being restricted.`,
+    };
+  }
+  return {
+    action: "REVIEW",
+    recentNoShows,
+    message: `${recentNoShows} lessons have been missed in the last ${windowDays} days, and this account needs an administrator's review.`,
+  };
+}
+
+// --- What a tutor is owed (R16.4, R16.9) ------------------------------------
+
+/**
+ * Lessons whose tutor share is earned.
+ *
+ * A completed lesson, a lesson the student missed (the tutor turned up), and
+ * a late student cancellation the policy only partly refunded — in each the
+ * platform kept money for the tutor's time, and `netTutorEarnings` pays the
+ * tutor their share of exactly what was kept. A lesson refunded in full nets
+ * to nothing on its own, so no separate exclusion is needed for it.
+ */
+export function earningBookingMatch() {
+  return {
+    $or: [
+      { status: { $in: [BOOKING_STATUS.COMPLETED, BOOKING_STATUS.NO_SHOW_STUDENT] } },
+      {
+        status: BOOKING_STATUS.CANCELLED_BY_STUDENT,
+        "cancellation.policyApplied": POLICY.LATE_CANCELLATION,
+      },
+    ],
+  };
+}
+
+/** The same lessons, once their payout hold has passed. */
+export function payableBookingMatch(holdCutoff) {
+  return {
+    $or: [
+      {
+        status: { $in: [BOOKING_STATUS.COMPLETED, BOOKING_STATUS.NO_SHOW_STUDENT] },
+        completedAt: { $lte: holdCutoff },
+      },
+      {
+        status: BOOKING_STATUS.CANCELLED_BY_STUDENT,
+        "cancellation.policyApplied": POLICY.LATE_CANCELLATION,
+        "cancellation.cancelledAt": { $lte: holdCutoff },
+      },
+    ],
+  };
 }
 
 /**

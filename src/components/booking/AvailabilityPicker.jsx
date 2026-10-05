@@ -20,8 +20,14 @@ export function AvailabilityPicker({
   timeZone,
   className,
 }) {
-  const [weekOffset, setWeekOffset] = useState(0);
   const perPage = 7;
+  // Open on the week holding the selected slot, so a time carried in from a
+  // link (rebook, or back from sign-in) is on screen rather than pages away.
+  // The parent remounts this once slots have loaded, so `days` is real here.
+  const [weekOffset, setWeekOffset] = useState(() => {
+    const index = days.findIndex((d) => d.slots.some((s) => s.startAt === selected));
+    return index > 0 ? Math.floor(index / perPage) : 0;
+  });
 
   const visible = useMemo(
     () => days.slice(weekOffset * perPage, weekOffset * perPage + perPage),

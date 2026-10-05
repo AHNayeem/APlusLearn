@@ -54,5 +54,11 @@ export async function resolve(specifier, context, nextResolve) {
     }
   }
 
+  // `next/cache`, `next/server`: Next's entry points are CommonJS files that
+  // its bundler resolves without the extension; plain Node needs it spelled.
+  if (/^next\/[a-z-]+$/.test(specifier)) {
+    return nextResolve(`${specifier}.js`, context);
+  }
+
   return nextResolve(specifier, context);
 }

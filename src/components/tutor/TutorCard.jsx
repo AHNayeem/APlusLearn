@@ -1,6 +1,6 @@
 import Link from "next/link";
 import {
-  MapPin, Video, Home, Navigation, BadgeCheck, Sparkles, Clock,
+  MapPin, Video, Home, Navigation, BadgeCheck, Sparkles, Clock, CalendarDays, MessageCircle,
 } from "lucide-react";
 import { cn } from "@/lib/utils/cn";
 import { Avatar, Button, Card, Rating, Tooltip } from "@/components/ui";
@@ -63,10 +63,13 @@ function WideCard({ tutor, courseCode, showSave, ribbon, className }) {
             sizes="(min-width: 1024px) 17rem, 100vw"
           />
           {/* Pinned to the bottom so the photo column ends level with the text
-              column instead of leaving a ragged gap under the button. */}
-          <Button href={href} variant="plum" fullWidth className="mt-auto">
-            View Profile
-          </Button>
+              column instead of leaving a ragged gap under the buttons. */}
+          <div className="mt-auto flex flex-col gap-2">
+            <Button href={href} variant="plum" fullWidth>
+              View Profile
+            </Button>
+            <CardActions href={href} />
+          </div>
         </div>
 
         <div className="flex min-w-0 flex-col gap-3.5">
@@ -208,6 +211,7 @@ function CompactCard({ tutor, courseCode, showSave, ribbon, overlay, className }
             View Profile
           </Button>
         </div>
+        <CardActions href={href} size="sm" />
       </div>
     </Card>
   );
@@ -216,6 +220,38 @@ function CompactCard({ tutor, courseCode, showSave, ribbon, overlay, className }
 /* -------------------------------------------------------------------------- */
 /* Shared pieces                                                              */
 /* -------------------------------------------------------------------------- */
+
+/**
+ * The card's secondary actions (§9: View Availability, and the optional
+ * Message and Book). Each opens the profile at the matching section — the
+ * profile is where the live calendar, the message form and the booking
+ * widget already enforce who may do what, so the card adds no second path.
+ */
+function CardActions({ href, size = "md" }) {
+  const actions = [
+    { label: "View availability", href: `${href}#availability`, icon: CalendarDays },
+    { label: "Message", href: `${href}#message`, icon: MessageCircle },
+    { label: "Book", href: `${href}#book`, icon: Clock },
+  ];
+  return (
+    <div className="grid grid-cols-3 gap-1.5">
+      {actions.map(({ label, href: target, icon: Icon }) => (
+        <Link
+          key={label}
+          href={target}
+          className={cn(
+            "inline-flex min-h-10 items-center justify-center gap-1 rounded-xl px-2 text-center font-semibold",
+            "text-ink-700 ring-1 ring-inset ring-ink-200 transition-colors hover:bg-ink-50 hover:text-ink-900",
+            size === "sm" ? "text-[11px]" : "text-xs",
+          )}
+        >
+          <Icon className="size-3.5 shrink-0 text-ink-400" aria-hidden="true" />
+          {label}
+        </Link>
+      ))}
+    </div>
+  );
+}
 
 /** Monday-first, because that is how a tutoring week reads. */
 const WEEK = [
@@ -381,11 +417,15 @@ function MetaLine({ tutor }) {
   if (tutor.stats.completedLessons > 0) {
     bits.push({ icon: BadgeCheck, text: `${tutor.stats.completedLessons} lessons taught` });
   }
+  // Computed live from the booking calendar by the search (R9.10). When the
+  // visitor asked for a day or time, the slot that answered it comes first.
   bits.push({
     icon: Clock,
-    text: tutor.nextAvailableAt
-      ? `Next available ${formatRelative(tutor.nextAvailableAt)}`
-      : "Availability on request",
+    text: tutor.matchingSlotAt
+      ? `Free ${formatRelative(tutor.matchingSlotAt)}`
+      : tutor.nextAvailableAt
+        ? `Next available ${formatRelative(tutor.nextAvailableAt)}`
+        : "No open lesson times right now",
   });
 
   return (

@@ -23,7 +23,11 @@ import { formatDate } from "@/lib/utils/format";
  * and nothing has to be undone; the file is not uploaded until "Save photo",
  * which is what makes "replace the one I just chose" a normal thing to do.
  */
-export function ProfilePhotoPanel({ user }) {
+/**
+ * `onChange(avatarUrl | null)` lets a host that keeps its own copy of the
+ * user — the tutor onboarding wizard (R13.2) — follow the change.
+ */
+export function ProfilePhotoPanel({ user, onChange }) {
   const router = useRouter();
   const toast = useToast();
   const inputRef = useRef(null);
@@ -73,7 +77,8 @@ export function ProfilePhotoPanel({ user }) {
     setBusy(true);
     setProblem(null);
     try {
-      await api.post("/api/users/me/avatar", body);
+      const result = await api.post("/api/users/me/avatar", body);
+      onChange?.(result?.avatarUrl ?? result?.user?.avatarUrl ?? null);
       clearChoice();
       toast.success("Photo updated", "It's now shown wherever your name appears.");
       router.refresh();
@@ -91,6 +96,7 @@ export function ProfilePhotoPanel({ user }) {
     setProblem(null);
     try {
       await api.delete("/api/users/me/avatar");
+      onChange?.(null);
       clearChoice();
       toast.success("Photo removed", "Your initials are shown instead.");
       router.refresh();

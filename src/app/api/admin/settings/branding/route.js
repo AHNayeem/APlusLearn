@@ -2,7 +2,8 @@ import { z } from "zod";
 import { routeHandler, ok, ValidationError } from "@/lib/api";
 import { uploadBrandingAsset, removeBrandingAsset } from "@/services/branding.service";
 import { recordAudit } from "@/services/audit.service";
-import { AUDIT_ACTIONS, PERMISSIONS, BRANDING_ASSET_KEYS } from "@/constants";
+import { AUDIT_ACTIONS, PERMISSIONS, BRANDING_ASSET_KEYS, BRANDING_ASSETS } from "@/constants";
+import { readBoundedFormData } from "@/lib/security/upload-size";
 
 /**
  * Branding uploads (§26).
@@ -17,7 +18,9 @@ const assetQuery = z.object({ asset: z.enum(BRANDING_ASSET_KEYS) });
 
 export const POST = routeHandler(
   async ({ request, user, query }) => {
-    const form = await request.formData();
+    // The largest branding asset bounds the request before it is buffered (S19).
+    const largest = Math.max(...Object.values(BRANDING_ASSETS).map((spec) => spec.maxBytes));
+    const form = await readBoundedFormData(request, largest, "That file is larger than any branding asset allows.");
     const file = form.get("file");
     if (!file || typeof file === "string") {
       throw new ValidationError({ fieldErrors: { file: ["Choose an image to upload."] } });

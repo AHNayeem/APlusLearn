@@ -5,6 +5,7 @@ import { Spinner } from "@/components/ui";
 import { getAppConfig } from "@/services/settings.service";
 import { connectToDatabase } from "@/lib/db/connect";
 import { offeredSignInMethods } from "@/services/external/oauth-provider";
+import { listProvinces } from "@/services/curriculum.service";
 
 export async function generateMetadata() {
   const { branding } = await getAppConfig();
@@ -26,7 +27,10 @@ export default async function RegisterPage() {
   // Without a connection the module resolves from the environment alone,
   // which is the documented fallback rather than an error.
   await connectToDatabase().catch(() => {});
-  const oauthProviders = await offeredSignInMethods();
+  const [oauthProviders, provinces] = await Promise.all([
+    offeredSignInMethods(),
+    listProvinces({ activeOnly: false }).catch(() => []),
+  ]);
   return (
     <>
       <h1 className="text-2xl font-extrabold tracking-tight text-ink-900 sm:text-3xl">
@@ -40,7 +44,7 @@ export default async function RegisterPage() {
       </p>
 
       <Suspense fallback={<Spinner className="mt-8" />}>
-        <RegisterForm oauthProviders={oauthProviders} />
+        <RegisterForm oauthProviders={oauthProviders} provinces={provinces} />
       </Suspense>
     </>
   );

@@ -19,13 +19,29 @@ import { STEP_COMPONENTS } from "./steps";
  * server-side per step and again on submit, which is what lets the wizard be
  * forgiving without letting bad data through (§37).
  */
-export function OnboardingWizard({ application: initial, courses, grades, provinces, subjects }) {
+export function OnboardingWizard({
+  application: initial,
+  provinces = [],
+  documents = [],
+  selectedCourses = [],
+  account,
+  policy,
+}) {
   const router = useRouter();
   const toast = useToast();
 
+  // The first live province in the administrator's order — read from the
+  // data, never a literal (R6.5).
+  const defaultProvince = provinces.find((p) => p.isActive)?.code ?? "";
+
   const [application, setApplication] = useState(initial);
   const [current, setCurrent] = useState(initial.currentStep ?? ONBOARDING_STEPS[0]);
-  const [stepData, setStepData] = useState(initial.data?.[initial.currentStep] ?? {});
+  const [stepData, setStepData] = useState(() =>
+    initialStepData(initial.currentStep ?? ONBOARDING_STEPS[0], initial.data, defaultProvince),
+  );
+  // The photo is uploaded by its own endpoint, not saved with a step, so the
+  // wizard keeps the current one to show on the profile and review steps.
+  const [avatarUrl, setAvatarUrl] = useState(account?.avatarUrl ?? null);
 
   const index = ONBOARDING_STEPS.indexOf(current);
   const meta = ONBOARDING_STEP_META[current];
@@ -35,10 +51,10 @@ export function OnboardingWizard({ application: initial, courses, grades, provin
   const goTo = useCallback(
     (step) => {
       setCurrent(step);
-      setStepData(application.data?.[step] ?? {});
+      setStepData(initialStepData(step, application.data, defaultProvince));
       window.scrollTo({ top: 0, behavior: "smooth" });
     },
-    [application.data],
+    [application.data, defaultProvince],
   );
 
   const { submit: saveStep, pending: saving, error, fieldErrors, reset } = useSubmit(
@@ -130,10 +146,13 @@ export function OnboardingWizard({ application: initial, courses, grades, provin
               }}
               fieldErrors={fieldErrors}
               application={application}
-              courses={courses}
-              grades={grades}
               provinces={provinces}
-              subjects={subjects}
+              defaultProvince={defaultProvince}
+              documents={documents}
+              selectedCourses={selectedCourses}
+              account={{ ...account, avatarUrl }}
+              onPhotoChange={setAvatarUrl}
+              policy={policy}
             />
           </div>
         </CardBody>
@@ -184,4 +203,25 @@ export function OnboardingWizard({ application: initial, courses, grades, provin
       </p>
     </div>
   );
+}
+
+/**
+ * A step's saved answers, with the defaults a select shows filled in for
+ * real — otherwise a province the applicant never touched would display as
+ * chosen and then fail validation as missing. The service area starts from
+ * the province and city given in the personal step.
+ */
+function initialStepData(step, data = {}, defaultProvince) {
+  const saved = data?.[step] ?? {};
+  if (step === "PERSONAL") {
+    return { ...saved, province: saved.province ?? (defaultProvince || undefined) };
+  }
+  if (step === "LOCATION") {
+    return {
+      ...saved,
+      province: saved.province ?? data?.PERSONAL?.province ?? (defaultProvince || undefined),
+      city: saved.city ?? data?.PERSONAL?.city,
+    };
+  }
+  return saved;
 }

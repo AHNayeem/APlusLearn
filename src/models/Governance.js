@@ -157,6 +157,8 @@ const SeoSchema = new mongoose.Schema(
 
 const ContactSchema = new mongoose.Schema(
   {
+    /** The operator's registered name on the legal pages. Blank → the app name. */
+    legalName: { type: String, trim: true, maxlength: 160, default: defaults.contact.legalName },
     supportEmail: { type: String, trim: true, lowercase: true, maxlength: 254, default: defaults.contact.supportEmail },
     contactEmail: { type: String, trim: true, lowercase: true, maxlength: 254, default: defaults.contact.contactEmail },
     supportPhone: { type: String, trim: true, maxlength: 30, default: defaults.contact.supportPhone },
@@ -484,6 +486,20 @@ const SettingsSchema = new mongoose.Schema(
       min: 0,
       max: 100,
     },
+    /** S2/R27.5: how long after a lesson ends a no-show may be reported. */
+    noShowReportWindowHours: {
+      type: Number,
+      default: DEFAULT_SETTINGS.noShowReportWindowHours,
+      min: 1,
+      max: 720,
+    },
+    /** S4/R27.6: how long after a lesson ends a dispute may be opened. */
+    disputeWindowDays: {
+      type: Number,
+      default: DEFAULT_SETTINGS.disputeWindowDays,
+      min: 1,
+      max: 365,
+    },
     cancellationAbuseThreshold: {
       type: Number,
       default: DEFAULT_SETTINGS.cancellationAbuseThreshold,
@@ -508,6 +524,32 @@ const SettingsSchema = new mongoose.Schema(
     minHourlyRate: { type: Number, default: DEFAULT_SETTINGS.minHourlyRate, min: 0 },
     maxHourlyRate: { type: Number, default: DEFAULT_SETTINGS.maxHourlyRate, min: 1 },
     payoutHoldDays: { type: Number, default: DEFAULT_SETTINGS.payoutHoldDays, min: 0 },
+    /** Verification lifetimes (R11.5, S9) — see DEFAULT_SETTINGS. */
+    backgroundCheckValidityMonths: {
+      type: Number,
+      default: DEFAULT_SETTINGS.backgroundCheckValidityMonths,
+      min: 1,
+      max: 120,
+    },
+    verificationDocumentRetentionDays: {
+      type: Number,
+      default: DEFAULT_SETTINGS.verificationDocumentRetentionDays,
+      min: 1,
+      max: 3650,
+    },
+    /** Public service levels (§12, §33) — quoted on pages and in email, never hard-coded. */
+    applicationReviewBusinessDays: {
+      type: Number,
+      default: DEFAULT_SETTINGS.applicationReviewBusinessDays,
+      min: 1,
+      max: 30,
+    },
+    supportResponseBusinessDays: {
+      type: Number,
+      default: DEFAULT_SETTINGS.supportResponseBusinessDays,
+      min: 1,
+      max: 30,
+    },
     autoPayouts: { type: Boolean, default: DEFAULT_SETTINGS.autoPayouts },
     defaultSearchRadiusKm: { type: Number, default: DEFAULT_SETTINGS.defaultSearchRadiusKm, min: 1 },
     autoModerateReviews: { type: Boolean, default: DEFAULT_SETTINGS.autoModerateReviews },

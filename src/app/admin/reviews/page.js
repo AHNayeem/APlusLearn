@@ -16,6 +16,7 @@ export const dynamic = "force-dynamic";
 
 const TABS = [
   { value: "reported", label: "Reported" },
+  { value: REVIEW_STATUS.PENDING_MODERATION, label: "Awaiting approval" },
   { value: REVIEW_STATUS.PUBLISHED, label: "Published" },
   { value: REVIEW_STATUS.REMOVED, label: "Removed" },
   { value: "", label: "All" },
@@ -27,6 +28,7 @@ export default async function AdminReviewsPage({ searchParams }) {
 
   const { status = "reported", page = "1" } = await searchParams;
   const reported = status === "reported";
+  const awaitingApproval = status === REVIEW_STATUS.PENDING_MODERATION;
   const { items, total, pageSize } = await listReviews(user, {
     status: reported ? undefined : status || undefined,
     reported,
@@ -37,7 +39,7 @@ export default async function AdminReviewsPage({ searchParams }) {
     <DashboardPage>
       <PageHeader
         title="Reviews"
-        description="Moderate reported reviews. Every review is tied to a completed lesson, so none are anonymous."
+        description="Approve reviews awaiting approval and moderate reported ones. Every review is tied to a completed lesson, so none are anonymous."
       />
 
       <LinkTabs
@@ -47,6 +49,13 @@ export default async function AdminReviewsPage({ searchParams }) {
           href: tab.value ? `/admin/reviews?status=${tab.value}` : "/admin/reviews",
         }))}
       />
+
+      {awaitingApproval && items.length > 0 && (
+        <Alert tone="brand" title="These reviews are not public yet" className="mt-6">
+          Review approval is switched on, so new reviews wait here. Approving one publishes it and
+          adds it to the tutor&rsquo;s rating; removing one means it is never shown.
+        </Alert>
+      )}
 
       {reported && items.length > 0 && (
         <Alert tone="warning" title="Reported reviews stay public until you rule on them" className="mt-6">
@@ -60,9 +69,17 @@ export default async function AdminReviewsPage({ searchParams }) {
         {items.length === 0 ? (
           <EmptyState
             icon={<Star className="size-7" />}
-            title={reported ? "No reported reviews" : "No reviews here"}
+            title={
+              reported
+                ? "No reported reviews"
+                : awaitingApproval
+                  ? "No reviews awaiting approval"
+                  : "No reviews here"
+            }
             description={
-              reported ? "Nothing waiting on moderation." : "Try a different status filter."
+              reported || awaitingApproval
+                ? "Nothing waiting on moderation."
+                : "Try a different status filter."
             }
           />
         ) : (
@@ -110,7 +127,9 @@ export default async function AdminReviewsPage({ searchParams }) {
                           ? "warning"
                           : review.status === REVIEW_STATUS.REMOVED
                             ? "danger"
-                            : "success"
+                            : review.status === REVIEW_STATUS.PENDING_MODERATION
+                              ? "brand"
+                              : "success"
                       }
                       size="sm"
                     >
@@ -121,7 +140,11 @@ export default async function AdminReviewsPage({ searchParams }) {
                   {review.title && (
                     <p className="mt-3 text-sm font-bold text-ink-900">{review.title}</p>
                   )}
-                  <p className="mt-1.5 text-sm leading-relaxed text-ink-600">{review.body}</p>
+                  {review.body ? (
+                    <p className="mt-1.5 text-sm leading-relaxed text-ink-600">{review.body}</p>
+                  ) : (
+                    <p className="mt-1.5 text-sm italic text-ink-400">Rating only — no written review.</p>
+                  )}
 
                   {review.reportReason && (
                     <div className="mt-4 rounded-xl border border-warning-100 bg-warning-50 p-3">
@@ -150,7 +173,9 @@ export default async function AdminReviewsPage({ searchParams }) {
                     </div>
                   )}
 
-                  {(reported || review.status === REVIEW_STATUS.REPORTED) && (
+                  {(reported ||
+                    review.status === REVIEW_STATUS.REPORTED ||
+                    review.status === REVIEW_STATUS.PENDING_MODERATION) && (
                     <div className="mt-4 border-t border-ink-100 pt-4">
                       <ReviewModeration review={review} />
                     </div>

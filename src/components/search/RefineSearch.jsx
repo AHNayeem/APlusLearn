@@ -5,18 +5,25 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Search, MapPin } from "lucide-react";
 import { cn } from "@/lib/utils/cn";
 import { Button, Select } from "@/components/ui";
-import { qs } from "@/lib/api/client";
+import { useProvinceCurriculum } from "@/hooks/useProvinceCurriculum";
+import { FILTER_KEYS } from "./SearchFilters";
 
 /**
  * The compact search bar on the results page. Seeded from the current URL so
  * it always reflects the search actually being displayed.
+ *
+ * Grades and subjects follow the province chosen here (R2.3), the typed
+ * words go to the server as `q` to be matched against the curriculum
+ * (R2.5), and a refine keeps everything the visitor already chose — the
+ * course they arrived with and every filter in the rail (R7.4).
  */
-export function RefineSearch({ provinces = [], grades = [], subjects = [], className }) {
+export function RefineSearch({ provinces = [], grades = [], subjects = [], province: currentProvince, className }) {
   const router = useRouter();
   const params = useSearchParams();
+  const curriculum = useProvinceCurriculum({ province: currentProvince, grades, subjects });
 
-  const [query, setQuery] = useState(params.get("courseCode") ?? params.get("q") ?? "");
-  const [province, setProvince] = useState(params.get("province") ?? "ON");
+  const queryFromUrl = () => params.get("q") ?? params.get("courseCode") ?? "";
+  const [query, setQuery] = useState(queryFromUrl);
   const [grade, setGrade] = useState(params.get("grade") ?? "");
   const [subject, setSubject] = useState(params.get("subject") ?? "");
   const [location, setLocation] = useState(params.get("city") ?? params.get("postalCode") ?? "");
@@ -26,34 +33,46 @@ export function RefineSearch({ provinces = [], grades = [], subjects = [], class
   const [lastParams, setLastParams] = useState(params);
   if (lastParams !== params) {
     setLastParams(params);
-    setQuery(params.get("courseCode") ?? params.get("q") ?? "");
-    setProvince(params.get("province") ?? "ON");
+    setQuery(queryFromUrl());
     setGrade(params.get("grade") ?? "");
     setSubject(params.get("subject") ?? "");
     setLocation(params.get("city") ?? params.get("postalCode") ?? "");
   }
+
+  const changeProvince = async (code) => {
+    const tree = await curriculum.setProvince(code);
+    // A grade or subject the new province does not have would silently
+    // match nothing; drop it instead.
+    if (tree && !tree.grades?.some((g) => g.slug === grade)) setGrade("");
+    if (tree && !tree.subjects?.some((s) => s.slug === subject)) setSubject("");
+  };
 
   const submit = (event) => {
     event.preventDefault();
 
     // Preserve the refinements the filter rail owns.
     const next = new URLSearchParams();
-    for (const key of [
-      "mode", "minPrice", "maxPrice", "minRating", "minExperience",
-      "qualifications", "verified", "availability", "distanceKm", "freeIntro", "sort",
-    ]) {
+    for (const key of [...FILTER_KEYS, "sort"]) {
       if (params.get(key)) next.set(key, params.get(key));
     }
 
+    const province = curriculum.province;
+    const sameProvince = province === (params.get("province") ?? currentProvince);
     const trimmed = query.trim();
-    if (/^[A-Za-z]{3}[A-Za-z0-9]{1,5}$/.test(trimmed)) next.set("courseCode", trimmed.toUpperCase());
-    else if (trimmed) next.set("q", trimmed);
+    if (trimmed && trimmed === params.get("courseCode") && sameProvince) {
+      next.set("courseCode", params.get("courseCode"));
+    } else if (trimmed) {
+      next.set("q", trimmed);
+    }
+    // The course they arrived with stays, unless the province changed under it.
+    if (params.get("course") && sameProvince) next.set("course", params.get("course"));
 
     if (province) next.set("province", province);
     if (grade) next.set("grade", grade);
     if (subject) next.set("subject", subject);
 
     if (location.trim()) {
+      // A Canadian postal code starts letter-digit-letter; anything else is a place name.
       const isPostal = /^[A-Za-z]\d[A-Za-z]/.test(location.trim());
       next.set(isPostal ? "postalCode" : "city", location.trim());
     }
@@ -73,7 +92,7 @@ export function RefineSearch({ provinces = [], grades = [], subjects = [], class
             id="refine-q"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Course or code"
+            placeholder="Subject, course or code"
             className={cn(
               "h-11 w-full rounded-xl border-0 bg-white pl-9 pr-3 text-sm",
               "shadow-xs ring-1 ring-inset ring-ink-200 placeholder:text-ink-400",
@@ -83,10 +102,11 @@ export function RefineSearch({ provinces = [], grades = [], subjects = [], class
         </div>
 
         <label htmlFor="refine-province" className="sr-only">Province</label>
-        <Select id="refine-province" value={province} onChange={(e) => setProvince(e.target.value)} className="h-11">
+        <Select id="refine-province" value={curriculum.province} onChange={(e) => changeProvince(e.target.value)} className="h-11">
           {provinces.map((p) => (
             <option key={p.code} value={p.code} disabled={!p.isActive}>
               {p.name}
+              {p.isActive ? "" : " — coming soon"}
             </option>
           ))}
         </Select>
@@ -94,7 +114,7 @@ export function RefineSearch({ provinces = [], grades = [], subjects = [], class
         <label htmlFor="refine-grade" className="sr-only">Grade</label>
         <Select id="refine-grade" value={grade} onChange={(e) => setGrade(e.target.value)} className="h-11">
           <option value="">Any grade</option>
-          {grades.map((g) => (
+          {curriculum.grades.map((g) => (
             <option key={g.id} value={g.slug}>{g.name}</option>
           ))}
         </Select>
@@ -102,7 +122,7 @@ export function RefineSearch({ provinces = [], grades = [], subjects = [], class
         <label htmlFor="refine-subject" className="sr-only">Subject</label>
         <Select id="refine-subject" value={subject} onChange={(e) => setSubject(e.target.value)} className="h-11">
           <option value="">Any subject</option>
-          {subjects.map((s) => (
+          {curriculum.subjects.map((s) => (
             <option key={s.id} value={s.slug}>{s.name}</option>
           ))}
         </Select>

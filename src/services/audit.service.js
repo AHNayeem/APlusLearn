@@ -2,10 +2,23 @@ import "server-only";
 import { AuditLog } from "@/models";
 import { PAGE_SIZES } from "@/constants";
 import { toPlain } from "@/lib/utils/serialize";
+import { clientIp } from "@/lib/security/rate-limit";
 
 /**
- * Append-only audit trail (§35). Writes are fire-and-forget: an audit failure
- * must never break the action the user was performing, but it is logged.
+ * Append-only audit trail (§35).
+ *
+ * Never throws: an audit failure must not undo the action the person was
+ * performing — a suspension that has already been applied is not made safer
+ * by reporting it as failed. But a lost audit row is a gap in the one record
+ * that is supposed to have none, so the failure is logged as an error naming
+ * the action, the entity and the actor (S15) — enough for an operator's log
+ * alerting to page somebody and for the missing row to be reconstructed. The
+ * return value says whether the row was written, for a caller that cares.
+ *
+ * The address is the trusted one from `clientIp` — never the leftmost
+ * `X-Forwarded-For` value, which the client writes (S11).
+ *
+ * @returns {Promise<boolean>}
  */
 export async function recordAudit({
   actor,
@@ -15,19 +28,25 @@ export async function recordAudit({
   metadata,
   request,
 } = {}) {
+  const actorId = actor?.id ?? actor?._id ?? null;
   try {
     await AuditLog.create({
-      actorId: actor?.id ?? actor?._id ?? null,
+      actorId,
       actorRole: actor?.role ?? null,
       action,
       entityType,
       entityId,
       metadata,
-      ip: request?.headers?.get?.("x-forwarded-for")?.split(",")[0]?.trim(),
+      ip: clientIp(request) ?? undefined,
       userAgent: request?.headers?.get?.("user-agent")?.slice(0, 300),
     });
+    return true;
   } catch (error) {
-    console.error("[audit] failed to record", action, error.message);
+    console.error(
+      `[audit] WRITE FAILED — action=${action} entity=${entityType ?? "?"}:${entityId ?? "?"} ` +
+        `actor=${actorId ?? "system"} (${actor?.role ?? "?"}): ${error?.message ?? error}`,
+    );
+    return false;
   }
 }
 

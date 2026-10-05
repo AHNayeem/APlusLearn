@@ -3,7 +3,9 @@
 import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { Send, MoreVertical, Flag, Archive, Ban, CalendarDays, RotateCw, AlertCircle } from "lucide-react";
+import {
+  Send, MoreVertical, Flag, Archive, Ban, CalendarDays, RotateCw, AlertCircle, ShieldCheck, X,
+} from "lucide-react";
 import { cn } from "@/lib/utils/cn";
 import { api, ApiError } from "@/lib/api/client";
 import { useSubmit } from "@/hooks/useAsync";
@@ -38,6 +40,12 @@ import { mergeMessages, newClientId, newestStoredAt } from "./thread";
  *     files, and Retry re-sends under the same `clientId`. If the first
  *     attempt had in fact landed, the server answers with that message
  *     instead of storing a second.
+ *
+ * Two things in a thread are not a person's speech bubble. A SYSTEM message
+ * (a lesson confirmed, cancelled or moved) is a centred event row. And a send
+ * whose contact details the server removed (R17.7) comes back with a
+ * `warning`, shown above the composer until it is dismissed — the sender
+ * should know why their message reads differently from what they typed.
  */
 export function ConversationView({ conversation, messages: initialMessages, bookings, viewerId }) {
   const router = useRouter();
@@ -49,6 +57,7 @@ export function ConversationView({ conversation, messages: initialMessages, book
   const [body, setBody] = useState("");
   const [files, setFiles] = useState([]);
   const [reportOpen, setReportOpen] = useState(false);
+  const [warning, setWarning] = useState(null);
   const endRef = useRef(null);
   // Sends go out one after another, so the thread's order is the order typed.
   const sendQueue = useRef(Promise.resolve());
@@ -161,6 +170,7 @@ export function ConversationView({ conversation, messages: initialMessages, book
         });
       }
       setMessages((current) => mergeMessages(current, [result.message]));
+      if (result.warning) setWarning(result.warning);
       // The stream brings the inbox and badges up to date by itself.
       if (!live) router.refresh();
     } catch (error) {
@@ -352,14 +362,30 @@ export function ConversationView({ conversation, messages: initialMessages, book
             !previous ||
             new Date(previous.createdAt).toDateString() !==
               new Date(message.createdAt).toDateString();
+          const dateRow = showDate && (
+            <p className="my-4 text-center text-xs font-medium text-ink-400">
+              {formatDate(message.createdAt, { weekday: "long" })}
+            </p>
+          );
+
+          if (message.kind === "SYSTEM") {
+            return (
+              <div key={message.id}>
+                {dateRow}
+                <div className="flex justify-center">
+                  <p className="inline-flex max-w-[90%] items-start gap-2 rounded-full border border-ink-200 bg-ink-50 px-3 py-1.5 text-center text-xs text-ink-600">
+                    <CalendarDays className="mt-px size-3.5 shrink-0 text-ink-400" aria-hidden="true" />
+                    <span className="whitespace-pre-wrap break-words">{message.body}</span>
+                    <span className="shrink-0 text-ink-400">{formatTime(message.createdAt)}</span>
+                  </p>
+                </div>
+              </div>
+            );
+          }
 
           return (
             <div key={message.id}>
-              {showDate && (
-                <p className="my-4 text-center text-xs font-medium text-ink-400">
-                  {formatDate(message.createdAt, { weekday: "long" })}
-                </p>
-              )}
+              {dateRow}
               <div className={cn("flex", mine ? "justify-end" : "justify-start")}>
                 <div
                   className={cn(
@@ -426,6 +452,28 @@ export function ConversationView({ conversation, messages: initialMessages, book
       </div>
 
       <div className="border-t border-ink-200 p-4">
+        {warning && !conversation.isBlocked && (
+          <Alert
+            tone="warning"
+            className="mb-3"
+            title={warning.masked ? "We removed contact details from your message" : "Keep it on APlus Learn"}
+            action={
+              <button
+                type="button"
+                onClick={() => setWarning(null)}
+                className="rounded-lg p-1 text-warning-700 hover:bg-warning-100"
+              >
+                <X className="size-4" aria-hidden="true" />
+                <span className="sr-only">Dismiss</span>
+              </button>
+            }
+          >
+            {warning.message}{" "}
+            <Link href={warning.href} className="font-semibold underline">
+              Community standards
+            </Link>
+          </Alert>
+        )}
         {conversation.isBlocked ? (
           <Alert tone="neutral">
             You&rsquo;ve blocked this conversation. Unblock it to send messages again.
@@ -472,6 +520,16 @@ export function ConversationView({ conversation, messages: initialMessages, book
               <Send className="size-4" />
             </Button>
             </div>
+            <p className="flex items-center gap-1.5 text-[11px] text-ink-400">
+              <ShieldCheck className="size-3.5 shrink-0" aria-hidden="true" />
+              <span>
+                Keep messages, bookings and payments on APlus Learn — phone numbers, emails and
+                social handles are removed.{" "}
+                <Link href="/legal/community-standards" className="underline hover:text-ink-600">
+                  Why
+                </Link>
+              </span>
+            </p>
           </form>
         )}
       </div>

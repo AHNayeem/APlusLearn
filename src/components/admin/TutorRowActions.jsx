@@ -137,6 +137,7 @@ function BadgeModal({ open, onClose, tutor }) {
   const [type, setType] = useState(VERIFICATION_TYPES.IDENTITY);
   const [action, setAction] = useState("GRANT");
   const [reason, setReason] = useState("");
+  const [expiresAt, setExpiresAt] = useState("");
 
   const held = tutor.verifiedTypes ?? [];
 
@@ -145,6 +146,7 @@ function BadgeModal({ open, onClose, tutor }) {
       type,
       action,
       reason: reason || undefined,
+      ...(action === "GRANT" && expiresAt ? { expiresAt } : {}),
     });
     toast.success(action === "GRANT" ? "Badge granted" : "Badge revoked");
     onClose();
@@ -204,6 +206,26 @@ function BadgeModal({ open, onClose, tutor }) {
             ))}
           </Select>
         </Field>
+
+        {action === "GRANT" && (
+          <Field
+            label="Expires"
+            htmlFor="badge-expiry"
+            hint={
+              type === VERIFICATION_TYPES.BACKGROUND_CHECK
+                ? "Leave blank to use the platform's standard validity period for background checks."
+                : "Optional — the date the evidence stops being current."
+            }
+          >
+            <input
+              id="badge-expiry"
+              type="date"
+              value={expiresAt}
+              onChange={(e) => setExpiresAt(e.target.value)}
+              className="h-10 w-full rounded-xl border-0 bg-white px-3 text-sm ring-1 ring-inset ring-ink-200 focus:ring-2 focus:ring-brand-500 focus:outline-none"
+            />
+          </Field>
+        )}
 
         <Field label="Reason" htmlFor="badge-reason" hint="Recorded in the audit log.">
           <Textarea

@@ -1,8 +1,9 @@
 import { connectToDatabase } from "@/lib/db/connect";
 import { enforceRole } from "@/lib/auth/guards";
+import { objectId } from "@/lib/validation/common";
 import { LEARNER_ROLES } from "@/constants";
 import { listConversations, getOrCreateConversation } from "@/services/message.service";
-import { redirect } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { Card, CardBody } from "@/components/ui";
 import { DashboardPage, PageHeader } from "@/components/layout/DashboardShell";
 import { LiveConversationList } from "@/components/messaging/LiveConversationList";
@@ -15,12 +16,16 @@ export default async function MessagesPage({ searchParams }) {
   await connectToDatabase();
 
   // Arriving from a tutor profile with ?tutor=… opens (or creates) that thread.
+  // The service decides whether this tutor can be contacted at all (R17.1);
+  // one that cannot is simply not found, the same answer search would give.
   const { tutor } = await searchParams;
   if (tutor) {
-    const conversation = await getOrCreateConversation({
-      learnerUserId: user.id,
-      tutorProfileId: tutor,
-    });
+    const conversation = objectId.safeParse(tutor).success
+      ? await getOrCreateConversation({ learnerUserId: user.id, tutorProfileId: tutor }).catch(
+          () => null,
+        )
+      : null;
+    if (!conversation) notFound();
     redirect(`/messages/${conversation._id}`);
   }
 

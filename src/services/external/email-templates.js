@@ -64,7 +64,7 @@ export function escapeHtml(value) {
  * subject; hiding it visually while leaving it in the DOM is the standard
  * technique and keeps it available to screen readers.
  */
-function layout(brand, { preheader, heading, body = [], details = [], code, cta, footnote }) {
+function layout(brand, { preheader, heading, body = [], details = [], notes, code, cta, footnote }) {
   const BRAND = palette(brand);
   // A one-time code is set apart and spaced so it can be read and typed
   // without mistaking one digit for its neighbour.
@@ -82,6 +82,15 @@ function layout(brand, { preheader, heading, body = [], details = [], code, cta,
           )
           .join("")}
       </table>`
+    : "";
+
+  // A short titled list after the details — the cancellation terms on a
+  // confirmation (R24.9). Text only, escaped like everything else.
+  const notesBlock = notes?.items?.length
+    ? `<p style="margin:0 0 6px;font:600 13px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;color:${BRAND.ink}">${escapeHtml(notes.heading)}</p>
+      <ul style="margin:0 0 24px;padding-left:18px;font:400 13px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;color:${BRAND.muted}">
+        ${notes.items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
+      </ul>`
     : "";
 
   const button = cta
@@ -116,6 +125,7 @@ function layout(brand, { preheader, heading, body = [], details = [], code, cta,
     ${body.map((p) => `<p style="margin:0 0 14px;font:400 15px/1.65 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;color:${BRAND.ink}">${escapeHtml(p)}</p>`).join("")}
     ${codeBlock}
     ${rows}
+    ${notesBlock}
     ${button}
     ${footnote ? `<p style="margin:0;font:400 13px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;color:${BRAND.muted}">${escapeHtml(footnote)}</p>` : ""}
   </td></tr>
@@ -134,7 +144,7 @@ function layout(brand, { preheader, heading, body = [], details = [], code, cta,
 }
 
 /** The plain-text twin of `layout`, built from the same pieces. */
-function plain(brand, { heading, body = [], details = [], code, cta, footnote }) {
+function plain(brand, { heading, body = [], details = [], notes, code, cta, footnote }) {
   return [
     heading,
     "",
@@ -142,6 +152,8 @@ function plain(brand, { heading, body = [], details = [], code, cta, footnote })
     code ? `\n    ${code}\n` : null,
     details.length ? "" : null,
     ...details.map(([label, value]) => `${label}: ${value}`),
+    notes?.items?.length ? `\n${notes.heading}` : null,
+    ...(notes?.items ?? []).map((item) => `- ${item}`),
     cta ? `\n${cta.label}: ${cta.href}` : null,
     footnote ? `\n${footnote}` : null,
     `\n— The ${brand.appName} team`,
@@ -233,21 +245,30 @@ export function emailTemplatesFor(brand = DEFAULT_EMAIL_BRAND) {
 
     // --- Bookings ------------------------------------------------------------
 
+    /**
+     * Sent to both parties once a lesson is paid for (R24.1, R24.7–R24.9).
+     * Every figure arrives resolved: `amountLabel` is what was actually
+     * charged (or, for the tutor, earned), `policyLines` come from Settings,
+     * and `path` is the recipient's own lesson page.
+     */
     bookingConfirmed: ({ firstName, booking }) =>
       email(`Lesson confirmed — ${booking.courseName} on ${booking.dateLabel}`, {
         preheader: `${booking.dateLabel} at ${booking.timeLabel}`,
-        heading: "Your lesson is confirmed",
+        heading: booking.forTutor ? "You have a new lesson" : "Your lesson is confirmed",
         body: [`Hi ${firstName},`, "Everything is booked. Here are the details."],
         details: [
           ["Course", `${booking.courseName}${booking.courseCode ? ` (${booking.courseCode})` : ""}`],
           ["With", booking.tutorName],
           ["When", `${booking.dateLabel} at ${booking.timeLabel}`],
           ["Length", booking.durationLabel],
-          ["Type", booking.modeLabel],
-          ["Total", booking.totalLabel],
+          ["Where", booking.whereLabel ?? booking.modeLabel],
+          [booking.amountHeading ?? "Total", booking.amountLabel ?? booking.totalLabel],
           ["Reference", booking.reference],
         ],
-        cta: { label: "View the lesson", href: `${baseUrl()}/bookings/${booking.id}` },
+        notes: booking.policyLines?.length
+          ? { heading: "Cancellation policy", items: booking.policyLines }
+          : undefined,
+        cta: { label: "View the lesson", href: `${baseUrl()}${booking.path ?? `/bookings/${booking.id}`}` },
         footnote: booking.joinNote ?? "You'll find the joining details on the lesson page.",
       }),
 
@@ -262,7 +283,9 @@ export function emailTemplatesFor(brand = DEFAULT_EMAIL_BRAND) {
           ["Refund", refundLabel ?? "None"],
           ["Reference", booking.reference],
         ],
-        cta: { label: "Find another time", href: `${baseUrl()}/bookings` },
+        cta: booking.forTutor
+          ? { label: "View your lessons", href: `${baseUrl()}/tutor/bookings` }
+          : { label: "Find another time", href: `${baseUrl()}/bookings` },
         footnote: "Refunds are returned to the original payment method and usually arrive within 5–10 business days.",
       }),
 
@@ -281,7 +304,7 @@ export function emailTemplatesFor(brand = DEFAULT_EMAIL_BRAND) {
           ["Length", booking.durationLabel],
           ["Reference", booking.reference],
         ],
-        cta: { label: "View the lesson", href: `${baseUrl()}/bookings/${booking.id}` },
+        cta: { label: "View the lesson", href: `${baseUrl()}${booking.path ?? `/bookings/${booking.id}`}` },
       }),
 
     /**

@@ -1,11 +1,13 @@
 import "server-only";
-import { Availability, Booking, TutorProfile } from "@/models";
-import { BLOCKING_BOOKING_STATUSES } from "@/constants";
+import { maskLearnersForTutor } from "@/lib/privacy/learner";
+import { Types } from "mongoose";
+import { Availability, Booking, TutorProfile, GroupSession } from "@/models";
+import { BLOCKING_BOOKING_STATUSES, GROUP_SESSION_STATUS } from "@/constants";
 import { NotFoundError, BusinessRuleError } from "@/lib/api/errors";
 import { toPlain, compact } from "@/lib/utils/serialize";
 import { addDays, rangesOverlap } from "@/lib/utils/time";
-import { generateSlots, firstAvailableSlot } from "@/lib/booking/slots";
-import { externalBusyPeriods } from "./calendar.service";
+import { generateSlots, findFirstSlot } from "@/lib/booking/slots";
+import { externalBusyPeriodsForTutors } from "./calendar.service";
 import { getSettings } from "./settings.service";
 
 /**
@@ -34,6 +36,69 @@ export async function getOrCreateAvailability(tutorProfileId, userId, timeZone) 
 }
 
 /**
+ * Group sessions that occupy the tutor's time. A published session holds the
+ * hour whether or not anyone has joined yet — otherwise a one-to-one lesson
+ * could be sold on top of it and the first family to join would find the
+ * tutor double-booked (R14.4).
+ */
+const LIVE_GROUP_STATUSES = [GROUP_SESSION_STATUS.PUBLISHED, GROUP_SESSION_STATUS.CONFIRMED];
+
+const asObjectId = (id) => (id instanceof Types.ObjectId ? id : new Types.ObjectId(String(id)));
+
+/**
+ * Everything that occupies each tutor's time between `from` and `to`: their
+ * blocking bookings, their live group sessions and the busy time of any
+ * connected external calendar (§18, §41 Phase 2). Returns a Map of
+ * tutorProfileId → [{ startAt, endAt }].
+ *
+ * The one definition of "busy". Slot display, the booking claim, a
+ * reschedule, publishing a group session and search all read it, so none of
+ * them can offer or accept an hour another one considers taken.
+ * `excludeBookingId` leaves out the lesson being moved by a reschedule.
+ */
+export async function busyPeriodsForTutors(tutorProfileIds, { from = new Date(), to, excludeBookingId } = {}) {
+  const ids = [...new Set((tutorProfileIds ?? []).filter(Boolean).map(String))];
+  const map = new Map(ids.map((id) => [id, []]));
+  if (!ids.length) return map;
+
+  const until = to ?? addDays(from, 60);
+  const objectIds = ids.map(asObjectId);
+
+  const bookingQuery = {
+    tutorProfileId: { $in: objectIds },
+    status: { $in: BLOCKING_BOOKING_STATUSES },
+    startAt: { $lt: until },
+    endAt: { $gt: from },
+  };
+  if (excludeBookingId) bookingQuery._id = { $ne: asObjectId(excludeBookingId) };
+
+  const [bookings, sessions, external] = await Promise.all([
+    Booking.find(bookingQuery).select("tutorProfileId startAt endAt").lean(),
+    GroupSession.find({
+      tutorProfileId: { $in: objectIds },
+      status: { $in: LIVE_GROUP_STATUSES },
+      startAt: { $lt: until },
+      endAt: { $gt: from },
+    })
+      .select("tutorProfileId startAt endAt")
+      .lean(),
+    externalBusyPeriodsForTutors(objectIds, { from, to: until }),
+  ]);
+
+  for (const row of [...bookings, ...sessions]) {
+    map.get(String(row.tutorProfileId))?.push({ startAt: row.startAt, endAt: row.endAt });
+  }
+  for (const [id, periods] of external) map.get(id)?.push(...periods);
+  return map;
+}
+
+/** `busyPeriodsForTutors` for one tutor. */
+export async function tutorBusyPeriods(tutorProfileId, options = {}) {
+  const map = await busyPeriodsForTutors([tutorProfileId], options);
+  return map.get(String(tutorProfileId)) ?? [];
+}
+
+/**
  * Bookable slots for a tutor. `bookings` are loaded for exactly the window
  * being rendered so the query stays bounded however far ahead we look.
  */
@@ -53,25 +118,14 @@ export async function getBookableSlots(
   const fromDate = from ? new Date(`${from}T00:00:00Z`) : new Date();
   const windowEnd = addDays(fromDate, days + 1);
 
-  // A tutor's other commitments are not in this platform, and a slot offered
-  // over one is a slot that gets cancelled. Connected calendars contribute
-  // busy periods in exactly the shape a booking does, so the slot generator
-  // needs to know nothing about calendars (§18, §41 Phase 2).
-  const [bookings, external] = await Promise.all([
-    Booking.find({
-      tutorProfileId,
-      status: { $in: BLOCKING_BOOKING_STATUSES },
-      startAt: { $lt: windowEnd },
-      endAt: { $gt: fromDate },
-    })
-      .select("startAt endAt")
-      .lean(),
-    externalBusyPeriods(tutorProfileId, { from: fromDate, to: windowEnd }),
-  ]);
+  // A tutor's other commitments — bookings, group sessions, a connected
+  // calendar — arrive in one shape, so the slot generator needs to know
+  // nothing about where they came from (§18, §41 Phase 2).
+  const busy = await tutorBusyPeriods(tutorProfileId, { from: fromDate, to: windowEnd });
 
   const generated = generateSlots({
     availability,
-    bookings: [...bookings, ...external],
+    bookings: busy,
     durationMinutes,
     fromDate,
     days,
@@ -229,17 +283,75 @@ export async function removeException(userId, exceptionId) {
 }
 
 /**
- * Cache the soonest bookable instant on the profile so search result cards
- * can show "next available" without generating slots per card (§14).
+ * The first open slot of each tutor that `acceptFor(availability)` accepts,
+ * computed from their real calendar (§8, §9).
+ *
+ * This is how search answers "who can teach today", "this weekend" or
+ * "Tuesday at 4:30" and what a result card shows as next available: the
+ * same weekly rules, blocked periods, notice, horizon and busy time the
+ * booking calendar uses — never the weekly template alone, and never a
+ * cached value that a booking made since could have made wrong.
+ *
+ * Returns a Map of tutorProfileId → slot (`{ startAt, minutes, dayKey,
+ * weekday }` in the tutor's zone) or null.
+ */
+export async function firstOpenSlots(
+  tutorProfileIds,
+  { from = new Date(), days, durationMinutes = 60, acceptFor } = {},
+) {
+  const ids = [...new Set((tutorProfileIds ?? []).filter(Boolean).map(String))];
+  const result = new Map(ids.map((id) => [id, null]));
+  if (!ids.length) return result;
+
+  const settings = await getSettings();
+  const horizonDays = settings.bookingHorizonDays ?? 60;
+  const span = Math.min(days ?? horizonDays, horizonDays + 1);
+  const until = addDays(from, span + 1);
+
+  const [availabilities, busy] = await Promise.all([
+    Availability.find({ tutorProfileId: { $in: ids.map(asObjectId) } }).lean(),
+    busyPeriodsForTutors(ids, { from, to: until }),
+  ]);
+
+  for (const availability of availabilities) {
+    const id = String(availability.tutorProfileId);
+    if (!availability.weeklyRules?.length) continue;
+    const slot = findFirstSlot(
+      {
+        availability,
+        bookings: busy.get(id) ?? [],
+        durationMinutes,
+        fromDate: from,
+        days: span,
+        minNoticeHours: settings.minimumBookingNoticeHours,
+        horizonDays,
+      },
+      acceptFor ? acceptFor(availability) : undefined,
+    );
+    result.set(id, slot);
+  }
+  return result;
+}
+
+/** Each tutor's soonest bookable instant (a Date) or null. */
+export async function nextAvailableFor(tutorProfileIds) {
+  const slots = await firstOpenSlots(tutorProfileIds);
+  return new Map([...slots].map(([id, slot]) => [id, slot ? new Date(slot.startAt) : null]));
+}
+
+/**
+ * Keep the stored copy of a tutor's soonest bookable instant current.
+ *
+ * Search no longer reads it — cards and the "soonest available" sort compute
+ * it live (`nextAvailableFor`) — but it is still written on every change to
+ * availability or bookings, so anything that does read it (an export, an
+ * admin list) is not stale either.
  */
 export async function refreshNextAvailable(tutorProfileId) {
-  const { days } = await getBookableSlots(tutorProfileId, { days: 21, durationMinutes: 60 });
-  const slot = firstAvailableSlot(days);
-  await TutorProfile.updateOne(
-    { _id: tutorProfileId },
-    { $set: { nextAvailableAt: slot ? new Date(slot.startAt) : null } },
-  );
-  return slot;
+  const map = await nextAvailableFor([tutorProfileId]);
+  const next = map.get(String(tutorProfileId)) ?? null;
+  await TutorProfile.updateOne({ _id: tutorProfileId }, { $set: { nextAvailableAt: next } });
+  return next ? { startAt: next.toISOString() } : null;
 }
 
 /** The tutor's own calendar view: availability plus real bookings. */
@@ -261,7 +373,8 @@ export async function getTutorCalendar(tutorProfileId, { from, days = 7 } = {}) 
 
   return {
     availability: availability ? toPlain(availability) : null,
-    bookings: toPlain(bookings),
+    // The calendar is the tutor's own view, so learners are masked (S5).
+    bookings: maskLearnersForTutor(toPlain(bookings)),
     from: fromDate.toISOString(),
     to: toDate.toISOString(),
   };

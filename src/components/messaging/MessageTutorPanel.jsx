@@ -10,6 +10,23 @@ import {
 } from "@/components/ui";
 
 /**
+ * "Usually replies within 2 hours", from the tutor's measured reply time
+ * (R10.8) — or nothing, when there is no measurement yet. A claim about how
+ * fast somebody answers is only worth showing if it was observed.
+ */
+function replyTimeLabel(minutes) {
+  if (minutes == null || !Number.isFinite(Number(minutes))) return null;
+  const m = Number(minutes);
+  if (m < 60) return "Usually replies within an hour";
+  if (m < 24 * 60) {
+    const hours = Math.ceil(m / 60);
+    return `Usually replies within ${hours} hour${hours === 1 ? "" : "s"}`;
+  }
+  const days = Math.ceil(m / (24 * 60));
+  return `Usually replies within ${days} day${days === 1 ? "" : "s"}`;
+}
+
+/**
  * Contact form on a tutor profile (§21). Starting a thread creates the
  * conversation server-side, so a parent never needs to find the tutor twice.
  */
@@ -20,7 +37,10 @@ export function MessageTutorPanel({ tutor, user }) {
 
   const { submit, pending, error, fieldErrors } = useSubmit(async () => {
     const result = await api.post("/api/messages", { tutorProfileId: tutor.id, body });
-    toast.success("Message sent", `${tutor.firstName} will be notified.`);
+    // Contact details are removed server-side (R17.7); say so, rather than let
+    // the thread show something other than what was typed without a reason.
+    if (result.warning) toast.info("Message sent — contact details removed", result.warning.message);
+    else toast.success("Message sent", `${tutor.firstName} will be notified.`);
     router.push(`/messages/${result.conversationId}`);
     return result;
   });
@@ -79,12 +99,13 @@ export function MessageTutorPanel({ tutor, user }) {
             />
           </Field>
 
+          <p className="text-xs text-ink-500">
+            Keep contact and payment on APlus Learn — phone numbers, emails and social handles are
+            removed from messages.
+          </p>
+
           <div className="flex items-center justify-between gap-3">
-            <p className="text-xs text-ink-500">
-              {tutor.stats?.responseTimeMinutes
-                ? "Usually replies within a few hours"
-                : "New tutors often reply quickly"}
-            </p>
+            <p className="text-xs text-ink-500">{replyTimeLabel(tutor.stats?.responseTimeMinutes)}</p>
             <Button
               type="submit"
               loading={pending}

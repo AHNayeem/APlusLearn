@@ -3,7 +3,11 @@ import { ArrowRight, MessageSquare } from "lucide-react";
 import { Button, Card, CardBody, Reveal } from "@/components/ui";
 import { PageHero } from "@/components/marketing/PageHero";
 import { Section } from "@/components/home/Sections";
-import { HOME_FAQS } from "@/components/home/Sections";
+import { connectToDatabase } from "@/lib/db/connect";
+import { getAppConfig } from "@/services/settings.service";
+import { homeFaqs, hoursLabel, refundPhrase } from "@/constants";
+import { supportResponseLabel } from "@/lib/utils/format";
+import { JsonLd } from "@/components/seo/JsonLd";
 
 export const metadata = {
   title: "Frequently asked questions",
@@ -12,7 +16,8 @@ export const metadata = {
   alternates: { canonical: "/faq" },
 };
 
-const GROUPS = [
+/** The FAQ, grouped, with the live terms in every answer (R2.18, R33.10). */
+const buildGroups = (HOME_FAQS, policy) => [
   {
     title: "Getting started",
     faqs: HOME_FAQS.filter((f) =>
@@ -49,7 +54,9 @@ const GROUPS = [
       },
       {
         q: "How do refunds work?",
-        a: "Cancel more than 24 hours before and you're refunded in full automatically. Inside 24 hours, the late-cancellation rate applies. If the tutor cancels or doesn't attend, you're refunded in full regardless of timing.",
+        a: policy.freeCancellationWindowHours > 0
+          ? `Cancel more than ${hoursLabel(policy.freeCancellationWindowHours)} before and you're refunded in full automatically. Inside that window you get ${refundPhrase(policy.lateCancellationRefundPercent)}. If the tutor cancels you're refunded in full; if the tutor doesn't attend you get ${refundPhrase(policy.tutorNoShowRefundPercent)} once our team has reviewed it.`
+          : `You can cancel for a full refund until the lesson starts. If the tutor cancels you're refunded in full; if the tutor doesn't attend you get ${refundPhrase(policy.tutorNoShowRefundPercent)} once our team has reviewed it.`,
       },
       {
         q: "Can I get a receipt?",
@@ -87,7 +94,11 @@ const GROUPS = [
   },
 ];
 
-export default function FaqPage() {
+export default async function FaqPage() {
+  await connectToDatabase();
+  const { policy, branding } = await getAppConfig();
+  const GROUPS = buildGroups(homeFaqs({ appName: branding?.appName, policy }), policy);
+  const reply = supportResponseLabel(policy);
   const allFaqs = GROUPS.flatMap((g) => g.faqs);
 
   return (
@@ -95,7 +106,7 @@ export default function FaqPage() {
       <PageHero
         eyebrow="FAQ"
         title="Questions, answered"
-        description="If something isn't covered here, our support team replies within one business day."
+        description={`If something isn't covered here, our support team usually replies within ${reply}.`}
       />
 
       <Section tone="muted">
@@ -154,7 +165,7 @@ export default function FaqPage() {
                   <MessageSquare className="size-5 text-brand-600" />
                   <h3 className="mt-3 text-sm font-bold text-ink-900">Still stuck?</h3>
                   <p className="mt-1.5 text-sm leading-relaxed text-ink-500">
-                    We reply within one business day.
+                    We usually reply within {reply}.
                   </p>
                   <Button
                     href="/support"
@@ -173,10 +184,8 @@ export default function FaqPage() {
       </Section>
 
       {/* Full FAQ structured data for search results (§29). */}
-      <script
-        type="application/ld+json"
-        dangerouslySetInnerHTML={{
-          __html: JSON.stringify({
+      <JsonLd
+        data={{
             "@context": "https://schema.org",
             "@type": "FAQPage",
             mainEntity: allFaqs.map((faq) => ({
@@ -184,8 +193,7 @@ export default function FaqPage() {
               name: faq.q,
               acceptedAnswer: { "@type": "Answer", text: faq.a },
             })),
-          }),
-        }}
+          }}
       />
     </>
   );

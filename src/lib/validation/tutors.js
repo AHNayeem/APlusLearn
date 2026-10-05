@@ -4,6 +4,7 @@ import {
   MEETING_PROVIDERS,
   IN_PERSON_LOCATIONS,
   QUALIFICATION_TYPES,
+  OFFERED_QUALIFICATION_TYPES,
   VERIFICATION_TYPES,
   TUTOR_STATUS,
 } from "@/constants";
@@ -14,6 +15,45 @@ import {
 } from "./common";
 
 const year = z.coerce.number().int().min(1950).max(new Date().getFullYear() + 8);
+
+/**
+ * Qualification categories (§8, §13, R13.5).
+ *
+ * A new answer — an onboarding step — may only use the categories the forms
+ * offer. An edit of something already stored also accepts the legacy ones, so
+ * a tutor whose profile predates the current list can still save it;
+ * `scripts/migrate-qualifications.mjs` moves stored values across.
+ */
+const offeredQualification = z.enum(OFFERED_QUALIFICATION_TYPES, {
+  message: "Choose from the current list of qualifications.",
+});
+const storedQualification = z.enum(Object.values(QUALIFICATION_TYPES));
+
+/** Free-text credentials beyond the fixed list — short and bounded (R13.5). */
+export const OTHER_CREDENTIALS_LIMITS = { max: 10, maxLength: 120 };
+const otherCredentials = z
+  .array(
+    z
+      .string()
+      .trim()
+      .min(2, "Describe the credential in a few words.")
+      .max(OTHER_CREDENTIALS_LIMITS.maxLength, `Keep each credential under ${OTHER_CREDENTIALS_LIMITS.maxLength} characters.`),
+  )
+  .max(OTHER_CREDENTIALS_LIMITS.max, `List up to ${OTHER_CREDENTIALS_LIMITS.max} other credentials.`);
+
+const octNumber = z
+  .string()
+  .trim()
+  .regex(/^\d{6}$/, "An OCT number is six digits.")
+  .optional()
+  .or(z.literal("").transform(() => undefined));
+
+/**
+ * An administrator's expiry date for a badge: a calendar date from a date
+ * input, or a full timestamp. Whether it is in the future is the service's
+ * call, against its own clock.
+ */
+const badgeExpiry = z.union([z.iso.date(), z.iso.datetime({ offset: true })]);
 
 export const educationEntrySchema = z
   .object({
@@ -86,15 +126,9 @@ export const onboardingStepSchemas = {
   }),
 
   QUALIFICATIONS: z.object({
-    qualifications: z
-      .array(z.enum(Object.values(QUALIFICATION_TYPES)))
-      .min(1, "Select at least one qualification."),
-    octNumber: z
-      .string()
-      .trim()
-      .regex(/^\d{6}$/, "An OCT number is six digits.")
-      .optional()
-      .or(z.literal("").transform(() => undefined)),
+    qualifications: z.array(offeredQualification).min(1, "Select at least one qualification."),
+    octNumber,
+    otherCredentials: otherCredentials.default([]),
     yearsExperience: z.coerce.number().int().min(0).max(60),
     experience: z.array(experienceEntrySchema).default([]),
   }),
@@ -127,9 +161,12 @@ export const onboardingStepSchemas = {
     travelRadiusKm: z.coerce.number().int().min(0).max(200).default(15),
   }),
 
+  // The platform's rate range is a setting (`minHourlyRate` / `maxHourlyRate`),
+  // so it is enforced by the service against the stored settings rather than
+  // frozen into this schema (R13.9).
   PRICING: z
     .object({
-      hourlyRateCents: cents.refine((v) => v >= 1500, "The minimum rate is $15/hour."),
+      hourlyRateCents: cents.refine((v) => v > 0, "Enter your hourly rate."),
       offersFreeIntro: z.boolean().default(false),
       trialRateCents: cents.optional(),
       acceptingNewStudents: z.boolean().default(true),
@@ -189,7 +226,9 @@ export const updateTutorProfileSchema = z.object({
   gallery: z.array(mediaUrl).max(6, "Up to six photos.").optional(),
   education: z.array(educationEntrySchema).optional(),
   experience: z.array(experienceEntrySchema).optional(),
-  qualifications: z.array(z.enum(Object.values(QUALIFICATION_TYPES))).optional(),
+  qualifications: z.array(storedQualification).min(1, "Select at least one qualification.").optional(),
+  octNumber,
+  otherCredentials: otherCredentials.optional(),
   yearsExperience: z.coerce.number().int().min(0).max(60).optional(),
   courses: z.array(taughtCourseSchema).min(1).optional(),
   lessonModes: z.array(z.enum(Object.values(LESSON_MODES))).min(1).optional(),
@@ -216,6 +255,16 @@ export const reviewApplicationSchema = z
     ]),
     message: z.string().trim().max(1500).optional(),
     grantBadges: z.array(z.enum(Object.values(VERIFICATION_TYPES))).default([]),
+    /**
+     * Per-badge expiry the reviewer chose. A Background Check granted without
+     * one gets the `backgroundCheckValidityMonths` default (R11.5).
+     */
+    badgeExpiresAt: z.partialRecord(z.enum(Object.values(VERIFICATION_TYPES)), badgeExpiry).optional(),
+    /**
+     * Education entries the reviewer checked against a document (R10.11).
+     * When present it is the complete list — an entry left out is unverified.
+     */
+    verifiedEducationIds: z.array(objectId).max(30).optional(),
   })
   .refine(
     (d) => d.decision === TUTOR_STATUS.APPROVED || (d.message && d.message.length >= 10),
@@ -227,7 +276,9 @@ export const verificationDecisionSchema = z
     status: z.enum(["APPROVED", "REJECTED", "INFO_REQUESTED"]),
     note: z.string().trim().max(1000).optional(),
     referenceNumber: z.string().trim().max(60).optional(),
-    expiresAt: z.iso.datetime({ offset: true }).optional(),
+    expiresAt: badgeExpiry.optional(),
+    /** With an approved EDUCATION record: the entries the document proves. */
+    educationEntryIds: z.array(objectId).max(30).optional(),
   })
   .refine((d) => d.status === "APPROVED" || (d.note && d.note.length >= 5), {
     message: "Add a note explaining the decision.",
@@ -238,6 +289,10 @@ export const badgeMutationSchema = z.object({
   type: z.enum(Object.values(VERIFICATION_TYPES)),
   action: z.enum(["GRANT", "REVOKE"]),
   reason: z.string().trim().max(500).optional(),
+  /** A grant's expiry; Background Check defaults from settings (R11.5, R28.8). */
+  expiresAt: badgeExpiry.optional().or(z.literal("").transform(() => undefined)),
+  /** For an EDUCATION grant: the entries the evidence covers (R10.11). */
+  educationEntryIds: z.array(objectId).max(30).optional(),
 });
 
 /**

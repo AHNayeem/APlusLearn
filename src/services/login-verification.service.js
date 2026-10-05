@@ -1,7 +1,7 @@
 import "server-only";
 import { randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import { User, AuthToken, AUTH_TOKEN_PURPOSE, TrustedDevice } from "@/models";
-import { USER_STATUS, AUDIT_ACTIONS, EMAIL_CATEGORIES, LOGIN_VERIFICATION } from "@/constants";
+import { BLOCKED_USER_STATUSES, AUDIT_ACTIONS, EMAIL_CATEGORIES, LOGIN_VERIFICATION } from "@/constants";
 import { hashToken } from "@/lib/auth/tokens";
 import {
   keyedDigest,
@@ -140,7 +140,7 @@ function readChallenge(challengeToken) {
  */
 async function challengeUser(challenge) {
   const user = await User.findById(challenge.uid).lean();
-  if (!user || user.deletedAt || user.status === USER_STATUS.SUSPENDED) return null;
+  if (!user || user.deletedAt || BLOCKED_USER_STATUSES.includes(user.status)) return null;
   if ((user.tokenVersion ?? 0) !== challenge.tv) return null;
   return user;
 }

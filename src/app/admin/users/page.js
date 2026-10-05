@@ -2,7 +2,7 @@ import Link from "next/link";
 import { Users, Search } from "lucide-react";
 import { connectToDatabase } from "@/lib/db/connect";
 import { enforceRole } from "@/lib/auth/guards";
-import { ROLES, ROLE_LABELS, USER_STATUS } from "@/constants";
+import { ROLES, ROLE_LABELS, USER_STATUS, USER_STATUS_LABELS, BLOCKED_USER_STATUSES } from "@/constants";
 import { listUsers } from "@/services/user.service";
 import { adminUserQuerySchema } from "@/lib/validation/admin";
 import {
@@ -24,7 +24,7 @@ const TABS = [
 
 function statusTone(status) {
   if (status === USER_STATUS.ACTIVE) return "success";
-  if (status === USER_STATUS.SUSPENDED) return "danger";
+  if (BLOCKED_USER_STATUSES.includes(status)) return "danger";
   if (status === USER_STATUS.DELETED) return "neutral";
   return "warning";
 }
@@ -111,7 +111,7 @@ export default async function AdminUsersPage({ searchParams }) {
                   </TD>
                   <TD>
                     <Badge tone={statusTone(user.status)} size="sm">
-                      {user.status.replace(/_/g, " ").toLowerCase()}
+                      {USER_STATUS_LABELS[user.status] ?? user.status}
                     </Badge>
                     {!user.emailVerifiedAt && user.status !== USER_STATUS.DELETED && (
                       <span className="mt-1 block text-[11px] text-warning-700">

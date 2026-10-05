@@ -5,7 +5,9 @@ import { Alert, Field, Input, Select } from "@/components/ui";
 import { LESSON_MODES } from "@/constants";
 
 /** Step 7 — service area (§17, §15). */
-export function LocationStep({ value, onChange, fieldErrors, application, provinces = [] }) {
+export function LocationStep({
+  value, onChange, fieldErrors, application, provinces = [], defaultProvince = "",
+}) {
   const set = (key) => (e) => onChange({ ...value, [key]: e.target.value });
 
   const offersInPerson = application?.data?.LESSON_TYPE?.lessonModes?.includes(
@@ -31,7 +33,7 @@ export function LocationStep({ value, onChange, fieldErrors, application, provin
           />
         </Field>
         <Field label="Province" htmlFor="loc-province" error={fieldErrors.province} required>
-          <Select id="loc-province" value={value.province ?? "ON"} onChange={set("province")}>
+          <Select id="loc-province" value={value.province ?? defaultProvince} onChange={set("province")}>
             {provinces.map((p) => (
               <option key={p.code} value={p.code} disabled={!p.isActive}>
                 {p.name}

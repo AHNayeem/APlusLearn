@@ -119,7 +119,9 @@ export default async function TutorReviewsPage() {
                   {review.title && (
                     <p className="mt-3 text-sm font-bold text-ink-900">{review.title}</p>
                   )}
-                  <p className="mt-1.5 text-sm leading-relaxed text-ink-600">{review.body}</p>
+                  {review.body && (
+                    <p className="mt-1.5 text-sm leading-relaxed text-ink-600">{review.body}</p>
+                  )}
 
                   {review.tutorReply ? (
                     <div className="mt-4 rounded-xl border-l-2 border-brand-300 bg-brand-50/50 p-4">

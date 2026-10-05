@@ -20,6 +20,9 @@ const TABS = [
   { value: TUTOR_STATUS.INFO_REQUESTED, label: "Info requested" },
   { value: TUTOR_STATUS.APPROVED, label: "Approved" },
   { value: TUTOR_STATUS.REJECTED, label: "Rejected" },
+  // In progress, including an application sent back for information that
+  // the tutor is now editing — so it never vanishes from every tab (R28.4).
+  { value: TUTOR_STATUS.DRAFT, label: "Drafts" },
 ];
 
 function statusTone(status) {

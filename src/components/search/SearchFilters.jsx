@@ -8,9 +8,19 @@ import { Badge, Button, Checkbox, Select } from "@/components/ui";
 import { formatMoney } from "@/lib/utils/format";
 import {
   LESSON_MODES, LESSON_MODE_LABELS, VERIFICATION_TYPES, VERIFICATION_LABELS,
-  QUALIFICATION_TYPES, QUALIFICATION_LABELS, AVAILABILITY_WINDOWS,
+  OFFERED_QUALIFICATION_TYPES, QUALIFICATION_LABELS, SEARCH_AVAILABILITY_DAYS, SEARCH_TIME_OF_DAY,
   DISTANCE_OPTIONS, PRICE_RANGE, RATING_OPTIONS, EXPERIENCE_OPTIONS,
 } from "@/constants";
+import { minutesToLabel, minutesToTime } from "@/lib/utils/time";
+
+/** Start times a visitor can ask for, every half hour of a teaching day. */
+const START_TIMES = Array.from({ length: 33 }, (_, i) => 6 * 60 + i * 30);
+
+/** The filter keys this rail owns (everything except the search itself). */
+export const FILTER_KEYS = [
+  "mode", "minPrice", "maxPrice", "minRating", "minExperience", "qualifications", "verified",
+  "availability", "timeOfDay", "date", "time", "distanceKm", "freeIntro",
+];
 
 /**
  * Search filters (§14).
@@ -50,10 +60,8 @@ export function SearchFilters({ facets, resolved, className }) {
     update({ [key]: next });
   };
 
-  const activeCount = [
-    "mode", "minPrice", "maxPrice", "minRating", "minExperience",
-    "qualifications", "verified", "availability", "distanceKm", "freeIntro",
-  ].filter((key) => params.get(key)).length;
+  const activeCount = FILTER_KEYS.filter((key) => params.get(key)).length;
+  const hasLocation = Boolean(get("city") || get("postalCode"));
 
   const clearAll = () => {
     const next = new URLSearchParams();
@@ -75,6 +83,7 @@ export function SearchFilters({ facets, resolved, className }) {
               label: LESSON_MODE_LABELS[m],
               count: facets?.modes?.[m],
             })),
+            { value: "BOTH", label: "Offers both" },
           ].map((option) => (
             <label key={option.value || "any"} className="flex cursor-pointer items-center gap-3">
               <input
@@ -94,18 +103,30 @@ export function SearchFilters({ facets, resolved, className }) {
       </FilterGroup>
 
       {get("mode") !== LESSON_MODES.ONLINE && (
-        <FilterGroup title="Distance" hint="From the city or postal code you searched">
+        <FilterGroup
+          title="Distance"
+          hint={
+            hasLocation
+              ? "For in-person lessons, from the city or postal code you searched"
+              : "Enter a city or postal code above to filter by distance"
+          }
+        >
           <Select
-            value={get("distanceKm")}
+            // An unset radius is the operator's default, which the search
+            // reports back — so the control shows what is actually applied.
+            value={get("distanceKm") || (resolved?.radiusKm ? String(resolved.radiusKm) : "any")}
             onChange={(e) => update({ distanceKm: e.target.value })}
             aria-label="Maximum distance"
+            disabled={!hasLocation}
           >
-            <option value="">Any distance</option>
-            {DISTANCE_OPTIONS.map((km) => (
-              <option key={km} value={km}>
-                Within {km} km
-              </option>
-            ))}
+            <option value="any">Any distance</option>
+            {[...new Set([...DISTANCE_OPTIONS, ...(resolved?.radiusKm ? [resolved.radiusKm] : [])])]
+              .sort((a, b) => a - b)
+              .map((km) => (
+                <option key={km} value={km}>
+                  Within {km} km
+                </option>
+              ))}
           </Select>
         </FilterGroup>
       )}
@@ -119,6 +140,9 @@ export function SearchFilters({ facets, resolved, className }) {
         }
       >
         <PriceFilter
+          // Remount when the URL's price changes (a chip, "Clear all"), so
+          // the inputs never keep a value the search no longer applies (R8.6).
+          key={`${get("minPrice")}-${get("maxPrice")}`}
           min={Number(get("minPrice")) || undefined}
           max={Number(get("maxPrice")) || undefined}
           onChange={(minPrice, maxPrice) => update({ minPrice, maxPrice })}
@@ -167,7 +191,7 @@ export function SearchFilters({ facets, resolved, className }) {
 
       <FilterGroup title="Qualifications">
         <div className="space-y-2.5">
-          {Object.values(QUALIFICATION_TYPES).map((type) => (
+          {OFFERED_QUALIFICATION_TYPES.map((type) => (
             <Checkbox
               key={type}
               label={QUALIFICATION_LABELS[type]}
@@ -178,16 +202,46 @@ export function SearchFilters({ facets, resolved, className }) {
         </div>
       </FilterGroup>
 
-      <FilterGroup title="Availability">
+      <FilterGroup title="Availability" hint="Tutors with a lesson time you can actually book">
         <div className="space-y-2.5">
-          {AVAILABILITY_WINDOWS.map((window) => (
+          {SEARCH_AVAILABILITY_DAYS.map((day) => (
             <Checkbox
-              key={window.value}
-              label={window.label}
-              checked={getAll("availability").includes(window.value)}
-              onChange={() => toggleInList("availability", window.value)}
+              key={day.value}
+              label={day.label}
+              checked={getAll("availability").includes(day.value)}
+              onChange={() => toggleInList("availability", day.value)}
             />
           ))}
+        </div>
+        <p className="mb-2 mt-4 text-xs font-semibold text-ink-700">Time of day</p>
+        <div className="space-y-2.5">
+          {SEARCH_TIME_OF_DAY.map((window) => (
+            <Checkbox
+              key={window.value}
+              label={`${window.label} (${minutesToLabel(window.from * 60)}–${minutesToLabel(window.to * 60)})`}
+              checked={getAll("timeOfDay").includes(window.value)}
+              onChange={() => toggleInList("timeOfDay", window.value)}
+            />
+          ))}
+        </div>
+        <p className="mb-2 mt-4 text-xs font-semibold text-ink-700">A specific date and time</p>
+        <div className="grid grid-cols-2 gap-2">
+          <input
+            type="date"
+            value={get("date")}
+            min={todayKey()}
+            onChange={(e) => update({ date: e.target.value })}
+            aria-label="Lesson date"
+            className="h-10 w-full rounded-xl border-0 bg-white px-2 text-sm ring-1 ring-inset ring-ink-200 focus:ring-2 focus:ring-brand-500 focus:outline-none"
+          />
+          <Select value={get("time")} onChange={(e) => update({ time: e.target.value })} aria-label="Lesson start time">
+            <option value="">Any time</option>
+            {START_TIMES.map((minutes) => (
+              <option key={minutes} value={minutesToTime(minutes)}>
+                {minutesToLabel(minutes)}
+              </option>
+            ))}
+          </Select>
         </div>
       </FilterGroup>
 
@@ -280,6 +334,12 @@ export function SearchFilters({ facets, resolved, className }) {
       </aside>
     </>
   );
+}
+
+/** Today in the visitor's own calendar, for the date picker's minimum. */
+function todayKey() {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
 }
 
 function FilterGroup({ title, hint, children }) {

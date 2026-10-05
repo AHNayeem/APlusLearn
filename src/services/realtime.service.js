@@ -1,6 +1,6 @@
 import "server-only";
 import { User } from "@/models";
-import { USER_STATUS } from "@/constants";
+import { BLOCKED_USER_STATUSES } from "@/constants";
 import { connectToDatabase } from "@/lib/db/connect";
 import { startSource, configuredSource } from "@/lib/realtime/sources";
 import { REALTIME_EVENTS, REALTIME_BYE_REASONS } from "@/lib/realtime/events";
@@ -248,7 +248,7 @@ export async function subscribe(subscriber) {
 export async function sessionStillValid(user) {
   const current = await User.findById(user.id).select("status deletedAt tokenVersion").lean();
   if (!current || current.deletedAt) return false;
-  if (current.status === USER_STATUS.SUSPENDED) return false;
+  if (BLOCKED_USER_STATUSES.includes(current.status)) return false;
   return (current.tokenVersion ?? 0) === (user.tokenVersion ?? 0);
 }
 

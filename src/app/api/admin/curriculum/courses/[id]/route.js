@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { routeHandler, ok } from "@/lib/api";
 import { courseSchema } from "@/lib/validation/admin";
-import { objectId } from "@/lib/validation/common";
+import { objectId, patchSchema } from "@/lib/validation/common";
 import { updateCourse, deleteCourse } from "@/services/curriculum.service";
 import { PERMISSIONS } from "@/constants";
 
@@ -12,7 +12,7 @@ export const PATCH = routeHandler(
   {
     permission: PERMISSIONS.ADMIN_CURRICULUM_MANAGE,
     paramsSchema,
-    bodySchema: courseSchema.partial(),
+    bodySchema: patchSchema(courseSchema),
   },
 );
 

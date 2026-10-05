@@ -5,52 +5,122 @@ import { Search, X, BookOpen } from "lucide-react";
 import { cn } from "@/lib/utils/cn";
 import { api, qs } from "@/lib/api/client";
 import {
-  Badge, Button, EmptyState, Field, Input, Select, Spinner,
+  Badge, EmptyState, Field, Input, Select, Spinner,
 } from "@/components/ui";
-import { formatMoney } from "@/lib/utils/format";
 
 /**
- * Step 5 — courses taught (§17).
+ * Step 5 — courses taught (§13, §17).
  *
- * Courses are picked from the real provincial curriculum rather than typed
- * free-text, which is what lets search match on course code (§13).
+ * Province → grade → subject → course, every list read from the curriculum
+ * endpoints: the provinces are the ones stored as live, the grades are that
+ * province's, the subjects are the ones that province (and grade) actually
+ * has courses in, and the courses are that combination's. No province is
+ * named in this file, so one an administrator switches on is pickable the
+ * same day (R6.5, R13.6).
+ *
+ * The picker starts on the province the applicant gave in the personal step,
+ * but they can switch: an online tutor may teach another province's
+ * curriculum. Chosen courses from different provinces sit side by side, each
+ * with its own rate and years. The server re-checks every id (R13.6).
  */
-export function CoursesStep({ value, onChange, fieldErrors, grades = [] }) {
+export function CoursesStep({
+  value, onChange, fieldErrors, application, provinces = [], defaultProvince = "", selectedCourses = [],
+}) {
   const selected = value.courses ?? [];
+  const liveProvinces = provinces.filter((p) => p.isActive);
 
+  const startProvince = () => {
+    const firstChosen = selectedCourses.find((c) => c.id === selected[0]?.courseId)?.provinceCode;
+    const personal = application?.data?.PERSONAL?.province;
+    const isLive = (code) => liveProvinces.some((p) => p.code === code);
+    return [firstChosen, personal, defaultProvince].find((code) => code && isLive(code)) ?? "";
+  };
+
+  const [province, setProvince] = useState(startProvince);
+  const [grade, setGrade] = useState("");
+  const [subject, setSubject] = useState("");
   const [query, setQuery] = useState("");
-  const [gradeFilter, setGradeFilter] = useState("");
-  // `forKey` records which query the results belong to, so "loading" is
-  // derived from state rather than set inside the effect.
-  const [results, setResults] = useState({ items: [], forKey: null });
-  const [details, setDetails] = useState({});
 
-  const searchKey = `${query.trim()}|${gradeFilter}`;
-  const loading = results.forKey !== searchKey;
+  // Each list records which request it answers (`forKey`), so "loading" is
+  // derived from state rather than set inside an effect, and a slow answer
+  // to an earlier choice can never overwrite a newer one.
+  const [tree, setTree] = useState({ forKey: null, grades: [], subjects: [] });
+  const [gradeSubjects, setGradeSubjects] = useState({ forKey: null, items: [] });
+  const [results, setResults] = useState({ forKey: null, items: [] });
+  const [details, setDetails] = useState(() =>
+    Object.fromEntries(selectedCourses.map((course) => [course.id, course])),
+  );
 
-  // Search the catalogue as the tutor types.
+  const treeKey = province;
+  const subjectsKey = `${province}|${grade}`;
+  const term = query.trim();
+  const canSearch = Boolean(province && ((grade && subject) || term.length >= 2));
+  const resultsKey = `${province}|${grade}|${subject}|${term}`;
+
   useEffect(() => {
-    const params = { province: "ON", pageSize: 40 };
-    if (query.trim()) params.q = query.trim();
-    if (gradeFilter) params.grade = gradeFilter;
-    if (!query.trim() && !gradeFilter) params.popular = "true";
+    if (!province) return;
+    api
+      .get(`/api/curriculum/tree${qs({ province })}`)
+      .then((data) =>
+        setTree({ forKey: province, grades: data.grades ?? [], subjects: data.subjects ?? [] }),
+      )
+      .catch(() => setTree({ forKey: province, grades: [], subjects: [] }));
+  }, [province]);
+
+  useEffect(() => {
+    if (!province || !grade) return;
+    const key = `${province}|${grade}`;
+    api
+      .get(`/api/curriculum/subjects${qs({ province, grade })}`)
+      .then((data) => setGradeSubjects({ forKey: key, items: data.subjects ?? [] }))
+      .catch(() => setGradeSubjects({ forKey: key, items: [] }));
+  }, [province, grade]);
+
+  useEffect(() => {
+    if (!canSearch) return;
+    const key = `${province}|${grade}|${subject}|${term}`;
+    const params = { province, pageSize: 60, sort: "GRADE_ASC" };
+    if (grade) params.grade = grade;
+    if (subject) params.subject = subject;
+    if (term) params.q = term;
 
     const timer = window.setTimeout(() => {
       api
         .get(`/api/curriculum/courses${qs(params)}`)
         .then((data) => {
-          setResults({ items: data.courses ?? [], forKey: searchKey });
+          setResults({ items: data.courses ?? [], forKey: key });
           setDetails((d) => {
             const next = { ...d };
             for (const course of data.courses ?? []) next[course.id] = course;
             return next;
           });
         })
-        .catch(() => setResults({ items: [], forKey: searchKey }));
-    }, 220);
+        .catch(() => setResults({ items: [], forKey: key }));
+    }, term ? 220 : 0);
 
     return () => window.clearTimeout(timer);
-  }, [query, gradeFilter, searchKey]);
+  }, [canSearch, province, grade, subject, term]);
+
+  const treeLoading = Boolean(province) && tree.forKey !== treeKey;
+  const grades = tree.forKey === treeKey ? tree.grades : [];
+  const subjects = grade
+    ? gradeSubjects.forKey === subjectsKey
+      ? gradeSubjects.items
+      : []
+    : [];
+  const subjectsLoading = Boolean(grade) && gradeSubjects.forKey !== subjectsKey;
+  const resultsLoading = canSearch && results.forKey !== resultsKey;
+  const provinceName = (code) => provinces.find((p) => p.code === code)?.name ?? code;
+
+  const chooseProvince = (code) => {
+    setProvince(code);
+    setGrade("");
+    setSubject("");
+  };
+  const chooseGrade = (slug) => {
+    setGrade(slug);
+    setSubject("");
+  };
 
   const toggle = (course) => {
     const exists = selected.find((c) => c.courseId === course.id);
@@ -71,6 +141,17 @@ export function CoursesStep({ value, onChange, fieldErrors, grades = [] }) {
       courses: selected.map((c) => (c.courseId === courseId ? { ...c, ...patch } : c)),
     });
 
+  if (liveProvinces.length === 0) {
+    return (
+      <EmptyState
+        compact
+        icon={<BookOpen className="size-6" />}
+        title="No curriculum is open yet"
+        description="Courses can be chosen once a province is live. Save your progress and come back."
+      />
+    );
+  }
+
   return (
     <div className="space-y-6">
       <div>
@@ -88,7 +169,7 @@ export function CoursesStep({ value, onChange, fieldErrors, grades = [] }) {
             className="mt-3"
             icon={<BookOpen className="size-6" />}
             title="No courses selected"
-            description="Search below and pick every course you're confident teaching."
+            description="Choose a province, grade and subject below, then pick every course you're confident teaching."
           />
         ) : (
           <ul className="mt-3 space-y-2">
@@ -107,14 +188,16 @@ export function CoursesStep({ value, onChange, fieldErrors, grades = [] }) {
                       </p>
                       {course && (
                         <p className="mt-0.5 text-xs text-ink-500">
-                          Grade {course.gradeLevel} · {course.stream}
+                          {provinceName(course.provinceCode)} · Grade {course.gradeLevel}
+                          {course.subjectName ? ` · ${course.subjectName}` : ""}
+                          {course.stream ? ` · ${course.stream}` : ""}
                         </p>
                       )}
                     </div>
                     <button
                       type="button"
                       onClick={() => toggle({ id: entry.courseId })}
-                      aria-label="Remove course"
+                      aria-label={`Remove ${course?.name ?? "course"}`}
                       className="shrink-0 rounded-lg p-1.5 text-ink-400 transition-colors hover:bg-danger-50 hover:text-danger-600"
                     >
                       <X className="size-4" />
@@ -152,7 +235,7 @@ export function CoursesStep({ value, onChange, fieldErrors, grades = [] }) {
                           id={`course-rate-${entry.courseId}`}
                           type="number"
                           inputMode="numeric"
-                          min={15}
+                          min={0}
                           value={entry.hourlyRateCents ? entry.hourlyRateCents / 100 : ""}
                           onChange={(e) =>
                             updateCourse(entry.courseId, {
@@ -177,36 +260,80 @@ export function CoursesStep({ value, onChange, fieldErrors, grades = [] }) {
       <div className="border-t border-ink-100 pt-5">
         <h3 className="mb-3 text-sm font-semibold text-ink-800">Find courses</h3>
 
-        <div className="grid gap-3 sm:grid-cols-[1fr_12rem]">
-          <Input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search by name or code — MHF4U, Advanced Functions…"
-            iconLeft={<Search className="size-4" />}
-            aria-label="Search courses"
-          />
-          <Select
-            value={gradeFilter}
-            onChange={(e) => setGradeFilter(e.target.value)}
-            aria-label="Filter by grade"
-          >
-            <option value="">All grades</option>
-            {grades.map((grade) => (
-              <option key={grade.id} value={grade.slug}>
-                {grade.name}
+        <div className="grid gap-3 sm:grid-cols-3">
+          <Field label="Province" htmlFor="course-province">
+            <Select
+              id="course-province"
+              value={province}
+              onChange={(e) => chooseProvince(e.target.value)}
+            >
+              <option value="" disabled>
+                Choose a province
               </option>
-            ))}
-          </Select>
+              {liveProvinces.map((p) => (
+                <option key={p.code} value={p.code}>
+                  {p.name}
+                </option>
+              ))}
+            </Select>
+          </Field>
+
+          <Field label="Grade" htmlFor="course-grade">
+            <Select
+              id="course-grade"
+              value={grade}
+              onChange={(e) => chooseGrade(e.target.value)}
+              disabled={!province || treeLoading}
+            >
+              <option value="">{treeLoading ? "Loading…" : "Choose a grade"}</option>
+              {grades.map((g) => (
+                <option key={g.id} value={g.slug}>
+                  {g.name}
+                </option>
+              ))}
+            </Select>
+          </Field>
+
+          <Field label="Subject" htmlFor="course-subject">
+            <Select
+              id="course-subject"
+              value={subject}
+              onChange={(e) => setSubject(e.target.value)}
+              disabled={!grade || subjectsLoading}
+            >
+              <option value="">
+                {!grade ? "Choose a grade first" : subjectsLoading ? "Loading…" : "Choose a subject"}
+              </option>
+              {subjects.map((s) => (
+                <option key={s.id} value={s.slug}>
+                  {s.name}
+                </option>
+              ))}
+            </Select>
+          </Field>
         </div>
 
+        <Input
+          className="mt-3"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder={`Or search ${province ? provinceName(province) : "the"} courses by name or code`}
+          iconLeft={<Search className="size-4" />}
+          aria-label="Search courses by name or code"
+        />
+
         <div className="mt-4 max-h-80 overflow-y-auto rounded-xl border border-ink-200">
-          {loading ? (
+          {!canSearch ? (
+            <p className="px-4 py-10 text-center text-sm text-ink-500">
+              Choose a grade and a subject to see its courses.
+            </p>
+          ) : resultsLoading ? (
             <div className="flex justify-center py-10">
               <Spinner className="size-5 text-ink-400" />
             </div>
           ) : results.items.length === 0 ? (
             <p className="py-10 text-center text-sm text-ink-500">
-              No courses match that search.
+              No courses match that choice.
             </p>
           ) : (
             <ul className="divide-y divide-ink-100">
@@ -217,6 +344,7 @@ export function CoursesStep({ value, onChange, fieldErrors, grades = [] }) {
                     <button
                       type="button"
                       onClick={() => toggle(course)}
+                      aria-pressed={isSelected}
                       className={cn(
                         "flex w-full items-center gap-3 p-3 text-left transition-colors",
                         isSelected ? "bg-brand-50" : "hover:bg-ink-50",
@@ -228,7 +356,7 @@ export function CoursesStep({ value, onChange, fieldErrors, grades = [] }) {
                           isSelected ? "bg-brand-600 text-white" : "bg-ink-100 text-ink-600",
                         )}
                       >
-                        {course.code ?? "ON"}
+                        {course.code ?? course.provinceCode}
                       </span>
                       <span className="min-w-0 flex-1">
                         <span className="block truncate text-sm font-semibold text-ink-900">

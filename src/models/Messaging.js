@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
-import { REPORT_STATUS } from "../constants/index.js";
+import { REPORT_STATUS, MESSAGE_SYSTEM_EVENTS } from "../constants/index.js";
+import { CONTACT_FINDING_KINDS } from "../lib/messaging/contact-detection.js";
 import { ModerationEntrySchema } from "./Engagement.js";
 import { AttachmentSchema } from "./Attachment.js";
 
@@ -64,6 +65,23 @@ ConversationSchema.index({ updatedAt: 1 });
 export const Conversation =
   mongoose.models.Conversation || mongoose.model("Conversation", ConversationSchema);
 
+/**
+ * What the off-platform check found in a message (§17, R17.7).
+ *
+ * Kinds and a time — never the text that was removed. The point of masking is
+ * that the contact detail is not kept, and a copy of it here would be the
+ * detail kept.
+ */
+const MessageModerationSchema = new mongoose.Schema(
+  {
+    flagged: { type: Boolean, default: false },
+    kinds: [{ type: String, enum: Object.values(CONTACT_FINDING_KINDS) }],
+    /** Set only when something was actually removed from the body. */
+    maskedAt: { type: Date },
+  },
+  { _id: false },
+);
+
 const MessageSchema = new mongoose.Schema(
   {
     conversationId: {
@@ -72,7 +90,15 @@ const MessageSchema = new mongoose.Schema(
       required: true,
       index: true,
     },
-    senderId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
+    /** Every message has a sender except a SYSTEM one, which the platform wrote. */
+    senderId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: function senderRequired() {
+        return this.kind !== "SYSTEM";
+      },
+      index: true,
+    },
 
     /**
      * Required, unless the message *is* the file.
@@ -103,9 +129,23 @@ const MessageSchema = new mongoose.Schema(
      */
     attachments: { type: [AttachmentSchema], default: [] },
 
-    /** System messages narrate booking events inside the thread. */
+    /**
+     * System messages narrate booking events inside the thread (§21, R17.3).
+     * `postSystemMessage` is their only writer; they have no sender, count
+     * toward nobody's unread badge and are never a "reply" for response time.
+     */
     kind: { type: String, enum: ["USER", "SYSTEM"], default: "USER" },
-    systemEvent: { type: String, trim: true },
+    systemEvent: { type: String, enum: Object.values(MESSAGE_SYSTEM_EVENTS) },
+    /** The booking a SYSTEM message is about. */
+    bookingId: { type: mongoose.Schema.Types.ObjectId, ref: "Booking" },
+    /**
+     * One event, one message: a replayed confirmation finds the row it
+     * already wrote. Unique among SYSTEM messages only (index below).
+     */
+    systemKey: { type: String, trim: true },
+
+    /** Present when the off-platform check found something (R17.7). */
+    moderation: { type: MessageModerationSchema, default: undefined },
 
     /**
      * The sender's own name for this message, minted in the browser before
@@ -128,6 +168,11 @@ MessageSchema.index({ conversationId: 1, createdAt: -1 });
 MessageSchema.index(
   { senderId: 1, clientId: 1 },
   { unique: true, partialFilterExpression: { clientId: { $type: "string" } } },
+);
+
+MessageSchema.index(
+  { systemKey: 1 },
+  { unique: true, partialFilterExpression: { systemKey: { $type: "string" } } },
 );
 
 export const Message = mongoose.models.Message || mongoose.model("Message", MessageSchema);

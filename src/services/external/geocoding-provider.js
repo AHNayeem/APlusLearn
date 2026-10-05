@@ -1,10 +1,5 @@
 import "server-only";
-import {
-  CITY_CENTROIDS,
-  FSA_CENTROIDS,
-  provinceFromFsa,
-  coarsenCoordinates,
-} from "@/lib/geo";
+import { CITY_CENTROIDS, FSA_CENTROIDS, coarsenCoordinates } from "@/lib/geo";
 import { requireIntegration } from "@/lib/config/env";
 
 /**
@@ -21,9 +16,12 @@ import { requireIntegration } from "@/lib/config/env";
  *    rooftop precision for a full address; every result is passed through
  *    `coarsenCoordinates` before it leaves this module, so nothing finer than
  *    about a kilometre is ever stored or compared (§15, §42).
- * 2. **Failure is never fatal.** A geocoder that is down, rate-limited or
- *    simply has no answer returns `null` and search falls back to
- *    non-geographic matching. It must not break booking or search.
+ * 2. **Failure is never fatal, and never a guess.** A geocoder that is
+ *    down, rate-limited or simply has no answer returns `null`. It must not
+ *    break booking or search — and it must not invent an answer either: an
+ *    unknown town is never "the province's largest city". Search reports
+ *    the location as unresolved and answers from the data it does have
+ *    (tutors who list that city), see `search.service.resolveLocation`.
  * 3. **Diagnostics never contain the input.** A failed lookup logs the reason
  *    and the provider's status, never the postal code or address that
  *    produced it.
@@ -46,41 +44,30 @@ export class GeocodingProvider {
 }
 
 /**
- * Development provider. Covers the Ontario cities and forward sortation areas
- * the seed data uses, and falls back to the province's largest city so a
- * distance search still returns something sensible rather than nothing.
+ * Development provider: a bundled table of Canadian municipal and FSA
+ * centroids (`lib/geo`). It answers only what it actually knows. A postal
+ * code or city missing from the table is `null` — not the first city of the
+ * province, which is how "Sudbury" used to come back as Toronto (R29.1).
  */
 export class LocalTableGeocodingProvider extends GeocodingProvider {
   get name() {
     return "LOCAL_TABLE";
   }
 
-  async lookup({ postalCode, city, province } = {}) {
+  async lookup({ postalCode, city } = {}) {
     if (postalCode) {
       const fsa = String(postalCode).toUpperCase().replace(/\s/g, "").slice(0, 3);
       const hit = FSA_CENTROIDS[fsa];
       if (hit) return { ...hit, precision: "POSTAL_CODE", postalCodePrefix: fsa };
-
-      const provinceGuess = provinceFromFsa(fsa);
-      if (provinceGuess) {
-        const fallback = Object.values(CITY_CENTROIDS).find((c) => c.province === provinceGuess);
-        if (fallback) return { ...fallback, precision: "PROVINCE", postalCodePrefix: fsa };
-      }
     }
 
     if (city) {
-      const key = String(city).toLowerCase().trim();
-      const hit = CITY_CENTROIDS[key] ?? CITY_CENTROIDS[key.replace(/\s+/g, "")];
+      // "Toronto", "toronto ", "Toronto, ON" and "Toronto ON" are the same
+      // place; "Londonderry" is not London.
+      const key = String(city).toLowerCase().replace(/[,]/g, " ").replace(/\s+/g, " ").trim();
+      const bare = key.replace(/\s+(?:ab|bc|mb|nb|nl|ns|nt|nu|on|pe|qc|sk|yt)$/, "");
+      const hit = CITY_CENTROIDS[bare] ?? CITY_CENTROIDS[bare.replace(/\s+/g, "")];
       if (hit) return { ...hit, precision: "CITY" };
-
-      // Loose prefix match, e.g. "Toronto, ON".
-      const loose = Object.entries(CITY_CENTROIDS).find(([name]) => key.startsWith(name));
-      if (loose) return { ...loose[1], precision: "CITY" };
-    }
-
-    if (province) {
-      const fallback = Object.values(CITY_CENTROIDS).find((c) => c.province === province);
-      if (fallback) return { ...fallback, precision: "PROVINCE" };
     }
 
     return null;
@@ -217,7 +204,10 @@ const fallbackProvider = new LocalTableGeocodingProvider();
  * services use; no service or component talks to a provider directly.
  */
 export async function geocode({ postalCode, city, province } = {}) {
-  if (!postalCode && !city && !province) return null;
+  // A province alone is not a place to measure distance from — a production
+  // geocoder would happily return its centroid, which is nowhere anybody
+  // lives. It only ever narrows a postal code or a city.
+  if (!postalCode && !city) return null;
 
   const provider = getGeocodingProvider();
 

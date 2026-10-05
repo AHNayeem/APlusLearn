@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { Ban, RotateCcw, MailCheck, LogOut, Trash2, MoreVertical } from "lucide-react";
+import { Ban, PauseCircle, RotateCcw, MailCheck, LogOut, Trash2, MoreVertical } from "lucide-react";
 import { api } from "@/lib/api/client";
 import { useSubmit } from "@/hooks/useAsync";
 import {
@@ -12,15 +12,19 @@ import {
 import { USER_STATUS } from "@/constants";
 
 /**
- * Admin actions on a user account (§24, §35).
+ * Admin actions on a user account (§24, §35, R28.2).
  *
- * Suspending and deleting both require a recorded reason, which lands in the
- * audit log alongside the admin who did it.
+ * Suspending (temporary), banning (permanent), restoring and deleting all
+ * require a recorded reason, which is stored on the account and lands in the
+ * audit log alongside the admin who did it. The server refuses an
+ * administrator acting on themselves or on the last active administrator;
+ * hiding those options here is courtesy, not the control.
  */
-export function UserActions({ user }) {
+export function UserActions({ user, isSelf = false }) {
   const [action, setAction] = useState(null);
 
   const suspended = user.status === USER_STATUS.SUSPENDED;
+  const banned = user.status === USER_STATUS.BANNED;
   const deleted = user.status === USER_STATUS.DELETED;
 
   if (deleted) return null;
@@ -35,16 +39,26 @@ export function UserActions({ user }) {
           </span>
         }
       >
-        {suspended ? (
+        {(suspended || banned) && (
           <DropdownItem
             icon={<RotateCcw className="size-4" />}
             onClick={() => setAction("REINSTATE")}
           >
-            Reinstate account
+            Restore account
           </DropdownItem>
-        ) : (
-          <DropdownItem icon={<Ban className="size-4" />} danger onClick={() => setAction("SUSPEND")}>
+        )}
+        {!isSelf && !suspended && !banned && (
+          <DropdownItem
+            icon={<PauseCircle className="size-4" />}
+            danger
+            onClick={() => setAction("SUSPEND")}
+          >
             Suspend account
+          </DropdownItem>
+        )}
+        {!isSelf && !banned && (
+          <DropdownItem icon={<Ban className="size-4" />} danger onClick={() => setAction("BAN")}>
+            Ban permanently
           </DropdownItem>
         )}
 
@@ -61,11 +75,14 @@ export function UserActions({ user }) {
           Sign out everywhere
         </DropdownItem>
 
-        <DropdownDivider />
-
-        <DropdownItem icon={<Trash2 className="size-4" />} danger onClick={() => setAction("DELETE")}>
-          Delete account
-        </DropdownItem>
+        {!isSelf && (
+          <>
+            <DropdownDivider />
+            <DropdownItem icon={<Trash2 className="size-4" />} danger onClick={() => setAction("DELETE")}>
+              Delete account
+            </DropdownItem>
+          </>
+        )}
       </Dropdown>
 
       <ActionModal action={action} onClose={() => setAction(null)} user={user} />
@@ -77,15 +94,25 @@ const COPY = {
   SUSPEND: {
     title: "Suspend this account",
     description:
-      "They can't sign in, and a tutor profile is removed from search immediately.",
+      "A temporary hold: they're signed out everywhere and can't sign in, and a tutor profile leaves search immediately. Restore it when the issue is resolved.",
     confirm: "Suspend account",
     danger: true,
     needsReason: true,
   },
+  BAN: {
+    title: "Ban this account permanently",
+    description:
+      "They're signed out everywhere and can never sign in again — not by verifying an email, resetting a password or using Google or Apple. Only an administrator can restore a ban.",
+    confirm: "Ban account",
+    danger: true,
+    needsReason: true,
+  },
   REINSTATE: {
-    title: "Reinstate this account",
-    description: "They'll be able to sign in again. A tutor profile stays hidden until re-approved.",
-    confirm: "Reinstate",
+    title: "Restore this account",
+    description:
+      "They'll be able to sign in again. A tutor profile returns to search only if it is still approved and complete.",
+    confirm: "Restore",
+    needsReason: true,
   },
   VERIFY_EMAIL: {
     title: "Mark email as verified",
@@ -100,7 +127,7 @@ const COPY = {
   DELETE: {
     title: "Delete this account",
     description:
-      "Personal details are removed and the account is anonymised. Lesson and payment records are kept for accounting.",
+      "Anonymises the account: name, email, phone, address and photo; their learners' details; a tutor's profile and identity documents; request notes. They're signed out everywhere. Lessons, payments and messages are kept for accounting and the other party, shown as \"Deleted user\". This can't be undone.",
     confirm: "Delete account",
     danger: true,
     needsReason: true,

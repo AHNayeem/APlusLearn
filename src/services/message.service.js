@@ -1,21 +1,28 @@
 import "server-only";
-import { Conversation, Message, TutorProfile, User, Booking } from "@/models";
+import { createHash } from "node:crypto";
+import { Conversation, Message, TutorProfile, TutorRequest, User, Booking } from "@/models";
 import {
   NOTIFICATION_TYPES,
   PAGE_SIZES,
   ROLES,
+  LEARNER_ROLES,
+  USER_STATUS,
+  BOOKING_STATUS,
   REPORT_STATUS,
   ACTIVE_REPORT_STATUSES,
   AUDIT_ACTIONS,
+  MESSAGE_SYSTEM_EVENTS,
 } from "@/constants";
 import { NotFoundError, AuthorizationError, BusinessRuleError } from "@/lib/api/errors";
 import { requireVerifiedEmail } from "@/lib/auth/assert";
 import { toPlain } from "@/lib/utils/serialize";
 import { publicName, truncate } from "@/lib/utils/format";
 import { sanitizeMultiline } from "@/lib/security/sanitize";
+import { detectOffPlatformContact, OFF_PLATFORM_WARNING } from "@/lib/messaging/contact-detection";
 import { toPublicAttachment } from "@/models/Attachment";
-import { notify } from "./notification.service";
+import { notify, notifyMany } from "./notification.service";
 import { recordAudit } from "./audit.service";
+import { reportOffPlatformContact } from "./risk.service";
 import {
   ATTACHMENT_LIMITS,
   storeAttachments,
@@ -31,8 +38,40 @@ const MESSAGE_ATTACHMENT_HREF = "/api/messages/attachments";
  *
  * A conversation is a learner/tutor pair. Every read and write checks
  * participation against the stored document, never against a client claim.
+ *
+ * Only the two participants are ever "in" a thread. An administrator is not
+ * a participant: the moderation queue (`getReportedConversation`) and the
+ * audited attachment read are the only ways an administrator sees message
+ * content, and there is no way for one to post into a thread (S8).
  */
 
+/**
+ * Bookings that make a tutor and a family people who already deal with each
+ * other (R17.1, R23.6) — the lesson was paid for, and happened or was meant
+ * to. An unpaid, expired or cancelled booking is not here: an abandoned
+ * checkout does not entitle a tutor to open a conversation with a family.
+ */
+const MESSAGEABLE_BOOKING_STATUSES = [
+  BOOKING_STATUS.CONFIRMED,
+  BOOKING_STATUS.COMPLETED,
+  BOOKING_STATUS.NO_SHOW_STUDENT,
+  BOOKING_STATUS.NO_SHOW_TUTOR,
+  BOOKING_STATUS.DISPUTED,
+];
+
+/**
+ * The learner's thread with a tutor, created on first contact (R17.1).
+ *
+ * An existing thread is always returned — a family can keep talking to a
+ * tutor whose profile has since been hidden. A *new* thread needs a tutor a
+ * family could have found (`isSearchable`, the same gate as search) or a
+ * lesson already booked between them, so an unapproved or suspended profile
+ * cannot be reached by guessing its id.
+ *
+ * `bookingId` and `requestId` are context shown in the thread, and both are
+ * checked against this pair before they are written: a client cannot pin
+ * somebody else's booking to its conversation.
+ */
 export async function getOrCreateConversation({ learnerUserId, tutorProfileId, bookingId, requestId }) {
   const tutor = await TutorProfile.findById(tutorProfileId).select("userId isSearchable").lean();
   if (!tutor) throw new NotFoundError("That tutor is no longer available.");
@@ -42,12 +81,136 @@ export async function getOrCreateConversation({ learnerUserId, tutorProfileId, b
     throw new BusinessRuleError("You cannot message yourself.");
   }
 
-  const participantIds = [learnerUserId, tutorUserId]
-    .map(String)
-    .sort()
-    .map((id) => id);
+  const context = await verifiedContext({ learnerUserId, tutorUserId, bookingId, requestId });
 
-  const conversation = await Conversation.findOneAndUpdate(
+  const existing = await Conversation.findOne({ learnerUserId, tutorUserId });
+  if (existing) return existing;
+
+  if (!tutor.isSearchable && !(await hasMessageableBooking(learnerUserId, tutorUserId))) {
+    throw new NotFoundError("That tutor is no longer available.");
+  }
+
+  return upsertConversation({ learnerUserId, tutorUserId, tutorProfileId: tutor._id, ...context });
+}
+
+/**
+ * A tutor's thread with the family behind one of their bookings (R17.1, R23.6).
+ *
+ * A tutor never names the family: the recipient is the booking's purchaser,
+ * read from the stored booking, and the booking has to be this tutor's and in
+ * a status that means a lesson was really arranged. That is the whole of a
+ * tutor's ability to start a conversation — there is no search for learners.
+ */
+export async function getOrCreateTutorConversation({ tutorUserId, bookingId, requestId }) {
+  const booking = await Booking.findOne({ _id: bookingId, tutorUserId })
+    .select("purchaserId tutorProfileId status")
+    .lean();
+  if (!booking) throw new NotFoundError("That booking could not be found.");
+  if (!MESSAGEABLE_BOOKING_STATUSES.includes(booking.status)) {
+    throw new BusinessRuleError(
+      "You can message a family once a lesson with them is confirmed.",
+      "BOOKING_NOT_MESSAGEABLE",
+    );
+  }
+
+  const learnerUserId = booking.purchaserId;
+  const context = await verifiedContext({
+    learnerUserId,
+    tutorUserId,
+    bookingId: booking._id,
+    requestId,
+  });
+
+  const existing = await Conversation.findOne({ learnerUserId, tutorUserId });
+  if (existing) return existing;
+
+  return upsertConversation({
+    learnerUserId,
+    tutorUserId,
+    tutorProfileId: booking.tutorProfileId,
+    ...context,
+  });
+}
+
+/**
+ * What the tutor's "Message family" page needs about one booking: who it is
+ * for, whether it allows a first message, and the thread if there is one.
+ */
+export async function tutorBookingThread(bookingId, actor) {
+  if (actor?.role !== ROLES.TUTOR) {
+    throw new AuthorizationError("Only the tutor on a booking can message the family from it.");
+  }
+  const booking = await Booking.findOne({ _id: bookingId, tutorUserId: actor.id })
+    .select("reference courseName courseCode startAt status purchaserId timeZone")
+    .populate("purchaserId", "firstName lastName")
+    .lean();
+  if (!booking) throw new NotFoundError("That booking could not be found.");
+
+  const conversation = await Conversation.findOne({
+    learnerUserId: booking.purchaserId?._id ?? booking.purchaserId,
+    tutorUserId: actor.id,
+  })
+    .select("_id")
+    .lean();
+
+  const family = booking.purchaserId;
+  return {
+    booking: {
+      ...toPlain({ ...booking, purchaserId: undefined }),
+      familyName: family ? publicName(family.firstName ?? "", family.lastName ?? "") : null,
+    },
+    conversationId: conversation ? String(conversation._id) : null,
+    canMessage: MESSAGEABLE_BOOKING_STATUSES.includes(booking.status),
+  };
+}
+
+/** Booking and request context, kept only when it belongs to this pair. */
+async function verifiedContext({ learnerUserId, tutorUserId, bookingId, requestId }) {
+  const context = {};
+  if (bookingId) {
+    const booking = await Booking.findOne({ _id: bookingId, purchaserId: learnerUserId, tutorUserId })
+      .select("_id")
+      .lean();
+    if (!booking) {
+      throw new BusinessRuleError(
+        "That booking isn't between these two accounts.",
+        "BOOKING_NOT_IN_CONVERSATION",
+      );
+    }
+    context.bookingId = booking._id;
+  }
+  if (requestId) {
+    const request = await TutorRequest.findOne({ _id: requestId, ownerId: learnerUserId })
+      .select("_id")
+      .lean();
+    if (!request) {
+      throw new BusinessRuleError(
+        "That request isn't one this family made.",
+        "REQUEST_NOT_IN_CONVERSATION",
+      );
+    }
+    context.requestId = request._id;
+  }
+  return context;
+}
+
+async function hasMessageableBooking(learnerUserId, tutorUserId) {
+  return Boolean(
+    await Booking.exists({
+      purchaserId: learnerUserId,
+      tutorUserId,
+      status: { $in: MESSAGEABLE_BOOKING_STATUSES },
+    }),
+  );
+}
+
+/**
+ * Find-or-create in one round trip; the unique `{ learnerUserId, tutorUserId }`
+ * index makes two first messages racing land in one thread.
+ */
+async function upsertConversation({ learnerUserId, tutorUserId, tutorProfileId, bookingId, requestId }) {
+  const participantIds = [learnerUserId, tutorUserId].map(String).sort();
+  return Conversation.findOneAndUpdate(
     { learnerUserId, tutorUserId },
     {
       $setOnInsert: {
@@ -62,8 +225,84 @@ export async function getOrCreateConversation({ learnerUserId, tutorProfileId, b
     },
     { upsert: true, returnDocument: "after", setDefaultsOnInsert: true },
   );
+}
 
-  return conversation;
+/**
+ * Who may open a thread (R17.1, R23.6): a learner, with a tutor; a tutor,
+ * from a booking with that family. Nobody else — an administrator included —
+ * starts conversations.
+ */
+async function startConversation(input, actor) {
+  if (LEARNER_ROLES.includes(actor.role)) {
+    let tutorProfileId = input.tutorProfileId;
+    // From a booking page the booking names the tutor; it still has to be
+    // this learner's booking, which `verifiedContext` checks.
+    if (!tutorProfileId && input.bookingId) {
+      const booking = await Booking.findOne({ _id: input.bookingId, purchaserId: actor.id })
+        .select("tutorProfileId")
+        .lean();
+      if (!booking) throw new NotFoundError("That booking could not be found.");
+      tutorProfileId = booking.tutorProfileId;
+    }
+    if (!tutorProfileId) throw new BusinessRuleError("We need to know who this message is for.");
+    return getOrCreateConversation({
+      learnerUserId: actor.id,
+      tutorProfileId,
+      bookingId: input.bookingId,
+      requestId: input.requestId,
+    });
+  }
+
+  if (actor.role === ROLES.TUTOR) {
+    if (!input.bookingId) {
+      throw new BusinessRuleError(
+        "Tutors can start a conversation only from a booking with that family.",
+        "TUTOR_START_NEEDS_BOOKING",
+      );
+    }
+    return getOrCreateTutorConversation({
+      tutorUserId: actor.id,
+      bookingId: input.bookingId,
+      requestId: input.requestId,
+    });
+  }
+
+  throw new AuthorizationError("Only families, students and tutors can start a conversation.");
+}
+
+/**
+ * Run a body past the off-platform check (§17, R17.7).
+ *
+ * Detection must never break sending: anything thrown here is logged and the
+ * message goes ahead as typed — a missed flag is a gap in a report, a refused
+ * message is a family who cannot reach their tutor.
+ */
+function screenBody(body) {
+  if (!body) return { body, kinds: [], masked: false };
+  try {
+    const result = detectOffPlatformContact(body);
+    if (!result.findings.length) return { body, kinds: [], masked: false };
+    const masked = result.masked !== body;
+    return {
+      body: masked ? result.masked.slice(0, 4000) : body,
+      kinds: result.kinds,
+      masked,
+      moderation: { flagged: true, kinds: result.kinds, maskedAt: masked ? new Date() : undefined },
+    };
+  } catch (error) {
+    console.warn("[messages] off-platform check failed:", error.message);
+    return { body, kinds: [], masked: false };
+  }
+}
+
+/** What the sender is told about a flagged message; null for a clean one. */
+function senderWarning(moderation) {
+  if (!moderation?.flagged) return null;
+  return {
+    ...OFF_PLATFORM_WARNING,
+    kinds: moderation.kinds ?? [],
+    masked: Boolean(moderation.maskedAt),
+  };
 }
 
 /**
@@ -90,9 +329,9 @@ export async function sendMessage(input, actor) {
   requireVerifiedEmail(actor, "Confirm your email address before messaging a tutor.");
 
   const files = input.files ?? [];
-  const body = sanitizeMultiline(input.body, { maxLength: 4000 });
+  const typed = sanitizeMultiline(input.body, { maxLength: 4000 });
   // A message is text, or a file, or both — but not nothing.
-  if (!body && !files.length) throw new BusinessRuleError("Write a message first.");
+  if (!typed && !files.length) throw new BusinessRuleError("Write a message first.");
 
   // A retry of a send that already landed — the response was lost, the tab
   // went to sleep mid-request — is answered with what was stored. Looked up
@@ -111,16 +350,7 @@ export async function sendMessage(input, actor) {
     if (!conversation) throw new NotFoundError("That conversation no longer exists.");
     assertParticipant(conversation, actor);
   } else {
-    // A learner starting a thread from a tutor profile.
-    if (actor.role === ROLES.TUTOR) {
-      throw new BusinessRuleError("Tutors can only reply to existing conversations.");
-    }
-    conversation = await getOrCreateConversation({
-      learnerUserId: actor.id,
-      tutorProfileId: input.tutorProfileId,
-      bookingId: input.bookingId,
-      requestId: input.requestId,
-    });
+    conversation = await startConversation(input, actor);
   }
 
   // Blocking is one-directional: the blocker stops receiving messages (§21).
@@ -130,6 +360,12 @@ export async function sendMessage(input, actor) {
       "CONVERSATION_BLOCKED",
     );
   }
+
+  // Contact details are removed before the body is stored, so the original
+  // never exists anywhere but in the sender's own browser (R17.7). Payment
+  // language is flagged but kept word for word.
+  const screening = screenBody(typed);
+  const body = screening.body;
 
   // Nothing is uploaded until the thread has accepted the message: a sender
   // who is blocked, or who is not a participant, never reaches the store.
@@ -147,6 +383,7 @@ export async function sendMessage(input, actor) {
       attachments,
       clientId: input.clientId,
       readBy: [actor.id],
+      moderation: screening.moderation,
     });
   } catch (error) {
     await discardAttachments(attachments);
@@ -212,9 +449,22 @@ export async function sendMessage(input, actor) {
     entityId: conversation._id,
   });
 
+  if (screening.moderation) {
+    // Recorded, never acted on: an administrator decides what a pattern of
+    // these means (risk.service). Its own try/catch is inside.
+    await reportOffPlatformContact({
+      userId: actor.id,
+      conversationId: conversation._id,
+      messageId: message._id,
+      kinds: screening.kinds,
+    });
+  }
+
+  const warning = senderWarning(screening.moderation);
   return {
     message: publicMessage(toPlain(message)),
     conversationId: String(conversation._id),
+    ...(warning ? { warning } : {}),
   };
 }
 
@@ -222,10 +472,117 @@ export async function sendMessage(input, actor) {
 async function findSentMessage(actor, clientId) {
   const existing = await Message.findOne({ senderId: actor.id, clientId }).lean();
   if (!existing) return null;
+  const warning = senderWarning(existing.moderation);
   return {
     message: publicMessage(toPlain(existing)),
     conversationId: String(existing.conversationId),
+    ...(warning ? { warning } : {}),
   };
+}
+
+/**
+ * Narrate a booking event inside the family's thread with the tutor (§21,
+ * R17.3) — "Lesson confirmed for Tuesday 4:30 pm", and the like.
+ *
+ * Called by the booking paths after the event has happened, so it is built to
+ * be harmless to them:
+ *
+ *   - It never throws. A lesson is confirmed whether or not the thread hears
+ *     about it; anything that goes wrong is logged and `null` is returned.
+ *   - It is idempotent. One event writes one message: the key is the event,
+ *     the booking and `dedupeKey` (by default a hash of the body, so a second
+ *     reschedule to a *different* time is a second message and a replay of
+ *     the same one is not).
+ *   - It is not a member's message. There is no sender, so no verified-email
+ *     requirement, no block check (a block stops a person writing, and the
+ *     platform recording what happened to a lesson is not that) and no
+ *     response-time update.
+ *   - It does not touch unread counts. The booking flow already notifies both
+ *     people through the notification centre; counting the same event again
+ *     on the messages badge would make every confirmation two alerts. The
+ *     thread's `lastMessageAt` does move, so the thread surfaces in the inbox
+ *     and an open conversation catches up through the realtime stream.
+ *
+ * @param {object} input
+ * @param {string} input.learnerUserId  The booking's purchaser.
+ * @param {string} input.tutorUserId    The booking's tutor (a User id).
+ * @param {string} [input.bookingId]    Checked against the pair before use.
+ * @param {string} input.event          One of `MESSAGE_SYSTEM_EVENTS`.
+ * @param {string} input.body           What the thread shows. Plain text.
+ * @param {string} [input.dedupeKey]    Overrides the default idempotency key.
+ * @returns {Promise<object|null>} the stored message, public shape, or null.
+ */
+export async function postSystemMessage({
+  learnerUserId,
+  tutorUserId,
+  bookingId,
+  event,
+  body,
+  dedupeKey,
+} = {}) {
+  try {
+    if (!Object.values(MESSAGE_SYSTEM_EVENTS).includes(event)) {
+      throw new Error(`unknown system event "${event}"`);
+    }
+    const text = sanitizeMultiline(body, { maxLength: 1000 });
+    if (!learnerUserId || !tutorUserId || !text) throw new Error("a pair and a body are required");
+
+    if (bookingId) {
+      const belongs = await Booking.exists({ _id: bookingId, purchaserId: learnerUserId, tutorUserId });
+      if (!belongs) throw new Error("that booking is not between these two accounts");
+    }
+
+    const systemKey = [
+      event,
+      bookingId ?? "-",
+      dedupeKey ?? createHash("sha256").update(text).digest("hex").slice(0, 24),
+    ].join(":");
+
+    const already = await Message.findOne({ systemKey }).lean();
+    if (already) return publicMessage(toPlain(already));
+
+    const profile = await TutorProfile.findOne({ userId: tutorUserId }).select("_id").lean();
+    const conversation = await upsertConversation({
+      learnerUserId,
+      tutorUserId,
+      tutorProfileId: profile?._id,
+      bookingId: bookingId || undefined,
+    });
+
+    let message;
+    try {
+      message = await Message.create({
+        conversationId: conversation._id,
+        kind: "SYSTEM",
+        systemEvent: event,
+        bookingId: bookingId || undefined,
+        systemKey,
+        body: text,
+        readBy: [],
+      });
+    } catch (error) {
+      // The same event, posted twice at once: the other one is the answer.
+      if (error?.code === 11000) {
+        const raced = await Message.findOne({ systemKey }).lean();
+        if (raced) return publicMessage(toPlain(raced));
+      }
+      throw error;
+    }
+
+    await Conversation.updateOne(
+      { _id: conversation._id },
+      {
+        $max: { lastMessageAt: message.createdAt },
+        $set: { lastMessagePreview: truncate(text, 140) },
+        $unset: { lastMessageSenderId: 1 },
+      },
+    );
+
+    return publicMessage(toPlain(message));
+  } catch (error) {
+    console.error("[messages] system message not posted:", error.message);
+    return null;
+  }
 }
 
 /** How a message with no text reads in a thread list or a notification. */
@@ -246,11 +603,16 @@ function attachmentPreview(attachments = []) {
  * rebuilt as the public shape, so the only way to the bytes is the id and the
  * route that checks who is asking.
  */
-export function publicMessage(message) {
+export function publicMessage(message, { withModeration = false } = {}) {
   if (!message) return message;
+  // What the off-platform check found is between the sender and moderators:
+  // the recipient sees the masked text, not a label on the person who sent it.
+  // `systemKey` is bookkeeping for idempotency and means nothing to a browser.
+  const { moderation, systemKey: _systemKey, ...rest } = message;
   return {
-    ...message,
-    attachments: (message.attachments ?? []).map((attachment) =>
+    ...rest,
+    ...(withModeration && moderation ? { moderation } : {}),
+    attachments: (rest.attachments ?? []).map((attachment) =>
       toPublicAttachment(attachment, MESSAGE_ATTACHMENT_HREF),
     ),
   };
@@ -259,22 +621,50 @@ export function publicMessage(message) {
 /**
  * Track how quickly a tutor replies — shown on their profile as a trust
  * signal, and used by the matching service (§15, §22).
+ *
+ * A message is a *reply* only when the message before it was the learner's
+ * (R10.8). A tutor's second and third messages in a row answer nothing, and
+ * counting them — as this once did, against the learner's last message —
+ * dragged the average toward whatever gap there was between the tutor's own
+ * messages. SYSTEM messages are nobody's turn and are skipped.
+ *
+ * The time is measured from the *first* learner message the tutor had not yet
+ * answered: a family who wrote at 9:00 and again at 9:50 waited an hour for a
+ * 10:00 reply, not ten minutes.
  */
 async function updateTutorResponseTime(conversation, actor, message) {
   if (String(actor.id) !== String(conversation.tutorUserId)) return;
 
-  const previous = await Message.findOne({
+  const inThread = {
     conversationId: conversation._id,
-    senderId: { $ne: actor.id },
-    createdAt: { $lt: message.createdAt },
-  })
-    .sort({ createdAt: -1 })
+    _id: { $ne: message._id },
+    kind: { $ne: "SYSTEM" },
+    createdAt: { $lte: message.createdAt },
+  };
+
+  const previous = await Message.findOne(inThread)
+    .sort({ createdAt: -1, _id: -1 })
+    .select("senderId createdAt")
+    .lean();
+  if (!previous || String(previous.senderId) !== String(conversation.learnerUserId)) return;
+
+  const lastTutorMessage = await Message.findOne({ ...inThread, senderId: actor.id })
+    .sort({ createdAt: -1, _id: -1 })
     .select("createdAt")
     .lean();
+  const firstUnanswered = await Message.findOne({
+    ...inThread,
+    senderId: conversation.learnerUserId,
+    ...(lastTutorMessage
+      ? { createdAt: { $gt: lastTutorMessage.createdAt, $lte: message.createdAt } }
+      : {}),
+  })
+    .sort({ createdAt: 1, _id: 1 })
+    .select("createdAt")
+    .lean();
+  const waitingSince = firstUnanswered?.createdAt ?? previous.createdAt;
 
-  if (!previous) return;
-
-  const minutes = Math.round((message.createdAt - previous.createdAt) / 60000);
+  const minutes = Math.max(0, Math.round((message.createdAt - waitingSince) / 60000));
   const profile = await TutorProfile.findOne({ userId: actor.id }).select("stats").lean();
   if (!profile) return;
 
@@ -288,8 +678,16 @@ async function updateTutorResponseTime(conversation, actor, message) {
   );
 }
 
+/**
+ * The one access rule for a thread: you are one of its two participants.
+ *
+ * There is deliberately no administrator exception (S8). One used to sit
+ * here, and it meant every participant route — read, post, mark read, block,
+ * report — also served any administrator, unaudited, on any thread. The
+ * moderation paths below are how an administrator reads a thread, and they
+ * record that they did.
+ */
 function assertParticipant(conversation, actor) {
-  if (actor.role === ROLES.ADMIN) return;
   const isParticipant = conversation.participantIds.some(
     (id) => String(id) === String(actor.id),
   );
@@ -513,7 +911,53 @@ export async function reportConversation(id, { reason }, actor) {
   });
   await conversation.save();
 
+  // The reason itself lives on the case, in `moderationHistory`, where only a
+  // moderator reads it; the audit row records that a report was made.
+  await recordAudit({
+    actor,
+    action: AUDIT_ACTIONS.CONVERSATION_REPORTED,
+    entityType: "Conversation",
+    entityId: conversation._id,
+    metadata: {
+      reportStatus: conversation.reportStatus,
+      reportCount: conversation.reportCount,
+      opened: reopened,
+    },
+  });
+
+  // A report has to reach a person (R17.6). Administrators are told when a
+  // case opens — a first report, or one on a thread that had been resolved.
+  // A further report on a case already in the queue is folded into it and
+  // does not page every administrator again.
+  if (reopened) await notifyModerators(conversation, actor);
+
   return { reported: true, reportStatus: conversation.reportStatus };
+}
+
+/**
+ * In-app notice to every active administrator. The report is already saved
+ * and in the queue, so a failure here is logged rather than turned into an
+ * error the reporter would retry — which would only report the thread twice.
+ */
+async function notifyModerators(conversation, actor) {
+  try {
+    const admins = await User.find({ role: ROLES.ADMIN, status: USER_STATUS.ACTIVE })
+      .select("_id")
+      .lean();
+    await notifyMany(
+      admins.map((admin) => admin._id),
+      {
+        type: NOTIFICATION_TYPES.CONVERSATION_REPORTED,
+        title: "A conversation was reported",
+        body: `A ${String(actor.role ?? "member").toLowerCase()} reported a conversation. It is waiting in the moderation queue.`,
+        href: `/admin/moderation/${conversation._id}`,
+        entityType: "Conversation",
+        entityId: conversation._id,
+      },
+    );
+  } catch (error) {
+    console.error("[messages] could not notify moderators of a report:", error.message);
+  }
 }
 
 // --- Admin moderation queue (§21, §35) -------------------------------------
@@ -608,8 +1052,9 @@ export async function getReportedConversation(id, admin, { limit = 100 } = {}) {
   return {
     conversation: toPlain(conversation),
     // A moderator judging a reported thread has to be able to see what was
-    // shared in it, not only what was typed.
-    messages: toPlain(messages).map(publicMessage),
+    // shared in it, not only what was typed — and what the off-platform check
+    // found in it.
+    messages: toPlain(messages).map((m) => publicMessage(m, { withModeration: true })),
     bookings: toPlain(bookings),
   };
 }
@@ -636,10 +1081,20 @@ export async function readMessageAttachment(attachmentId, actor) {
   if (!message) throw new NotFoundError("That file is no longer available.");
 
   const conversation = await Conversation.findById(message.conversationId)
-    .select("participantIds")
+    .select("participantIds reportStatus")
     .lean();
   if (!conversation) throw new NotFoundError("That file is no longer available.");
-  assertParticipant(conversation, actor);
+  // An administrator is not a participant (S8). The only administrator path
+  // into a thread's files is the one into its messages: the conversation has
+  // been reported, so it is in the moderation queue, and the read is audited
+  // below. Everybody else must be in the thread.
+  const isParticipant = conversation.participantIds.some((id) => String(id) === String(actor.id));
+  if (!isParticipant) {
+    if (actor.role !== ROLES.ADMIN || !conversation.reportStatus) {
+      throw new AuthorizationError("You do not have access to this conversation.");
+    }
+  }
+  const viaModeration = !isParticipant;
 
   const attachment = (message.attachments ?? []).find(
     (candidate) => String(candidate._id) === String(attachmentId),
@@ -649,7 +1104,7 @@ export async function readMessageAttachment(attachmentId, actor) {
   // A participant opening a file in their own thread is the feature working.
   // An administrator opening one is an act worth being able to review later —
   // the same line `CONVERSATION_REPORT_VIEWED` draws (§35).
-  if (actor.role === ROLES.ADMIN) {
+  if (viaModeration) {
     await recordAudit({
       actor,
       action: AUDIT_ACTIONS.ATTACHMENT_ADMIN_VIEWED,

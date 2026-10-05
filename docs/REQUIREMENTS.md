@@ -10,9 +10,12 @@ Every numbered section of `docs/Project.md`, mapped to what implements it.
 - **Partial** — working, with a named limitation
 - **Phase 2/3** — deliberately deferred, with the architecture in place
 
-Verified on a seeded database: `bun run lint` (clean) → `bun run build`
-(clean) → `bun run test:integrations` (1222 passed, 0 failed, 1 skipped) →
-`bun run qa` (813 passed, 0 failed).
+Verified on a seeded, isolated database (5 October 2026): `bun run lint` (clean) →
+`bun run build` (clean) → `bun run test:integrations` (2353 passed, 0 failed, 2 skipped) →
+`bun run qa` (1196 passed, 0 failed) → browser: `bun run e2e:journeys` (36/0), `e2e` (20/0),
+`e2e:realtime` (24/0), `e2e:install` (102/0). The remediation of the 1 October
+requirements audit — what changed, per requirement, and what remains — is in
+[docs/AUDIT_REPORT.md §0](AUDIT_REPORT.md).
 
 `qa`'s assertion count varies by one or two between runs: several sections
 assert conditionally on the fixtures still in the database, and the suite

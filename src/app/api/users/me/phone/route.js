@@ -8,7 +8,7 @@ import {
   confirmPhoneVerification,
   removePhone,
 } from "@/services/sms.service";
-import { enforceRateLimit, clientKey } from "@/lib/security/rate-limit";
+import { enforceRateLimit, clientKey, clientIp } from "@/lib/security/rate-limit";
 
 /**
  * Confirming a mobile number (§41 Phase 2).
@@ -24,7 +24,7 @@ export const POST = routeHandler(
     await enforceRateLimit(clientKey(request, "phone-verify"), { limit: 5, windowMs: 15 * 60_000 });
     return created(
       await startPhoneVerification(user.id, body, {
-        ip: request.headers.get("x-forwarded-for")?.split(",")[0]?.trim(),
+        ip: clientIp(request) ?? undefined,
       }),
     );
   },

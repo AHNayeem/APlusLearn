@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { X, Plus } from "lucide-react";
 import { Badge, Field, Input, Textarea, InlineNote } from "@/components/ui";
+import { ProfilePhotoPanel } from "@/components/dashboard/ProfilePhotoPanel";
 
 const SUGGESTED_LANGUAGES = [
   "English", "French", "Mandarin", "Cantonese", "Punjabi", "Hindi", "Urdu",
@@ -10,7 +11,7 @@ const SUGGESTED_LANGUAGES = [
 ];
 
 /** Step 2 — the headline and bio parents read first (§17). */
-export function ProfileStep({ value, onChange, fieldErrors }) {
+export function ProfileStep({ value, onChange, fieldErrors, account, onPhotoChange }) {
   const [languageInput, setLanguageInput] = useState("");
   const languages = value.languages ?? ["English"];
 
@@ -27,6 +28,9 @@ export function ProfileStep({ value, onChange, fieldErrors }) {
 
   return (
     <div className="space-y-5">
+      {/* The photo parents see on every card, uploaded here rather than
+          found later in settings, and shown to the reviewer (R13.2). */}
+      {account && <ProfilePhotoPanel user={account} onChange={onPhotoChange} />}
       <Field
         label="Headline"
         htmlFor="ob-headline"

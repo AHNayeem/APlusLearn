@@ -183,9 +183,58 @@ export async function enforceRateLimit(key, options) {
   return result;
 }
 
-/** Best-effort client identity for limiting — proxy headers then fallback. */
+/**
+ * The client's address, from a source the deployment controls (audit S11).
+ *
+ * The leftmost `X-Forwarded-For` value is whatever the client wrote there: a
+ * proxy *appends* the address it received the connection from, it does not
+ * replace what was already in the header. Keying a limit on that value let
+ * anybody pick a fresh "IP" per request and walk straight past every limit
+ * this file sets, and wrote an invented address into the audit log. So the
+ * leftmost value is never read unless the deployment has said how many
+ * proxies sit in front of it.
+ *
+ * In order:
+ *
+ *   1. `TRUSTED_PROXY_HOPS=<n>` — the number of proxies *this deployment*
+ *      runs in front of the app (a load balancer is 1; a CDN in front of a
+ *      load balancer is 2). The client is then the n-th address counted from
+ *      the *right* of `X-Forwarded-For`: everything to the right of it was
+ *      appended by infrastructure we trust, everything to the left of it by
+ *      somebody we don't.
+ *   2. `X-Real-IP` — set (overwritten, not appended) by the platform's own
+ *      edge: Vercel does this, and an nginx front end does it with
+ *      `proxy_set_header X-Real-IP $remote_addr`. A deployment whose proxy
+ *      does *not* overwrite it must set `TRUSTED_PROXY_HOPS` instead.
+ *   3. Nothing — the caller decides what an unknown address means. For
+ *      limiting that is one shared "local" bucket, which is stricter, never
+ *      looser, than a per-address one.
+ *
+ * @returns {string|null}
+ */
+export function clientIp(request) {
+  const headers = request?.headers;
+  if (!headers?.get) return null;
+
+  const hops = Number.parseInt(process.env.TRUSTED_PROXY_HOPS ?? "", 10);
+  if (Number.isInteger(hops) && hops > 0) {
+    const chain = (headers.get("x-forwarded-for") ?? "")
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+    if (chain.length) {
+      // Shorter than the configured chain means the request reached us through
+      // fewer proxies than declared; the leftmost entry was then written by
+      // the first trusted hop, so it is still not the client's own claim.
+      return chain[Math.max(0, chain.length - hops)];
+    }
+  }
+
+  return headers.get("x-real-ip")?.trim() || null;
+}
+
+/** Client identity for limiting — see `clientIp` for where it comes from. */
 export function clientKey(request, suffix = "") {
-  const forwarded = request.headers.get("x-forwarded-for");
-  const ip = forwarded?.split(",")[0]?.trim() || request.headers.get("x-real-ip") || "local";
+  const ip = clientIp(request) ?? "local";
   return suffix ? `${ip}:${suffix}` : ip;
 }

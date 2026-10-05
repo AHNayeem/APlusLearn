@@ -99,6 +99,15 @@ const UserSchema = new mongoose.Schema(
       index: true,
     },
 
+    /**
+     * Why the account is in its current administrative state (R28.2). Set on
+     * every suspend, ban and restore, so the account record itself says why a
+     * member cannot sign in; the audit log keeps the full history.
+     */
+    statusReason: { type: String, trim: true, maxlength: 600 },
+    statusChangedAt: { type: Date },
+    statusChangedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+
     emailVerifiedAt: { type: Date, default: null },
 
     /**

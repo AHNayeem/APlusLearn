@@ -23,8 +23,19 @@ const VerificationDocumentSchema = new mongoose.Schema(
     fileName: { type: String, required: true, trim: true },
     contentType: { type: String, required: true },
     sizeBytes: { type: Number, required: true },
-    /** Private storage key — never exposed to non-admin clients. */
-    storageKey: { type: String, required: true, select: false },
+    /**
+     * Private storage key — never exposed to non-admin clients. Removed with
+     * the bytes when the document is discarded (retention or anonymisation).
+     */
+    storageKey: {
+      type: String,
+      select: false,
+      required() {
+        return !this.discardedAt;
+      },
+    },
+    /** When the stored bytes were deleted (S9). The metadata row stays. */
+    discardedAt: { type: Date },
     status: {
       type: String,
       enum: Object.values(DOCUMENT_STATUS),
@@ -60,6 +71,12 @@ const VerificationRecordSchema = new mongoose.Schema(
     expiresAt: { type: Date },
     /** Reference number (OCT registration, check reference, etc.). */
     referenceNumber: { type: String, trim: true },
+    /**
+     * When every document behind this record was deleted (S9, R30.10) — by
+     * the retention job after a decline or expiry, or by an account's
+     * anonymisation. The decision, dates and reference survive it.
+     */
+    documentsDiscardedAt: { type: Date },
   },
   { timestamps: true },
 );

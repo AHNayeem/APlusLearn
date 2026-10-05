@@ -1,5 +1,7 @@
 import { routeHandler, ok, ValidationError } from "@/lib/api";
 import { uploadAvatar, removeAvatar } from "@/services/user.service";
+import { readBoundedFormData } from "@/lib/security/upload-size";
+import { AVATAR_IMAGE } from "@/constants";
 
 /**
  * A person's own profile photo (§8, §16).
@@ -18,7 +20,12 @@ import { uploadAvatar, removeAvatar } from "@/services/user.service";
  */
 export const POST = routeHandler(
   async ({ request, user }) => {
-    const form = await request.formData();
+    // Capped before it is buffered (S19); the service still checks the file.
+    const form = await readBoundedFormData(
+      request,
+      AVATAR_IMAGE.maxBytes,
+      `Your photo must be smaller than ${Math.round(AVATAR_IMAGE.maxBytes / 1024 / 1024)} MB.`,
+    );
     const file = form.get("file");
 
     if (!file || typeof file === "string") {

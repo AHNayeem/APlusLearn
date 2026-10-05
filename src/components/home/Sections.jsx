@@ -9,8 +9,18 @@ import { Badge, Button, Reveal, RevealGroup, RevealItem } from "@/components/ui"
 import { StepCards } from "@/components/home/StepCards";
 import { StepArt } from "@/components/home/StepArt";
 import { TestimonialRail } from "@/components/home/TestimonialRail";
-import { formatRate, formatNumber } from "@/lib/utils/format";
-import { VERIFICATION_LABELS, VERIFICATION_DESCRIPTIONS, VERIFICATION_TYPES } from "@/constants";
+import { formatNumber, applicationReviewLabel } from "@/lib/utils/format";
+import {
+  VERIFICATION_LABELS, VERIFICATION_DESCRIPTIONS, VERIFICATION_TYPES, VERIFICATION_DISCLAIMER,
+  HOME_FAQS, freeCancellationClause,
+} from "@/constants";
+
+/**
+ * The FAQ questions moved to `constants/public-copy.js`, where they are built
+ * from live settings and catalogue data (`homeFaqs`). Re-exported so existing
+ * importers keep working; `HOME_FAQS` is the version that quotes no numbers.
+ */
+export { HOME_FAQS, homeFaqs } from "@/constants";
 
 /**
  * The wave that opens every marketing section (§30). Small, warm and the only
@@ -155,7 +165,7 @@ const STEPS = [
   {
     art: "progress",
     title: "Track progress, rebook easily",
-    body: "See every lesson, receipt and review in one place. Rebook your tutor in two taps when it's working.",
+    body: "See every lesson, receipt and review in one place, and book the same tutor again from the lesson when it's working.",
   },
 ];
 
@@ -243,7 +253,7 @@ function toneClasses(key) {
   );
 }
 
-// --- Popular Ontario courses (§12) -----------------------------------------
+// --- Popular courses (§12) -------------------------------------------------
 
 /**
  * Cards are tinted by the code's opening letter, because in Ontario's system
@@ -265,30 +275,59 @@ const CODE_TONES = {
 };
 
 /**
- * The five characters of an Ontario code, split the way the ministry defines
- * them. Shown coming apart rather than described, because "a code maps to
- * exactly one curriculum" stays an abstract claim until you watch MHF4U do it.
- * The diagram is `aria-hidden` — read aloud it is just letters — and the line
- * underneath carries the same information in prose.
+ * The five characters of a course code in the three-letters, grade-digit,
+ * pathway-letter shape some provinces use (Ontario's MHF4U), split the way
+ * the ministry defines them. Shown coming apart rather than described,
+ * because "a code maps to exactly one curriculum" stays an abstract claim
+ * until you watch one do it. The example is the first popular course whose
+ * code has that shape — read from the data, so a province without such codes
+ * simply shows no diagram. It is `aria-hidden` — read aloud it is just
+ * letters — and the line underneath carries the same information in prose.
  */
-const CODE_ANATOMY = [
-  { chars: "MHF", label: "Course" },
-  { chars: "4", label: "Grade" },
-  { chars: "U", label: "Pathway" },
-];
+const CODE_SHAPE = /^([A-Z]{3})(\d)([A-Z])$/;
 
-export function PopularCourses({ courses = [] }) {
+function codeAnatomy(courses) {
+  const sample = courses.find((course) => CODE_SHAPE.test(course.code ?? ""));
+  if (!sample) return null;
+  const [, letters, grade, pathway] = sample.code.match(CODE_SHAPE);
+  return {
+    course: sample,
+    parts: [
+      { chars: letters, label: "Course" },
+      { chars: grade, label: "Grade" },
+      { chars: pathway, label: "Pathway" },
+    ],
+  };
+}
+
+/**
+ * Popular courses for one province (§12).
+ *
+ * `province` is `{ code, name, slug }` from the data — the homepage passes
+ * the default live province. It names the section and scopes every link;
+ * without it the heading is neutral and each link carries the course's own
+ * province, so a card can never send a visitor to another province's course.
+ */
+export function PopularCourses({ courses = [], province }) {
   if (!courses.length) return null;
+
+  const anatomy = codeAnatomy(courses);
+  const coded = courses.some((course) => course.code);
+  const allHref = province ? `/courses?province=${province.code}` : "/courses";
 
   return (
     <Section
-      eyebrow="Popular Ontario courses"
-      title="Search by course code, the way report cards do"
-      description="A report card hands you MHF4U, not “senior math”. Search the code and you get tutors who have taught that exact course."
+      eyebrow={province ? `Popular ${province.name} courses` : "Popular courses"}
+      title={coded ? "Search by course code, the way report cards do" : "The courses families ask about most"}
+      description={
+        anatomy
+          ? `A report card hands you ${anatomy.course.code}, not “${anatomy.course.subjectName?.toLowerCase() ?? "a subject"}”. Search the code and you get tutors who have taught that exact course.`
+          : "Search the exact course and you get tutors who have taught it — not everyone who lists the subject."
+      }
       tone="muted"
       action={
-        <Button href="/courses" variant="secondary" iconRight={<ArrowRight className="size-4" />}>
-          All Ontario courses
+        <Button href={allHref} variant="secondary" iconRight={<ArrowRight className="size-4" />}>
+          {province ? `All ${province.name} courses` : "All courses"}
         </Button>
       }
     >
@@ -297,9 +336,11 @@ export function PopularCourses({ courses = [] }) {
           const tone = CODE_TONES[course.code?.[0]] ?? CODE_TONES.M;
           // Elementary courses carry no code, so they resolve by slug instead —
           // narrowed by grade, because a slug is only unique within one.
+          const provinceCode = province?.code ?? course.provinceCode;
+          const scope = provinceCode ? `&province=${provinceCode}` : "";
           const href = course.code
-            ? `/find-a-tutor?courseCode=${course.code}&province=ON`
-            : `/find-a-tutor?course=${course.slug}&grade=${course.gradeSlug}&province=ON`;
+            ? `/find-a-tutor?courseCode=${course.code}${scope}`
+            : `/find-a-tutor?course=${course.slug}&grade=${course.gradeSlug}${scope}`;
 
           return (
             <RevealItem key={course.id} className="h-full">
@@ -338,7 +379,8 @@ export function PopularCourses({ courses = [] }) {
                       tone.chip,
                     )}
                   >
-                    Grade {course.gradeLevel} · {course.stream}
+                    Grade {course.gradeLevel}
+                    {course.stream ? ` · ${course.stream}` : ""}
                   </span>
 
                   {course.description && (
@@ -371,14 +413,15 @@ export function PopularCourses({ courses = [] }) {
         })}
       </RevealGroup>
 
+      {anatomy && (
       <Reveal className="mt-10 lg:mt-12">
         <div className="mx-auto max-w-2xl rounded-2xl border border-ink-200 bg-canvas px-6 py-7 text-center sm:px-8">
           <p className="text-xs font-bold uppercase tracking-[0.14em] text-ink-400">
-            How an Ontario code reads
+            How a course code reads
           </p>
 
           <div className="mt-5 flex items-start justify-center gap-4 sm:gap-6" aria-hidden="true">
-            {CODE_ANATOMY.map(({ chars, label }) => (
+            {anatomy.parts.map(({ chars, label }) => (
               <span key={label} className="flex flex-col items-center">
                 <span className="flex gap-1.5">
                   {[...chars].map((char, index) => (
@@ -403,11 +446,14 @@ export function PopularCourses({ courses = [] }) {
           </div>
 
           <p className="mx-auto mt-5 max-w-md text-xs leading-relaxed text-ink-500">
-            Three letters for the course, one digit for the grade, one for the pathway. MHF4U is
-            Grade 12 university-level Advanced Functions — and nothing else answers to it.
+            Three letters for the course, one digit for the grade, one for the pathway.{" "}
+            {anatomy.course.code} is Grade {anatomy.course.gradeLevel}
+            {anatomy.course.stream ? ` ${anatomy.course.stream.toLowerCase()}-level` : ""}{" "}
+            {anatomy.course.name} — and nothing else answers to it.
           </p>
         </div>
       </Reveal>
+      )}
     </Section>
   );
 }
@@ -415,7 +461,7 @@ export function PopularCourses({ courses = [] }) {
 // --- Find tutors by grade (§12) --------------------------------------------
 
 /**
- * The Ontario stages, in the order a child moves through them (§12).
+ * The school stages, in the order a child moves through them (§12).
  *
  * Rendered as one ladder rather than three equal cards, because the stages
  * hold seven, two and four grades — a three-column grid leaves the
@@ -427,7 +473,6 @@ const GRADE_STAGES = [
   {
     stage: "ELEMENTARY",
     label: "Elementary",
-    range: "K–6",
     hint: "Reading fluency, number sense, and homework that stops being a fight.",
     tile: "bg-brand-600",
     chip: "bg-brand-50 text-brand-700 ring-brand-100 hover:bg-brand-600 hover:text-white hover:ring-brand-600",
@@ -435,7 +480,6 @@ const GRADE_STAGES = [
   {
     stage: "MIDDLE",
     label: "Intermediate",
-    range: "7–8",
     hint: "Where algebra lands and small gaps start to compound.",
     tile: "bg-plum-600",
     chip: "bg-plum-50 text-plum-700 ring-plum-100 hover:bg-plum-600 hover:text-white hover:ring-plum-600",
@@ -443,7 +487,6 @@ const GRADE_STAGES = [
   {
     stage: "SECONDARY",
     label: "Secondary",
-    range: "9–12",
     hint: "Course codes, exam prep, and the marks universities will see.",
     tile: "bg-accent-500",
     chip: "bg-accent-50 text-accent-700 ring-accent-100 hover:bg-accent-500 hover:text-white hover:ring-accent-500",
@@ -465,12 +508,29 @@ function gradeChipLabel(name) {
     .toUpperCase();
 }
 
-export function TutorsByGrade({ grades = [] }) {
+/**
+ * "K–6", "7–8", "9–12" — read from the grades a stage actually holds, so a
+ * province that groups its grades differently is described as it is.
+ */
+function stageRange(grades) {
+  const label = (grade) => (grade.level === 0 ? "K" : String(grade.level));
+  const first = grades[0];
+  const last = grades.at(-1);
+  return first === last ? label(first) : `${label(first)}–${label(last)}`;
+}
+
+/**
+ * Grades of one province (§12). `province` is `{ code, name, slug }` from
+ * the data; it names the section and scopes each link. Without it the
+ * heading is neutral and the links carry no province.
+ */
+export function TutorsByGrade({ grades = [], province }) {
   if (!grades.length) return null;
+  const scope = province ? `&province=${province.code}` : "";
 
   return (
     <Section
-      eyebrow="Find tutors by grade"
+      eyebrow={province ? `Find ${province.name} tutors by grade` : "Find tutors by grade"}
       title="Support that matches where your child actually is"
       description="A Grade 4 reading gap and a Grade 12 calculus gap need very different tutors. Start from the grade."
     >
@@ -496,7 +556,7 @@ export function TutorsByGrade({ grades = [] }) {
                         stage.tile,
                       )}
                     >
-                      {stage.range}
+                      {stageRange(inStage)}
                     </span>
                     <span className="min-w-0">
                       <h3 className="text-base font-bold tracking-tight text-ink-900">{stage.label}</h3>
@@ -508,7 +568,7 @@ export function TutorsByGrade({ grades = [] }) {
                     {inStage.map((grade) => (
                       <Link
                         key={grade.id}
-                        href={`/find-a-tutor?grade=${grade.slug}&province=ON`}
+                        href={`/find-a-tutor?grade=${grade.slug}${scope}`}
                         aria-label={`Find ${grade.name} tutors`}
                         className={cn(
                           "inline-flex size-11 items-center justify-center rounded-2xl",
@@ -551,8 +611,8 @@ const REASONS = [
   {
     icon: BadgeCheck,
     friction: "Anyone can print “qualified tutor” on a listing.",
-    title: "Checked before you can find them",
-    body: "A profile only reaches search once its ID and credentials are confirmed — teaching certificates against the Ontario College of Teachers register.",
+    title: "Reviewed before you can find them",
+    body: "A profile only reaches search once a person on our team has reviewed the application. Each badge — identity, teaching certification, education, background check — is granted only after its document was checked, and the profile shows exactly which ones it holds.",
     tint: "bg-brand-50 text-brand-600",
   },
   {
@@ -566,7 +626,7 @@ const REASONS = [
     icon: ShieldCheck,
     friction: "Paying up front and hoping for the best.",
     title: "Your money waits until the lesson has happened",
-    body: "Payment is held until the lesson is complete. Free cancellation up to 24 hours before, and a full refund if a tutor doesn't show.",
+    body: "Payment is held until the lesson is complete. Every booking has the same published cancellation policy, and a tutor who doesn't show is refunded under it.",
     tint: "bg-success-50 text-success-600",
   },
   {
@@ -578,7 +638,25 @@ const REASONS = [
   },
 ];
 
-export function WhyChoose() {
+/**
+ * `policy` is `getAppConfig().policy`. When it is passed, the payment card
+ * quotes the live cancellation window and no-show refund; without it the card
+ * keeps to wording that holds whatever those settings are.
+ */
+export function WhyChoose({ policy } = {}) {
+  const reasons = REASONS.map((reason) =>
+    reason.icon === ShieldCheck && policy
+      ? {
+          ...reason,
+          body: `Payment is held until the lesson is complete. ${capitalise(freeCancellationClause(policy))}, and ${
+            Number(policy.tutorNoShowRefundPercent) >= 100
+              ? "a full refund"
+              : `a ${Number(policy.tutorNoShowRefundPercent)}% refund`
+          } if a tutor doesn't show.`,
+        }
+      : reason,
+  );
+
   return (
     <Section
       eyebrow="Why APlus Learn"
@@ -587,7 +665,7 @@ export function WhyChoose() {
       tone="muted"
     >
       <RevealGroup className="grid gap-6 md:grid-cols-2">
-        {REASONS.map(({ icon: ReasonIcon, friction, title, body, tint }) => (
+        {reasons.map(({ icon: ReasonIcon, friction, title, body, tint }) => (
           <RevealItem key={title} className="h-full">
             <article
               className={cn(
@@ -658,7 +736,7 @@ export function VerificationSection() {
   return (
     <Section
       eyebrow="Tutor verification"
-      title="Five checks, each one earned separately"
+      title="Each check earned separately"
       description="A tutor doesn't get a general seal of approval. Each badge means one specific thing was verified by our team, and you can see exactly which ones a tutor holds."
       action={
         <Button href="/verification" variant="secondary" iconRight={<ArrowRight className="size-4" />}>
@@ -685,6 +763,9 @@ export function VerificationSection() {
               <p className="mt-3 text-sm leading-relaxed text-ink-500">
                 A profile stays invisible until our team has reviewed it. There is no way to skip
                 the queue by paying.
+              </p>
+              <p className="mt-4 border-t border-ink-100 pt-4 text-xs leading-relaxed text-ink-400">
+                {VERIFICATION_DISCLAIMER}
               </p>
             </div>
           </div>
@@ -754,7 +835,6 @@ const LESSON_MODE_CARDS = [
       "No travel time, so evening slots actually work",
       "Access to tutors anywhere in the province",
       "Screen sharing makes worked solutions easy to follow",
-      "Often a few dollars an hour cheaper",
     ],
     footnote: "Nothing to install for the student — the link opens in a browser.",
     stage: "bg-brand-50",
@@ -901,7 +981,20 @@ export function Testimonials({ reviews = [] }) {
 
 // --- Become a tutor (§12) --------------------------------------------------
 
-export function BecomeTutorCta({ commissionPercent = 15 }) {
+/**
+ * `commissionPercent` comes from settings and `policy` is
+ * `getAppConfig().policy`. Neither has a default here: a missing number is
+ * left out of the copy rather than replaced by one somebody once typed.
+ */
+export function BecomeTutorCta({ commissionPercent, policy } = {}) {
+  const hasCommission = Number.isFinite(Number(commissionPercent)) && commissionPercent !== null && commissionPercent !== undefined;
+  const reviewTime = policy ? applicationReviewLabel(policy) : null;
+  const stats = [
+    { value: "$0", label: "To join" },
+    ...(hasCommission ? [{ value: `${commissionPercent}%`, label: "Per completed lesson" }] : []),
+    ...(reviewTime ? [{ value: reviewTime, label: "Typical review time" }] : []),
+  ];
+
   return (
     <Section tone="dark">
       <div className="grid items-center gap-10 lg:grid-cols-2">
@@ -914,16 +1007,12 @@ export function BecomeTutorCta({ commissionPercent = 15 }) {
           </h2>
           <p className="mt-4 text-base leading-relaxed text-brand-100/80">
             Set your own hourly rate and availability. We handle payments, scheduling and the
-            paperwork, and take {commissionPercent}% of each completed lesson — nothing upfront, and
-            nothing when you&rsquo;re not teaching.
+            paperwork, and take {hasCommission ? `${commissionPercent}%` : "a commission"} of each
+            completed lesson — nothing upfront, and nothing when you&rsquo;re not teaching.
           </p>
 
           <dl className="mt-8 grid grid-cols-2 gap-6 sm:grid-cols-3">
-            {[
-              { value: "$0", label: "To join" },
-              { value: `${commissionPercent}%`, label: "Per completed lesson" },
-              { value: "48h", label: "Typical review time" },
-            ].map((item) => (
+            {stats.map((item) => (
               <div key={item.label}>
                 <dt className="sr-only">{item.label}</dt>
                 <dd>
@@ -955,7 +1044,7 @@ export function BecomeTutorCta({ commissionPercent = 15 }) {
             <ul className="mt-4 space-y-3">
               {[
                 "Government-issued photo ID",
-                "Proof of your qualifications — degree, diploma or OCT registration",
+                "Proof of your qualifications — degree, diploma or teaching certification",
                 "The provincial courses you're confident teaching",
                 "A few hours a week you can commit to",
               ].map((item) => (
@@ -977,41 +1066,7 @@ export function BecomeTutorCta({ commissionPercent = 15 }) {
 }
 
 // --- FAQ (§12) -------------------------------------------------------------
-
-export const HOME_FAQS = [
-  {
-    q: "How much does tutoring cost?",
-    a: "Tutors set their own rates. Most Ontario tutors on APlus Learn charge between $45 and $85 an hour, with certified teachers and specialists at the higher end. You see the exact hourly rate on every profile before you contact anyone, and the price you see is the price you pay — our commission comes out of the tutor's side.",
-  },
-  {
-    q: "Do I need an account to search?",
-    a: "No. You can search, filter, read reviews and view tutor profiles without signing up. You only need an account to message a tutor or make a booking, which is also when we ask about your child's grade and courses.",
-  },
-  {
-    q: "How are tutors verified?",
-    a: "Every tutor's identity is checked before their profile becomes visible. Beyond that, tutors can earn separate badges for education, Ontario College of Teachers membership, current university enrolment, and a Vulnerable Sector Check. Each badge on a profile means our team reviewed a specific document for it.",
-  },
-  {
-    q: "What if a lesson doesn't go well?",
-    a: "You can cancel free of charge up to 24 hours before a lesson starts. If a tutor doesn't show up, you're refunded in full automatically. If something else goes wrong, you can open a dispute from the lesson page and our team reviews it.",
-  },
-  {
-    q: "Can I book the same tutor every week?",
-    a: "Yes. When you book you can choose a recurring weekly or biweekly slot, and the whole series is reserved on the tutor's calendar. You can also rebook a past tutor in two taps from your dashboard.",
-  },
-  {
-    q: "Which provinces do you cover?",
-    a: "Ontario is fully supported today, including the complete secondary course-code curriculum. The platform is built so other provinces can be added without changing how search or booking works, and we're expanding based on where demand comes from.",
-  },
-  {
-    q: "How do online lessons work?",
-    a: "When you book an online lesson, a meeting link is generated for Zoom, Google Meet or Microsoft Teams — whichever the tutor offers. The link appears on the lesson in your dashboard and in your confirmation email.",
-  },
-  {
-    q: "Is my child's information private?",
-    a: "Tutors only see what they need to teach: a first name and last initial, the grade, and the course. Full names, addresses and contact details are never shown on public pages, and an in-person address is only released to the tutor once a lesson is confirmed.",
-  },
-];
+// Questions: `homeFaqs()` / `HOME_FAQS` in constants/public-copy.js.
 
 export function Faq({ faqs = HOME_FAQS, title = "Questions parents ask first", showAllLink = true }) {
   return (
@@ -1045,4 +1100,8 @@ export function Faq({ faqs = HOME_FAQS, title = "Questions parents ask first", s
       </div>
     </Section>
   );
+}
+
+function capitalise(text) {
+  return text ? text[0].toUpperCase() + text.slice(1) : text;
 }

@@ -85,7 +85,7 @@ export function Hero({
               {popularCourses.slice(0, 5).map((course) => (
                 <Link
                   key={course.id}
-                  href={`/find-a-tutor?courseCode=${course.code}&province=ON`}
+                  href={`/find-a-tutor?courseCode=${course.code}&province=${course.provinceCode}`}
                   className={[
                     "rounded-full border border-ink-200 bg-white/75 px-3.5 py-1.5",
                     "text-xs font-semibold tracking-wide text-ink-700 shadow-xs backdrop-blur-md",

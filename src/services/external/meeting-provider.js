@@ -1,7 +1,7 @@
 import "server-only";
 import { randomUUID, createSign } from "node:crypto";
 import { MEETING_PROVIDERS } from "@/constants";
-import { requireIntegration } from "@/lib/config/env";
+import { requireIntegration, isProduction } from "@/lib/config/env";
 
 /**
  * Online lesson links (§27, §38).
@@ -14,6 +14,7 @@ import { requireIntegration } from "@/lib/config/env";
  *                                    per-booking room link for all three, so
  *                                    bookings, dashboards and reminders carry
  *                                    meeting data without any credentials.
+ *                                    Never used in production (R25.1).
  *   ZoomMeetingProvider            — Zoom Server-to-Server OAuth.
  *   GoogleMeetProvider             — Google Calendar conference creation.
  *   MicrosoftTeamsMeetingProvider  — Microsoft Graph online meetings.
@@ -92,6 +93,41 @@ class MockMeetingProvider extends MeetingProvider {
 
   async deleteMeeting({ meetingId }) {
     return { meetingId, deleted: true };
+  }
+}
+
+/**
+ * What a production deployment has for a platform it holds no credentials
+ * for: nothing (R25.1).
+ *
+ * The development provider's links *look* real — `zoom.us/j/…`,
+ * `meet.google.com/…` — and lead nowhere. In development that is the point;
+ * in production it is a family and a tutor each sitting in a different empty
+ * room believing the other did not turn up. So production never fabricates a
+ * room: creation fails with a tagged error, `provisionMeeting` turns that into
+ * a lesson with no link, and the lesson page shows the "room pending" state
+ * with the tutor's paste-a-link controls (`configureMeeting`). Moving or
+ * deleting a room this adapter never made is a no-op.
+ */
+class UnconfiguredMeetingProvider extends MeetingProvider {
+  get name() {
+    return "NONE";
+  }
+
+  async createMeeting({ provider } = {}) {
+    const error = new Error(
+      `No meeting provider is configured for ${provider ?? "this platform"}; the tutor adds the link.`,
+    );
+    error.code = "MEETING_PROVIDER_NOT_CONFIGURED";
+    throw error;
+  }
+
+  async updateMeeting({ meetingId } = {}) {
+    return { meetingId, updated: false };
+  }
+
+  async deleteMeeting({ meetingId } = {}) {
+    return { meetingId, deleted: false };
   }
 }
 
@@ -610,8 +646,9 @@ const cache = new Map();
  * will call.
  *
  * A platform this deployment has no credentials for falls back to the
- * development provider, which issues a usable deterministic room link, rather
- * than failing the booking. `requireIntegration` still throws on a
+ * development provider in development, and in production to *no* room — the
+ * booking is confirmed without a link and the tutor adds one (R25.1). Either
+ * way the booking itself never fails. `requireIntegration` still throws on a
  * *misconfiguration* — a provider named without its secrets — so a broken
  * deployment is loud while an unconfigured one merely degrades.
  *
@@ -624,10 +661,16 @@ export function getMeetingProvider(requested) {
   const wanted = ADAPTER_KEYS[requested];
   const key = wanted && live.has(wanted) ? wanted : null;
 
-  const cacheKey = key ?? "development";
+  // Production never hands out a link nobody can join (R25.1).
+  const fallback = isProduction() ? "unconfigured" : "development";
+  const cacheKey = key ?? fallback;
   if (cache.has(cacheKey)) return cache.get(cacheKey);
 
-  const provider = key ? BUILDERS[key]() : new MockMeetingProvider();
+  const provider = key
+    ? BUILDERS[key]()
+    : fallback === "unconfigured"
+      ? new UnconfiguredMeetingProvider()
+      : new MockMeetingProvider();
   cache.set(cacheKey, provider);
   return provider;
 }

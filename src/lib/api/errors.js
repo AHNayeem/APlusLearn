@@ -66,10 +66,14 @@ export class ConflictError extends AppError {
   }
 }
 
-/** A business rule said no — distinct from a malformed request. */
+/**
+ * A business rule said no — distinct from a malformed request. `details`
+ * may carry `fieldErrors`, so a form can put the refusal next to the field
+ * the rule was about (a grade from the wrong province, say).
+ */
 export class BusinessRuleError extends AppError {
-  constructor(message, code = "RULE_VIOLATION") {
-    super(message, { status: 422, code });
+  constructor(message, code = "RULE_VIOLATION", details) {
+    super(message, { status: 422, code, details });
     this.name = "BusinessRuleError";
   }
 }

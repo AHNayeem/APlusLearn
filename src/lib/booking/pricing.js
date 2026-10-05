@@ -73,3 +73,45 @@ export function centsFromDollars(dollars) {
 export function dollarsFromCents(cents) {
   return (Number(cents) || 0) / 100;
 }
+
+/**
+ * The tutor's share of what the platform actually kept for a booking.
+ *
+ * `price.tutorEarningsCents` is the share of the *list* price. Once part of
+ * that price is refunded — a dispute settled for half, a late cancellation's
+ * partial refund, a no-show — the tutor is owed the same proportion of what
+ * remains, never the full share of money that went back to the family
+ * (audit S3/R16.4). Rounded down, so the platform never pays out a fraction
+ * of a cent it did not keep.
+ */
+export function netTutorEarnings(price, refundedCents = 0) {
+  const total = price?.totalCents ?? 0;
+  const share = price?.tutorEarningsCents ?? 0;
+  if (total <= 0 || share <= 0) return 0;
+  const kept = Math.min(total, Math.max(0, total - (refundedCents ?? 0)));
+  return Math.floor((share * kept) / total);
+}
+
+/**
+ * `netTutorEarnings` as a MongoDB aggregation expression over a booking
+ * document, so a report summed in the database applies the identical rule.
+ */
+export function netTutorEarningsExpression(prefix = "$") {
+  const total = `${prefix}price.totalCents`;
+  const share = `${prefix}price.tutorEarningsCents`;
+  const refunded = { $ifNull: [`${prefix}refundedCents`, 0] };
+  return {
+    $cond: [
+      { $gt: [total, 0] },
+      {
+        $floor: {
+          $divide: [
+            { $multiply: [share, { $min: [total, { $max: [0, { $subtract: [total, refunded] }] }] }] },
+            total,
+          ],
+        },
+      },
+      0,
+    ],
+  };
+}

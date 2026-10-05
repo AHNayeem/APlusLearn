@@ -3,7 +3,7 @@ import { CreditCard, Receipt } from "lucide-react";
 import { connectToDatabase } from "@/lib/db/connect";
 import { enforceRole } from "@/lib/auth/guards";
 import { LEARNER_ROLES, PAYMENT_STATUS, PAYMENT_STATUS_LABELS } from "@/constants";
-import { listPayments } from "@/services/payment.service";
+import { listPayments, paymentTotals } from "@/services/payment.service";
 import {
   Badge, Button, EmptyState, Pagination, StatCard, Table, THead, TH, TBody, TR, TD, TableEmpty,
 } from "@/components/ui";
@@ -26,15 +26,11 @@ export default async function PaymentsPage({ searchParams }) {
   await connectToDatabase();
 
   const { page = "1" } = await searchParams;
-  const { items, total, pageSize } = await listPayments(user, { page: Number(page) });
-
-  const totals = items.reduce(
-    (acc, p) => ({
-      paid: acc.paid + (p.status === PAYMENT_STATUS.PAID ? p.totalCents : 0),
-      refunded: acc.refunded + (p.refundedCents ?? 0),
-    }),
-    { paid: 0, refunded: 0 },
-  );
+  const [{ items, total, pageSize }, totals] = await Promise.all([
+    listPayments(user, { page: Number(page) }),
+    // Every payment of this account, summed in the database — not the page.
+    paymentTotals({ purchaserId: user.id }),
+  ]);
 
   return (
     <DashboardPage>
@@ -45,13 +41,13 @@ export default async function PaymentsPage({ searchParams }) {
 
       <div className="grid gap-4 sm:grid-cols-3">
         <StatCard
-          label="Paid this page"
-          value={formatMoney(totals.paid)}
+          label="Paid"
+          value={formatMoney(totals.collectedCents)}
           icon={<CreditCard className="size-5" />}
         />
         <StatCard
           label="Refunded"
-          value={formatMoney(totals.refunded)}
+          value={formatMoney(totals.refundedCents)}
           icon={<Receipt className="size-5" />}
         />
         <StatCard label="Transactions" value={total} />
