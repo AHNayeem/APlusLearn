@@ -18,7 +18,7 @@ import { useRealtimeCounts } from "@/components/realtime/RealtimeProvider";
  * One component drives the parent, tutor and admin sidebars — the items come
  * from `navForRole`, so adding a role means adding a nav array, not a layout.
  */
-export function DashboardNav({ items, user, badges: serverBadges = {}, branding }) {
+export function DashboardNav({ items, user, badges: serverBadges = {}, branding, bell }) {
   const pathname = usePathname();
   // Inside a realtime shell the two inbox badges follow the stream; every
   // other badge (the admin queues) is what the layout read.
@@ -91,8 +91,8 @@ export function DashboardNav({ items, user, badges: serverBadges = {}, branding 
   return (
     <>
       {/* Mobile top bar. Full width with the three slots pinned apart: the
-          toggle and the avatar never shrink, so only the wordmark gives way if
-          the viewport gets tight. */}
+          toggle, the bell and the avatar never shrink, so only the wordmark
+          gives way if the viewport gets tight. */}
       <header className="no-print sticky top-0 z-40 flex h-16 w-full min-w-0 items-center justify-between gap-2 border-b border-ink-200 bg-white/90 px-4 backdrop-blur-lg sm:gap-3 sm:px-6 lg:hidden">
         <button
           type="button"
@@ -106,7 +106,8 @@ export function DashboardNav({ items, user, badges: serverBadges = {}, branding 
         <div className="flex min-w-0 flex-1 justify-center overflow-hidden">
           <Logo mark branding={branding} />
         </div>
-        <div className="shrink-0">
+        <div className="flex shrink-0 items-center gap-1">
+          {bell}
           <UserMenu user={user} />
         </div>
       </header>

@@ -453,6 +453,7 @@ than dropped.
 | All 10 notification types | `NOTIFICATION_TYPES` | Implemented |
 | Lesson reminders | `sendBookingReminders()` emits `BOOKING_REMINDER` to both parties 24 hours and 1 hour before a confirmed lesson, driven by the `booking-reminders` scheduled job (§48). Each reminder is claimed on `Booking.remindersSent` with a conditional update before it is sent, so repeat runs cannot duplicate one | Implemented |
 | Unread count, centre, read/unread | `/notifications`, `unreadNotificationCount()` | Implemented |
+| Top-bar bell and unread preview | `NotificationBell` in the parent and tutor top bars: live unread badge, a popup of the latest unread (`GET /api/notifications?unreadOnly=true`), mark one / all read, "View all notifications" to the centre. Shown wherever the role's nav has a notification centre, so not in admin | Implemented |
 | Appears without a refresh | The realtime stream's `notification` / `notification.updated` / `counts` hints keep the centre, its read state across tabs and devices, and both sidebar badges current ([REALTIME.md](REALTIME.md)). In-app only — not OS push | Implemented |
 | Preferences | Per-channel toggles in Settings, beneath the platform-level switches in §26b | Implemented |
 | Email / SMS / push ready | `NOTIFICATION_CHANNELS` + `deliveredChannels`; email wired through Resend, SMS/push declared | Partial — SMS/push are Phase 2 |

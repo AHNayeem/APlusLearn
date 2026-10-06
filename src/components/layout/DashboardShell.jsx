@@ -1,6 +1,7 @@
 import { cn } from "@/lib/utils/cn";
 import { UserMenu } from "./UserMenu";
 import { DashboardNav } from "./DashboardNav";
+import { NotificationBell } from "./NotificationBell";
 import { RealtimeProvider } from "@/components/realtime/RealtimeProvider";
 
 /**
@@ -10,17 +11,26 @@ import { RealtimeProvider } from "@/components/realtime/RealtimeProvider";
  * the shell, and makes the message and notification badges live
  * (docs/REALTIME.md). The parent and tutor areas turn it on; the admin area
  * has neither an inbox nor a notification centre to keep current.
+ *
+ * The top-bar bell appears wherever the area's nav has a notification centre
+ * to point at — so a role without one gets no bell, with no flag to set.
  */
 export function DashboardShell({ items, user, badges, branding, realtime = false, children }) {
+  const notificationsHref = items.find((item) => item.badge === "unreadNotifications")?.href;
+  const bell = notificationsHref ? (
+    <NotificationBell href={notificationsHref} initialCount={badges?.unreadNotifications ?? 0} />
+  ) : null;
+
   const shell = (
     /* Column on small screens so the mobile top bar spans the full width; the
        sidebar only becomes a flex *row* sibling once it is actually visible at
        `lg`. Laying these out as a row below `lg` is what left a dead gutter on
        the left and squeezed the content column. */
     <div className="flex min-h-dvh w-full flex-col bg-canvas lg:flex-row">
-      <DashboardNav items={items} user={user} badges={badges} branding={branding} />
+      <DashboardNav items={items} user={user} badges={badges} branding={branding} bell={bell} />
       <div className="flex w-full min-w-0 max-w-full flex-1 flex-col">
         <header className="no-print sticky top-0 z-30 hidden h-[var(--header-height)] w-full items-center justify-end gap-4 border-b border-ink-200 bg-white/90 px-4 backdrop-blur-lg sm:px-6 lg:flex lg:px-8">
+          {bell}
           <UserMenu user={user} />
         </header>
         <main id="main" className="w-full min-w-0 max-w-full flex-1">
