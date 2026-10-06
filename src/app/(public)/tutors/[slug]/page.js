@@ -87,9 +87,21 @@ export default async function TutorProfilePage({ params }) {
           </div>
 
           <div className="lg:min-w-0">
+            {/* Keyed by account: the widget reads its selection once, so a
+                refresh after signing in as someone else must remount it rather
+                than keep the previous account's learner selected. */}
             <BookingWidget
+              key={user?.id ?? "signed-out"}
               tutor={tutor}
-              user={user && { id: user.id, role: user.role, firstName: user.firstName }}
+              user={
+                user && {
+                  id: user.id,
+                  role: user.role,
+                  firstName: user.firstName,
+                  email: user.email,
+                  emailVerified: Boolean(user.emailVerifiedAt),
+                }
+              }
               students={students.map((s) => ({
                 id: s.id,
                 firstName: s.firstName,

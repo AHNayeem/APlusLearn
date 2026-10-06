@@ -16,6 +16,7 @@ import {
   RECURRENCE_LABELS, DEFAULT_LESSON_DURATION,
 } from "@/constants";
 import { bookingWidgetHref, readBookingWidgetParams } from "@/lib/booking/widget-params";
+import { VerifyEmailBanner } from "@/components/auth/VerifyEmailBanner";
 import { AvailabilityPicker } from "./AvailabilityPicker";
 
 /**
@@ -192,6 +193,13 @@ export function BookingWidget({ tutor, user, students = [] }) {
     toast.success("Lesson reserved", "Complete payment to confirm it.");
     router.push(`/bookings/checkout/${result.payment.id}`);
     return result;
+  }, {
+    // A 403 means this page was drawn for an account that is not the one now
+    // signed in (another tab switched it) or one that cannot book yet. Re-render
+    // from the server so the widget shows what that account can actually do.
+    onError: (err) => {
+      if (err instanceof ApiError && err.status === 403) router.refresh();
+    },
   });
 
 
@@ -271,6 +279,17 @@ export function BookingWidget({ tutor, user, students = [] }) {
     );
   }
 
+  // --- Email not confirmed: booking is refused server-side (§9), so say so
+  //     before the form is filled in rather than after it is submitted ---
+  if (!user.emailVerified) {
+    return (
+      <BookingShell tutor={tutor} policyLine={policyLine}>
+        <VerifyEmailBanner email={user.email} className="mb-4" />
+        <AvailabilityPreview slots={slots} loading={slotsLoading} />
+      </BookingShell>
+    );
+  }
+
   // --- Parent with no children yet ---
   if (students.length === 0) {
     return (
@@ -302,8 +321,6 @@ export function BookingWidget({ tutor, user, students = [] }) {
         }}
         className="space-y-5"
       >
-        <FormErrorSummary error={error} fieldErrors={fieldErrors} />
-
         {requestId && (
           <p className="flex items-start gap-2 rounded-xl border border-brand-200 bg-brand-50/60 p-3 text-xs text-ink-700">
             <ClipboardList className="mt-0.5 size-3.5 shrink-0 text-brand-600" />
@@ -520,6 +537,10 @@ export function BookingWidget({ tutor, user, students = [] }) {
             recurrence={recurrence}
           />
         )}
+
+        {/* Beside the button, not atop a long form: a refusal from the server
+            must be visible where the person just clicked. */}
+        <FormErrorSummary error={error} fieldErrors={fieldErrors} />
 
         <Button type="submit" size="lg" fullWidth loading={pending} disabled={!canSubmit}>
           {pending

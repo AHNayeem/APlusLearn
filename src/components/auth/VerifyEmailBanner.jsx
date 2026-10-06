@@ -14,7 +14,7 @@ import { Button } from "@/components/ui";
  * end, so this says what is blocked and gives them the way out of it in one
  * click. It is a prompt, not a control: nothing here grants access.
  */
-export function VerifyEmailBanner({ email }) {
+export function VerifyEmailBanner({ email, className = "mx-4 mt-5 sm:mx-6 sm:mt-6 lg:mx-8 lg:mt-8" }) {
   const [sent, setSent] = useState(false);
 
   const { submit, pending, error } = useSubmit(async () => {
@@ -25,7 +25,7 @@ export function VerifyEmailBanner({ email }) {
   return (
     <div
       role="status"
-      className="no-print mx-4 mt-5 flex sm:mx-6 sm:mt-6 lg:mx-8 lg:mt-8 flex-col gap-3 rounded-xl border border-warning-200 bg-warning-50 p-4 sm:flex-row sm:items-center sm:justify-between"
+      className={`no-print ${className} flex flex-col gap-3 rounded-xl border border-warning-200 bg-warning-50 p-4 sm:flex-row sm:items-center sm:justify-between`}
     >
       <div className="flex gap-3">
         <MailWarning className="mt-0.5 size-5 shrink-0 text-warning-600" aria-hidden="true" />
