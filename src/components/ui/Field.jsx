@@ -2,6 +2,7 @@
 
 import { useId, useState } from "react";
 import { cn } from "@/lib/utils/cn";
+import { CONTROL_BASE, CONTROL_ERROR } from "./control-styles";
 
 /**
  * Form primitives.
@@ -53,15 +54,6 @@ export function Field({ label, htmlFor, hint, error, required, className, childr
     </div>
   );
 }
-
-const CONTROL_BASE =
-  "block w-full rounded-xl border-0 bg-white px-3.5 py-2.5 text-sm text-ink-800 shadow-xs " +
-  "ring-1 ring-inset ring-ink-200 placeholder:text-ink-400 " +
-  "transition-shadow duration-150 " +
-  "focus:ring-2 focus:ring-inset focus:ring-brand-500 focus:outline-none " +
-  "disabled:cursor-not-allowed disabled:bg-ink-50 disabled:text-ink-400";
-
-const CONTROL_ERROR = "ring-danger-400 focus:ring-danger-500";
 
 export function Input({ className, error, iconLeft, ...props }) {
   const control = (
@@ -157,36 +149,6 @@ export function Textarea({ className, error, rows = 4, ...props }) {
       className={cn(CONTROL_BASE, "resize-y leading-relaxed", error && CONTROL_ERROR, className)}
       {...props}
     />
-  );
-}
-
-export function Select({ className, error, children, ...props }) {
-  return (
-    <div className="relative">
-      <select
-        className={cn(
-          CONTROL_BASE,
-          "appearance-none pr-10",
-          error && CONTROL_ERROR,
-          className,
-        )}
-        {...props}
-      >
-        {children}
-      </select>
-      <svg
-        aria-hidden="true"
-        viewBox="0 0 20 20"
-        className="pointer-events-none absolute right-3 top-1/2 size-4 -translate-y-1/2 text-ink-400"
-        fill="currentColor"
-      >
-        <path
-          fillRule="evenodd"
-          d="M5.2 7.3a1 1 0 0 1 1.4 0L10 10.6l3.4-3.3a1 1 0 1 1 1.4 1.4l-4.1 4a1 1 0 0 1-1.4 0l-4.1-4a1 1 0 0 1 0-1.4Z"
-          clipRule="evenodd"
-        />
-      </svg>
-    </div>
   );
 }
 

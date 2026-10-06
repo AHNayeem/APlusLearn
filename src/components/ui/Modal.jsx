@@ -43,7 +43,7 @@ export function Modal({
       if (event.key !== "Tab" || !panelRef.current) return;
 
       const focusable = panelRef.current.querySelectorAll(
-        'a[href], button:not([disabled]), textarea, input, select, [tabindex]:not([tabindex="-1"])',
+        'a[href], button:not([disabled]), :is(textarea, input, select):not([tabindex="-1"]), [tabindex]:not([tabindex="-1"])',
       );
       if (!focusable.length) return;
 
@@ -72,7 +72,7 @@ export function Modal({
     const timer = window.setTimeout(() => {
       const target =
         panelRef.current?.querySelector(
-          'input, textarea, select, button:not([data-modal-close])',
+          ':is(input, textarea, select):not([tabindex="-1"]), button:not([data-modal-close])',
         ) ?? panelRef.current;
       target?.focus();
     }, 50);

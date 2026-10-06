@@ -6,7 +6,7 @@ import { ROLES, AUDIT_ACTIONS, ROLE_LABELS } from "@/constants";
 import { listAuditEvents, auditEntityTypes } from "@/services/audit.service";
 import { auditLogQuerySchema } from "@/lib/validation/admin";
 import {
-  Alert, Badge, Button, Card, CardBody, EmptyState, Pagination,
+  Alert, Badge, Button, Card, CardBody, EmptyState, Pagination, Select,
   Table, THead, TH, TBody, TR, TD,
 } from "@/components/ui";
 import { DashboardPage, PageHeader } from "@/components/layout/DashboardShell";
@@ -99,26 +99,26 @@ export default async function AdminAuditPage({ searchParams }) {
           >
             <label className="block">
               <span className="mb-1 block text-xs font-semibold text-ink-600">Action</span>
-              <select name="action" defaultValue={params.action ?? ""} className={FIELD}>
+              <Select name="action" defaultValue={params.action ?? ""} className="h-10">
                 <option value="">Any action</option>
                 {ACTIONS.map((action) => (
                   <option key={action} value={action}>
                     {actionLabel(action)}
                   </option>
                 ))}
-              </select>
+              </Select>
             </label>
 
             <label className="block">
               <span className="mb-1 block text-xs font-semibold text-ink-600">Entity type</span>
-              <select name="entityType" defaultValue={params.entityType ?? ""} className={FIELD}>
+              <Select name="entityType" defaultValue={params.entityType ?? ""} className="h-10">
                 <option value="">Any entity</option>
                 {entityTypes.map((type) => (
                   <option key={type} value={type}>
                     {type}
                   </option>
                 ))}
-              </select>
+              </Select>
             </label>
 
             <label className="block">

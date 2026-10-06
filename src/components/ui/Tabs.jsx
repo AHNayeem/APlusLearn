@@ -4,7 +4,7 @@ import { useState, useId } from "react";
 import Link from "next/link";
 import { motion } from "motion/react";
 import { cn } from "@/lib/utils/cn";
-import { Select } from "./Field";
+import { Select } from "./Select";
 
 /**
  * Tabs with a sliding indicator. Arrow keys move between tabs, as the WAI-ARIA

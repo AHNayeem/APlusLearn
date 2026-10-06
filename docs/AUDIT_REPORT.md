@@ -52,7 +52,7 @@ New regression suites: `scripts/integration/05-search.mjs`, `20-onboarding.mjs`,
 
 ### 0.5 Remaining
 
-Excluded external providers: R1.3 (the core journey's live payment and meeting steps), R4.2, R4.3 (Google/Apple sign-in), R4.12 and R24.11 (Twilio SMS), R15.8, R16.1, R16.2, R16.8 (Stripe charges, Connect, payout schedule), R24.10 (email delivery), R25.1 (real meeting rooms — production no longer fabricates links), R29.1 (real geocoding — the Toronto fallback defect is fixed), R30.5 (S3 storage — production fails closed). Outside the application: R30.1 (TLS at the host), R30.11 (legal review). Deliberately deferred, not MVP: R19.2 (extra matching factors), R23.4 (booking accept/decline step — bookings confirm by payment), R30.4 / R30.8 (admin 2FA and sub-roles), R31.2 (native-app auth and push), R6.3 (full Ontario catalogue — data loaded through Admin → Curriculum). Phase Two items keep their status (P2.2, P2.3, P2.4, P2.9); Phase Three was out of scope. The development database (`aplus_learn`) still holds legacy qualification values: run `MONGODB_URI=… node scripts/migrate-qualifications.mjs` once (it was only dry-run there).
+Excluded external providers: R1.3 (the core journey's live payment and meeting steps), R4.2, R4.3 (Google/Apple sign-in), R4.12 and R24.11 (Twilio SMS), R15.8, R16.1, R16.2, R16.8 (Stripe charges, Connect, payout schedule), R24.10 (email delivery), R25.1 (real meeting rooms — production no longer fabricates links), R29.1 (real geocoding — the Toronto fallback defect is fixed), R30.5 (S3 storage — production fails closed). Outside the application: R30.1 (TLS at the host), R30.11 (legal review). Deliberately deferred, not MVP: R19.2 (extra matching factors), R23.4 (booking accept/decline step — bookings confirm by payment), R30.4 / R30.8 (admin 2FA and sub-roles), R31.2 (native-app auth and push), R6.3 (full Ontario catalogue — data loaded through Admin → Curriculum). Phase Two items keep their status (P2.2, P2.3, P2.4, P2.9) — P2.4's application defect was fixed on 6 October and it now waits only on Twilio (§0.7); Phase Three was out of scope. The development database (`aplus_learn`) still holds legacy qualification values: run `MONGODB_URI=… node scripts/migrate-qualifications.mjs` once (it was only dry-run there).
 
 ### 0.6 Browser journeys covered
 
@@ -69,6 +69,35 @@ Excluded external providers: R1.3 (the core journey's live payment and meeting s
 | Forgot password, PWA install | `e2e`, `e2e:install` | Unchanged flows still pass |
 
 Tutor onboarding (Journey C) is exercised end to end at the service level by `20-onboarding` — registration → every wizard step through the same validation the routes use → document upload before a profile exists → submission → reviewer sees the document → identity-required approval → searchable → suspension removes from search. Its browser walk-through was not scripted.
+
+
+### 0.7 Remediation Update — 6 October 2026 (remaining partial items)
+
+Scope: only the items still 🟡 after §0.1, each re-read in the code it names. No full re-audit was done. The counts in §0.1 are unchanged: the one application defect left among them (P2.4) is fixed, but the item still depends on an excluded provider, so it stays 🟡 by the same rule applied to R25.1 and R29.1.
+
+| Item | Classification | Outcome |
+|---|---|---|
+| P2.4 SMS notifications | **Application defect** — the admin form told operators to point Twilio's status callback at `/api/webhooks/sms`, which passed every receipt to the STOP/START handler and discarded it; `SmsMessage.DELIVERED`/`deliveredAt` were never written | **Fixed.** `applySmsDeliveryStatus()` in `src/services/sms.service.js` matches the receipt on the provider message id and moves a row only forward (a late "sent" or a redelivered "delivered" changes nothing); undelivered/failed/canceled record `TWILIO_<code>`. The webhook routes a signed callback carrying `MessageStatus` and no `Body` to it, so replies still reach STOP/START. `/admin/sms` gains a Delivered tab and count, and shows a carrier error code. Still 🟡: Twilio itself is not configured. |
+| R1.3, R4.2, R4.3, R4.12, R15.8, R16.1, R16.2, R16.8, R24.10, R24.11, R25.1, R29.1, R30.5, P2.3 | Excluded external provider (Stripe charges/Connect payout schedule, Google/Apple, Twilio, Resend/SMTP, meeting providers, geocoding, S3, Google/Outlook calendar) | Unchanged. R16.8's `payouts.schedule.interval: "manual"` sits in the Stripe Connect adapter and can only be verified against a live Connect account. |
+| R30.1, R30.11 | Hosting (TLS) / legal review | Unchanged. |
+| R6.3 | Catalogue data an operator loads (Admin → Curriculum) | Unchanged; not a code defect. |
+| R19.2 / P2.2 | Needs product input | Unchanged. Teaching style has no data on either side (tutors have no style field; learners' `learningPreferences` is free text), and goals are free text, so scoring them needs a defined vocabulary the specification does not give. |
+| R23.4 | Deliberately deferred | Unchanged. An accept/decline step would change the confirm-on-payment booking model (§24). |
+| R30.4, R30.8 | Deliberately deferred | Unchanged. Admin 2FA and sub-roles; S7 and S11 (also listed on R30.4) were fixed on 5 October. |
+| R31.2 | Deliberately deferred (native apps, Phase Three) | Unchanged. |
+| P2.9 | Needs product input | Unchanged. Tutor-purchasable promotions need a price and a payment flow the specification does not define. |
+
+**Defect found by the regression run (not a listed item).** The hero course field reopened its suggestion list when results arrived after focus had moved on (Tab, or a fast fill), covering the Search button. It now closes when focus leaves the field and stays closed for late results; option clicks keep focus in the input (`src/components/search/HeroSearch.jsx`). Journey A asserts it.
+
+**Tests (6 October, isolated database `aplus_learn_e2e`, dev server with `PAYMENT_PROVIDER=development`):**
+
+| Gate | Result |
+|---|---|
+| Integration (`test:integrations`, all sections + area suites incl. new `70-phase-two.mjs`) | 2365 passed, 0 failed, 2 skipped (live MinIO; change-stream source) |
+| HTTP QA (`qa`) | 1197 passed, 0 failed |
+| Browser (`e2e:journeys`, incl. new section S and the hero check) | 42 passed, 0 failed |
+| Lint | Clean |
+| Build | Succeeds (same 4 Turbopack file-tracing warnings on the storage guard) |
 
 ---
 
@@ -844,7 +873,7 @@ Phase Two items are not MVP failures. Seven of eleven are implemented ahead of t
 | P2.1 | Advanced Post a Tutor Request workflow | ✅ | `request.service.js:278-1071` (create, edit + re-match, invite, interest, withdraw, respond, close, cancel, moderate, expiry warnings); `MatchComparison.jsx`; `src/app/admin/requests` | See R18.9–R18.10 for gaps that also affect the MVP. |
 | P2.2 | Advanced tutor matching | 🟡 | `src/lib/matching/weights.js:19-44` (10 weighted factors, admin-tunable via `MatchingSettings.jsx`); `score.js:51-82` | Rules-based scoring. Teaching style, student goals and repeat-booking rate are not used. |
 | P2.3 | Google/Outlook calendar synchronisation | 🟡 | Google (`calendar-provider.js:212`, freeBusy `:411`), Microsoft Graph (`:539`); `calendar.service.js:120-529`; busy time used in slots and booking; push on confirm/cancel/reschedule; encrypted tokens; `calendar-sync` job every 15 min | Code is complete for busy-pull and event-push. No provider webhooks (polling plus cache, so bookings can race a stale cache). No OAuth credentials configured, so only the development provider runs. Tested only with stubbed `fetch`. |
-| P2.4 | SMS notifications | 🟡 | Twilio adapter `sms-provider.js:98-107`; `sms.service.js:73-428` (opt-in, verified phone, STOP/START); `/api/webhooks/sms` (signed); `src/app/admin/sms` | Delivery receipts are never processed: the help text tells operators to point the status callback at `/api/webhooks/sms`, which ignores it (`src/constants/integrations.js:367-369`). Twilio not configured. |
+| P2.4 | SMS notifications | 🟡 | Twilio adapter `sms-provider.js:98-107`; `sms.service.js:73-428` (opt-in, verified phone, STOP/START); `/api/webhooks/sms` (signed); `src/app/admin/sms` | Application defect fixed (6 Oct): signed delivery receipts posted to `/api/webhooks/sms` are now applied by `applySmsDeliveryStatus()` (`sms.service.js`) — forward-only (QUEUED → SENT → DELIVERED/FAILED), replay-safe, carrier error code kept — and the admin log has a Delivered tab and count. Evidence: `scripts/integration/70-phase-two.mjs` (12 checks, real route handler, real signatures); `e2e-journeys` section S (admin stores Twilio config → signed receipt over HTTP → Delivered on `/admin/sms`). Remaining: no Twilio account is configured, so live delivery is unverified (excluded provider). |
 | P2.5 | Referral program | ✅ | `src/models/Referral.js`; `referral.service.js:64-469`; credit ledger `credit.service.js`; `/referrals`, `/tutor/referrals`, `/admin/referrals` | Reward amounts default to 0 (`config.js:536-543`) until an admin sets them. |
 | P2.6 | Tutor packages | ✅ | `src/models/Package.js`; `package.service.js:94-719`; `package-expiry` job | |
 | P2.7 | Group tutoring | ✅ | `src/models/GroupSession.js`; `group.service.js:79-897` (paid join, waitlist, attendance, settlement); `group-settlement` job | Can overlap 1:1 bookings (R14.4). |
@@ -1283,7 +1312,7 @@ The ordering follows the original **Development Priority** (§40) and **MVP** de
 
 ### Phase K — Phase Two completion (after MVP)
 
-P2.2 (goals, teaching style, repeat rate in matching) · P2.3 (live calendar credentials, provider webhooks) · P2.4 (SMS delivery receipts) · P2.9 (tutor-purchasable promotions). All depend on the MVP being stable.
+P2.2 (goals, teaching style, repeat rate in matching) · P2.3 (live calendar credentials, provider webhooks) · P2.4 (SMS delivery receipts — done 6 Oct; live Twilio remains) · P2.9 (tutor-purchasable promotions). All depend on the MVP being stable.
 
 ### Phase L — Phase Three
 
@@ -1627,7 +1656,7 @@ One row per audited item (353). Evidence is the primary location; full evidence 
 | P2.1 | Advanced Post a Tutor Request workflow | ✅ | `request.service.js:278-1071` | See R18.9–R18.10 for gaps that also affect the MVP. | — |
 | P2.2 | Advanced tutor matching | 🟡 | `src/lib/matching/weights.js:19-44` | Rules-based scoring. Teaching style, student goals and repeat-booking rate are not used. | Phase K — Phase Two |
 | P2.3 | Google/Outlook calendar synchronisation | 🟡 | `calendar-provider.js:212` | Code is complete for busy-pull and event-push. | Phase K — Phase Two |
-| P2.4 | SMS notifications | 🟡 | `sms-provider.js:98-107` | Delivery receipts are never processed: the help text tells operators to point the status callback at `/api/webhooks/sms`, which ignores it… | Phase K — Phase Two |
+| P2.4 | SMS notifications | 🟡 | `sms.service.js` `applySmsDeliveryStatus`; `src/app/api/webhooks/sms/route.js` | Delivery receipts now processed (fixed 6 Oct, see §0.7). Remaining: Twilio not configured — live delivery unverified (excluded provider). | See §0.7 |
 | P2.5 | Referral program | ✅ | `src/models/Referral.js` | Reward amounts default to 0 (`config.js:536-543`) until an admin sets them. | — |
 | P2.6 | Tutor packages | ✅ | `src/models/Package.js` | — | — |
 | P2.7 | Group tutoring | ✅ | `src/models/GroupSession.js` | Can overlap 1:1 bookings (R14.4). | — |

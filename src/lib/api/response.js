@@ -101,6 +101,18 @@ export function failFromError(error) {
     });
   }
 
+  // Stripe refused the request or could not be reached. Its message speaks to
+  // the operator — account settings, API policies, key permissions — so it is
+  // logged in full and the caller gets a plain one. A 400 from Stripe is a
+  // platform configuration problem, not something the caller sent.
+  if (typeof error?.type === "string" && error.type.startsWith("Stripe")) {
+    console.error(`[api] payment provider error (${error.type}):`, error.message);
+    return fail("Our payment provider is unavailable right now. Please try again later.", {
+      status: 502,
+      code: "PAYMENT_PROVIDER_UNAVAILABLE",
+    });
+  }
+
   console.error("[api] unhandled error:", error);
   return fail("Something went wrong on our end. Please try again.", {
     status: 500,

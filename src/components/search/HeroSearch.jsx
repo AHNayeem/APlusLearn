@@ -10,6 +10,7 @@ import { cn } from "@/lib/utils/cn";
 import { api, qs } from "@/lib/api/client";
 import { LESSON_MODES } from "@/constants";
 import { useProvinceCurriculum } from "@/hooks/useProvinceCurriculum";
+import { Select } from "@/components/ui";
 
 /**
  * The homepage hero search (§12).
@@ -255,16 +256,17 @@ function ConsoleSelect({ icon: Icon, label, children, ...props }) {
         >
           {label}
         </label>
-        <select
+        <Select
           id={id}
+          unstyled
           className={cn(
-            "-ml-0.5 w-full cursor-pointer appearance-none truncate rounded bg-transparent",
+            "-ml-0.5 truncate rounded bg-transparent",
             "pl-0.5 pr-1 text-sm font-semibold text-ink-900 outline-none",
           )}
           {...props}
         >
           {children}
-        </select>
+        </Select>
       </span>
       <ChevronDown
         className="size-4 shrink-0 text-ink-400 transition-colors group-hover:text-ink-600"
@@ -340,7 +342,9 @@ function CourseAutocomplete({ value, onChange, province, onPick }) {
         });
         const merged = [...(data.courses ?? []), ...(data.subjects ?? [])];
         setSuggestions({ items: merged, forKey: searchKey });
-        setDismissed(false);
+        // Suggestions that land after focus has moved on (Tab to the next
+        // field) stay closed rather than covering the rest of the form.
+        setDismissed(!containerRef.current?.contains(document.activeElement));
         setHighlighted(-1);
       } catch {
         // A failed suggestion is not worth interrupting the user for — they
@@ -378,7 +382,13 @@ function CourseAutocomplete({ value, onChange, province, onPick }) {
   };
 
   return (
-    <div ref={containerRef} className="relative">
+    <div
+      ref={containerRef}
+      className="relative"
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) setDismissed(true);
+      }}
+    >
       <Search
         className="pointer-events-none absolute left-5 top-1/2 size-5 -translate-y-1/2 text-brand-500"
         aria-hidden="true"
@@ -446,6 +456,8 @@ function CourseAutocomplete({ value, onChange, province, onPick }) {
                 role="option"
                 aria-selected={index === highlighted}
                 onMouseEnter={() => setHighlighted(index)}
+                // Keep focus in the input, so picking never reads as leaving.
+                onMouseDown={(event) => event.preventDefault()}
                 onClick={() => {
                   onPick(item);
                   setDismissed(true);

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { connectToDatabase } from "@/lib/db/connect";
-import { applySmsKeyword } from "@/services/sms.service";
+import { applySmsKeyword, applySmsDeliveryStatus } from "@/services/sms.service";
 import { verifyTwilioSignature } from "@/services/external/sms-provider";
 import { DEVELOPMENT } from "@/lib/config/env";
 import { resolveIntegrationConfig } from "@/lib/config/integrations";
@@ -8,7 +8,7 @@ import { INTEGRATION_MODULES } from "@/constants";
 import { envBaseUrl } from "@/lib/config/base-url";
 
 /**
- * Inbound text messages (§36, §41 Phase 2).
+ * Inbound text messages and delivery receipts (§36, §41 Phase 2).
  *
  * Carriers forward STOP and START verbatim, and honouring them is a legal
  * duty rather than a preference — so this endpoint exists, it is public, and
@@ -60,6 +60,19 @@ export async function POST(request) {
   if (!valid) {
     console.warn("[sms] refused an inbound callback with an unverifiable signature");
     return twiml("", 403);
+  }
+
+  // The same URL receives two kinds of callback: a reply a person texted
+  // (which carries a Body) and a delivery receipt for a message we sent
+  // (which carries a MessageStatus and no Body).
+  if (params.Body === undefined && params.MessageStatus) {
+    const receipt = await applySmsDeliveryStatus({
+      messageId: params.MessageSid,
+      status: params.MessageStatus,
+      errorCode: params.ErrorCode,
+    });
+    console.info(`[sms] delivery receipt ${params.MessageStatus}: ${receipt.action}`);
+    return twiml("");
   }
 
   const result = await applySmsKeyword({ from: params.From, body: params.Body });

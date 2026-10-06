@@ -457,6 +457,58 @@ export async function applySmsKeyword({ from, body }) {
   return { action: "IGNORED", accounts: 0 };
 }
 
+/**
+ * What a carrier's delivery status means for our record, and how far along it
+ * is. Twilio's intermediate states (accepted, queued, sending, scheduled) say
+ * nothing the row does not already say once the API has taken the message.
+ */
+const DELIVERY_RECEIPTS = {
+  sent: SMS_STATUS.SENT,
+  delivered: SMS_STATUS.DELIVERED,
+  read: SMS_STATUS.DELIVERED,
+  undelivered: SMS_STATUS.FAILED,
+  failed: SMS_STATUS.FAILED,
+  canceled: SMS_STATUS.FAILED,
+};
+
+/** The statuses a receipt may move a row *out of*, per status it moves it to. */
+const RECEIPT_FROM = {
+  [SMS_STATUS.SENT]: [SMS_STATUS.QUEUED],
+  [SMS_STATUS.DELIVERED]: [SMS_STATUS.QUEUED, SMS_STATUS.SENT],
+  [SMS_STATUS.FAILED]: [SMS_STATUS.QUEUED, SMS_STATUS.SENT],
+};
+
+/**
+ * Apply a delivery receipt a carrier posted to the status callback (§28).
+ *
+ * Receipts arrive out of order and are redelivered, so a row only ever moves
+ * forward: a late "sent" after "delivered" changes nothing, and neither does
+ * the same "delivered" twice. The match is on the provider's own message id,
+ * which only a message we handed to that provider can carry.
+ */
+export async function applySmsDeliveryStatus({ messageId, status, errorCode }) {
+  const providerStatus = String(status ?? "").trim().toLowerCase();
+  const next = DELIVERY_RECEIPTS[providerStatus];
+  if (!messageId || !next) return { action: "IGNORED" };
+
+  const now = new Date();
+  const patch = { status: next, providerStatus };
+  if (next === SMS_STATUS.DELIVERED) patch.deliveredAt = now;
+  if (next === SMS_STATUS.FAILED) {
+    patch.errorCode = errorCode ? `TWILIO_${errorCode}` : "SMS_UNDELIVERED";
+  }
+
+  const updated = await SmsMessage.findOneAndUpdate(
+    { providerMessageId: String(messageId), status: { $in: RECEIPT_FROM[next] } },
+    { $set: patch },
+    { returnDocument: "after" },
+  ).lean();
+  if (updated) return { action: "UPDATED", status: updated.status };
+
+  const known = await SmsMessage.exists({ providerMessageId: String(messageId) });
+  return { action: known ? "UNCHANGED" : "UNKNOWN" };
+}
+
 // --- Reads -----------------------------------------------------------------
 
 /** The delivery log, for the admin support view (§28). */

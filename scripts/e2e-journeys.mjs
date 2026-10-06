@@ -12,6 +12,9 @@
  *   F  Booking through the development payment form to a confirmed lesson.
  *   H  Administrator pages render for an administrator.
  *   M  A message carrying a phone number is stored with it removed.
+ *   S  A carrier's signed delivery receipt reaches the admin SMS log (P2.4).
+ *      Needs MONGODB_URI (the dev server's database) to stand in for the
+ *      carrier's "message accepted" step; skipped without it.
  *
  * Every assertion checks what a person sees, and where it matters the
  * server's answer too (through the same API the pages use). Fixture data the
@@ -19,6 +22,7 @@
  *
  *   bun run e2e:journeys      (QA_BASE_URL to point elsewhere)
  */
+import { createHmac, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -140,8 +144,22 @@ async function hydrated(page, selector) {
   );
 }
 
-const optionTexts = (page, selector) =>
-  page.locator(selector).locator("option").evaluateAll((options) => options.map((o) => o.textContent.trim()));
+// Every Select is a searchable combobox button; the native <select> beside it
+// stays the source of truth for its value and options.
+const nativeSelect = (trigger) => trigger.locator("xpath=following-sibling::select[1]");
+const optionTexts = (trigger) =>
+  nativeSelect(trigger).locator("option").evaluateAll((options) => options.map((o) => o.textContent.trim()));
+
+/** Picks an option the way a person does: open, type to search, click the match. */
+async function chooseOption(page, trigger, choice) {
+  const label = typeof choice === "string"
+    ? choice
+    : (await nativeSelect(trigger).locator(`option[value="${choice.value}"]`).first().textContent()).trim();
+  await trigger.click();
+  const listbox = page.locator(`[id="${await trigger.getAttribute("aria-controls")}"]`);
+  await page.keyboard.type(label);
+  await listbox.getByRole("option", { name: label, exact: true }).click();
+}
 
 async function main() {
   console.log(`\nAPlus Learn journeys → ${BASE}`);
@@ -166,15 +184,21 @@ async function main() {
     await heroProvince.waitFor({ timeout: 120_000 });
     await hydrated(anon, 'form[role="search"]');
     const tree = anon.waitForResponse((r) => r.url().includes("/api/curriculum/tree") && r.url().includes("province=BC"), { timeout: 120_000 });
-    await heroProvince.selectOption("BC");
+    await chooseOption(anon, heroProvince, { value: "BC" });
     const treeResponse = await (await tree).json();
     check("choosing British Columbia loads BC's own grades from the curriculum API",
       treeResponse.data?.province?.code === "BC" && treeResponse.data.grades.length > 0);
-    const gradeOptions = await optionTexts(anon, "select:near(:text('Grade'))").catch(() => []);
+    const gradeOptions = await optionTexts(anon.getByLabel("Grade", { exact: true }).first()).catch(() => []);
     check("the grade picker lists that province's grades", gradeOptions.some((t) => /Grade 12/.test(t)), gradeOptions.join("|"));
 
-    await anon.getByRole("combobox", { name: /Course, course code or subject/i }).fill("Math");
+    const courseBox = anon.getByRole("combobox", { name: /Course, course code or subject/i });
+    await courseBox.fill("Math");
     await anon.getByLabel("Where").fill("Vancouver");
+    // Suggestions for "Math" land after focus has moved on; they must not
+    // reopen over the rest of the form.
+    await anon.waitForTimeout(800);
+    check("course suggestions stay closed once focus has left the field",
+      (await courseBox.getAttribute("aria-expanded")) === "false");
     await anon.locator('form[role="search"] button[type="submit"]').first().click();
     await anon.waitForURL(/\/find-a-tutor\?/, NAV);
     const url = new URL(anon.url());
@@ -186,7 +210,7 @@ async function main() {
     check("'Math' is shown as the Mathematics subject, not a quoted course code", /Mathematics/.test(body));
     check("the BC tutor in Vancouver is in the results", /Olivia B\./.test(body));
     check("no result claims a distance from a guessed city", !/Toronto — [\d.]+ km away/.test(body));
-    await anon.getByLabel("Sort by").selectOption("DISTANCE");
+    await chooseOption(anon, anon.getByLabel("Sort by"), { value: "DISTANCE" });
     await anon.waitForURL(/sort=DISTANCE/, NAV);
     check("sorting writes the URL", new URL(anon.url()).searchParams.get("sort") === "DISTANCE");
     await anon.getByRole("link", { name: "View Profile" }).first().click();
@@ -255,9 +279,9 @@ async function main() {
     check("search recognises the new course code", nsSearch.data?.resolved?.queryKind === "COURSE_CODE" && nsSearch.data.resolved.course?.code === "NSPHY11");
 
     await anon.goto(`${BASE}/find-a-tutor?province=NS`, NAV);
-    const nsGrades = await optionTexts(anon, "#refine-grade");
+    const nsGrades = await optionTexts(anon.locator("#refine-grade"));
     check("the search page's grade picker shows only the new province's grade", nsGrades.includes("Grade 11") && !nsGrades.includes("Grade 12"), nsGrades.join("|"));
-    const refineProvinces = await anon.locator("#refine-province option").evaluateAll((o) => o.map((x) => ({ v: x.value, d: x.disabled })));
+    const refineProvinces = await nativeSelect(anon.locator("#refine-province")).locator("option").evaluateAll((o) => o.map((x) => ({ v: x.value, d: x.disabled })));
     check("…and offers the province as live, not 'coming soon'", refineProvinces.some((p) => p.v === "NS" && !p.d));
 
     // --- D ------------------------------------------------------------------
@@ -273,12 +297,13 @@ async function main() {
     const childName = `Mia${[...Date.now().toString(26).slice(-4)].map((c) => String.fromCharCode(97 + parseInt(c, 26))).join("")}`;
     const form = parentPage.getByRole("dialog");
     await parentPage.locator("#child-first:visible").fill(childName);
-    await parentPage.locator("#child-province:visible").selectOption("BC");
+    await chooseOption(parentPage, parentPage.locator("#child-province:visible"), { value: "BC" });
     await parentPage.waitForFunction(() => {
-      const select = [...document.querySelectorAll("#child-grade")].find((el) => el.offsetParent);
+      const trigger = [...document.querySelectorAll("#child-grade")].find((el) => el.offsetParent);
+      const select = trigger?.parentElement.querySelector("select");
       return select && [...select.options].some((o) => o.textContent.trim() === "Grade 12");
     }, null, { timeout: 60_000 });
-    await parentPage.locator("#child-grade:visible").selectOption({ label: "Grade 12" });
+    await chooseOption(parentPage, parentPage.locator("#child-grade:visible"), "Grade 12");
     await form.getByRole("textbox", { name: "Search courses" }).fill("Pre-calculus 12");
     await form.getByRole("button", { name: /MPREC12/ }).first().click();
     await form.getByRole("radio", { name: "Online", exact: true }).check();
@@ -357,6 +382,69 @@ async function main() {
       await adminPage.locator("main").getByText(text).first().waitFor({ timeout: 120_000 }).catch(() => {});
       const content = await adminPage.locator("main").innerText().catch(() => "");
       check(`${route} renders for an administrator`, response?.status() === 200 && !adminPage.url().includes("/login") && text.test(content), `${response?.status()} ${adminPage.url()}`);
+    }
+
+    // --- S ------------------------------------------------------------------
+    // Last on purpose: while a carrier is configured, nothing else should send.
+    section("S — a carrier's delivery receipt reaches the admin SMS log (P2.4)");
+    const existingSms = await admin("/api/admin/integrations/sms");
+    if (!process.env.MONGODB_URI) {
+      console.log("  ⊘ skipped — set MONGODB_URI to the dev server's database");
+    } else if (existingSms.data?.module?.source === "database") {
+      console.log("  ⊘ skipped — an SMS module is already stored; not overwriting an operator's configuration");
+    } else {
+      const { default: mongoose } = await import("mongoose");
+      const db = await mongoose.createConnection(process.env.MONGODB_URI).asPromise();
+      const tag = randomUUID().slice(0, 8);
+      const authToken = `e2e-token-${tag}`;
+      const accountSid = `AC${randomUUID().replace(/-/g, "")}`;
+      const sid = `SMe2e${tag}`;
+      cleanup.push(async () => {
+        await db.collection("smsmessages").deleteMany({ providerMessageId: sid });
+        await db.close();
+      });
+      cleanup.push(() => admin("/api/admin/integrations/sms", { method: "DELETE" }));
+
+      const configured = await admin("/api/admin/integrations/sms", {
+        method: "PATCH",
+        body: { enabled: true, provider: "twilio", config: { accountSid, fromNumber: "+16475550123" }, secrets: { authToken } },
+      });
+      check("an administrator stores a Twilio SMS configuration", configured.ok, JSON.stringify(configured.error));
+
+      // The carrier accepted a message: what the send path records with the sid.
+      const preview = `E2E receipt ${tag}`;
+      await db.collection("smsmessages").insertOne({
+        to: "+14165550123", kind: "NOTIFICATION", bodyPreview: preview, status: "SENT", provider: "TWILIO",
+        providerMessageId: sid, providerStatus: "queued", sentAt: new Date(), createdAt: new Date(), updatedAt: new Date(),
+      });
+
+      // Twilio signs the URL it was configured with — the deployment's public origin.
+      const signedUrl = `${(process.env.NEXT_PUBLIC_APP_URL || BASE).replace(/\/$/, "")}/api/webhooks/sms`;
+      const receipt = { MessageSid: sid, SmsSid: sid, MessageStatus: "delivered", AccountSid: accountSid, To: "+14165550123" };
+      const signature = (token) => createHmac("sha1", token)
+        .update(Object.keys(receipt).sort().reduce((acc, k) => acc + k + receipt[k], signedUrl))
+        .digest("base64");
+      const postReceipt = (token) => fetch(`${BASE}/api/webhooks/sms`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded", "X-Twilio-Signature": signature(token) },
+        body: new URLSearchParams(receipt).toString(),
+      });
+
+      const forged = await postReceipt("not-the-token");
+      check("a receipt signed with the wrong token is refused", forged.status === 403, `status ${forged.status}`);
+      const accepted = await postReceipt(authToken);
+      check("a signed delivery receipt is accepted by the webhook", accepted.status === 200, `status ${accepted.status}`);
+
+      const log = await admin("/api/admin/sms?status=DELIVERED");
+      check("the admin SMS API lists the message as delivered",
+        (log.data?.messages ?? []).some((m) => m.bodyPreview === preview && m.status === "DELIVERED"), JSON.stringify(log.error ?? log.data?.messages?.length));
+
+      const smsPage = await (await contextFor(admin)).newPage();
+      const response = await smsPage.goto(`${BASE}/admin/sms?status=DELIVERED`, NAV);
+      const row = smsPage.locator("tr", { hasText: preview });
+      await row.waitFor({ timeout: 120_000 }).catch(() => {});
+      check("the admin Text messages page shows it under Delivered",
+        response?.status() === 200 && /Delivered/.test(await row.innerText().catch(() => "")), smsPage.url());
     }
   } catch (error) {
     check("the journeys ran to completion", false, error.stack?.split("\n").slice(0, 3).join(" | "));

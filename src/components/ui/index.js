@@ -1,8 +1,9 @@
 export { Button, IconButton } from "./Button";
 export { Spinner } from "./Spinner";
 export {
-  Field, Input, PasswordInput, Textarea, Select, Checkbox, Radio, Switch, OptionCard, FormErrorSummary,
+  Field, Input, PasswordInput, Textarea, Checkbox, Radio, Switch, OptionCard, FormErrorSummary,
 } from "./Field";
+export { Select } from "./Select";
 export { Card, CardHeader, CardBody, CardFooter, StatCard } from "./Card";
 export { Badge, CountBadge } from "./Badge";
 export { Avatar, AvatarGroup } from "./Avatar";

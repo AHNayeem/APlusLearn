@@ -18,6 +18,7 @@ export const dynamic = "force-dynamic";
 const TABS = [
   { value: "", label: "All" },
   { value: SMS_STATUS.SENT, label: "Sent" },
+  { value: SMS_STATUS.DELIVERED, label: "Delivered" },
   { value: SMS_STATUS.FAILED, label: "Failed" },
   { value: SMS_STATUS.SKIPPED, label: "Not sent" },
   { value: SMS_STATUS.SIMULATED, label: "Simulated" },
@@ -68,8 +69,9 @@ export default async function AdminSmsPage({ searchParams }) {
         </Alert>
       )}
 
-      <div className="mb-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="mb-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
         <StatCard label="Sent (30 days)" value={counts[SMS_STATUS.SENT] ?? 0} />
+        <StatCard label="Delivered" value={counts[SMS_STATUS.DELIVERED] ?? 0} />
         <StatCard label="Failed" value={counts[SMS_STATUS.FAILED] ?? 0} />
         <StatCard label="Not sent" value={counts[SMS_STATUS.SKIPPED] ?? 0} />
         <StatCard label="Simulated" value={counts[SMS_STATUS.SIMULATED] ?? 0} />
@@ -129,8 +131,8 @@ export default async function AdminSmsPage({ searchParams }) {
                           {SMS_SKIP_REASON_LABELS[row.skipReason] ?? row.skipReason}
                         </p>
                       )}
-                      {row.errorMessage && (
-                        <p className="mt-1 text-[11px] text-danger-600">{row.errorMessage}</p>
+                      {(row.errorMessage || row.errorCode) && (
+                        <p className="mt-1 text-[11px] text-danger-600">{row.errorMessage ?? row.errorCode}</p>
                       )}
                     </TD>
                   </TR>

@@ -8,7 +8,7 @@ import { api } from "@/lib/api/client";
 import { useSubmit } from "@/hooks/useAsync";
 import {
   Alert, Badge, Button, Card, CardBody, CardHeader, Field, Input, Switch,
-  Textarea, FormErrorSummary, useToast,
+  Select, Textarea, FormErrorSummary, useToast,
 } from "@/components/ui";
 import { formatRate } from "@/lib/utils/format";
 import { LESSON_MODE_LABELS, QUALIFICATION_LABELS } from "@/constants";
@@ -218,18 +218,17 @@ export function ProfileEditor({ profile }) {
                 htmlFor="edit-radius"
                 hint="Families beyond this won't see you for in-person lessons."
               >
-                <select
+                <Select
                   id="edit-radius"
                   value={form.travelRadiusKm}
                   onChange={(e) => set("travelRadiusKm", Number(e.target.value))}
-                  className="block w-full rounded-xl border-0 bg-white px-3.5 py-2.5 text-sm ring-1 ring-inset ring-ink-200 focus:ring-2 focus:ring-brand-500 focus:outline-none"
                 >
                   {[5, 10, 15, 20, 25, 30, 40, 50].map((km) => (
                     <option key={km} value={km}>
                       Up to {km} km
                     </option>
                   ))}
-                </select>
+                </Select>
               </Field>
             )}
           </CardBody>

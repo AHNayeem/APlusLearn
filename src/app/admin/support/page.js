@@ -8,7 +8,7 @@ import {
 import { listSupportTickets } from "@/services/support.service";
 import { supportTicketQuerySchema } from "@/lib/validation/admin";
 import {
-  Alert, Badge, Button, EmptyState, LinkTabs, Pagination, Table, THead, TH, TBody, TR, TD,
+  Alert, Badge, Button, EmptyState, LinkTabs, Pagination, Select, Table, THead, TH, TBody, TR, TD,
 } from "@/components/ui";
 import { DashboardPage, PageHeader } from "@/components/layout/DashboardShell";
 import { formatRelative, truncate } from "@/lib/utils/format";
@@ -85,14 +85,14 @@ export default async function AdminSupportPage({ searchParams }) {
       <form method="get" action="/admin/support" className="mt-6 grid gap-3 sm:grid-cols-[14rem_1fr_auto]">
         {params.status && <input type="hidden" name="status" value={params.status} />}
         <label className="sr-only" htmlFor="support-topic-filter">Topic</label>
-        <select id="support-topic-filter" name="topic" defaultValue={params.topic ?? ""} className={FIELD}>
+        <Select id="support-topic-filter" name="topic" defaultValue={params.topic ?? ""} className="h-10">
           <option value="">All topics</option>
           {Object.values(SUPPORT_TOPICS).map((topic) => (
             <option key={topic} value={topic}>
               {SUPPORT_TOPIC_LABELS[topic]} ({counts.topic[topic] ?? 0})
             </option>
           ))}
-        </select>
+        </Select>
         <label className="sr-only" htmlFor="support-q">Search</label>
         <input
           id="support-q"
